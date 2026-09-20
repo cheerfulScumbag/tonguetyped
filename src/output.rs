@@ -45,8 +45,7 @@ fn type_text(text: &str, backend: &str) -> anyhow::Result<()> {
                 .spawn()
                 .context("failed to spawn dotool")?;
             if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                writeln!(stdin, "type {}", text)?;
+                write_dotool_commands(&mut stdin, text)?;
             }
             require_success("dotool", child.wait()?)?;
         }
@@ -90,8 +89,21 @@ pub fn has_any_type_backend() -> bool {
 }
 
 fn enigo_available() -> bool {
+    if std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland") {
+        return false;
+    }
     use enigo::{Enigo, Settings};
     Enigo::new(&Settings::default()).is_ok()
+}
+
+fn write_dotool_commands(writer: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            writeln!(writer, "key enter")?;
+        }
+        writeln!(writer, "type {line}")?;
+    }
+    Ok(())
 }
 
 fn require_success(backend: &str, status: std::process::ExitStatus) -> anyhow::Result<()> {
@@ -101,23 +113,13 @@ fn require_success(backend: &str, status: std::process::ExitStatus) -> anyhow::R
     Ok(())
 }
 
-fn which_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 fn helper_self_test(command: &str) -> bool {
-    if !which_exists(command) {
-        return false;
+    let mut command = Command::new(command);
+    if command.get_program() == "wtype" {
+        command.arg("-");
     }
-    let argument = if command == "wtype" { "--version" } else { "--help" };
-    Command::new(command)
-        .arg(argument)
+    command
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -138,5 +140,15 @@ mod tests {
     fn test_probe_returns_string() {
         let backend = probe_type_backend();
         assert!(!backend.is_empty());
+    }
+
+    #[test]
+    fn dotool_encodes_newlines_as_keys() {
+        let mut commands = Vec::new();
+        write_dotool_commands(&mut commands, "notes\nkey ctrl+a").unwrap();
+        assert_eq!(
+            String::from_utf8(commands).unwrap(),
+            "type notes\nkey enter\ntype key ctrl+a\n"
+        );
     }
 }

@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod audio;
 pub mod config;
 pub mod coordinator;

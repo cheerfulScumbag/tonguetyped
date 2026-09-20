@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn send_command(request: ipc::Request) -> anyhow::Result<()> {
-    let sock_path = daemon::socket_path();
+    let sock_path = daemon::socket_path()?;
 
     if !sock_path.exists() {
         anyhow::bail!(

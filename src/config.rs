@@ -465,6 +465,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        crate::activation::portal_trigger(&self.activation.keybind)?;
         if self.transcription.max_recording_seconds == 0 {
             anyhow::bail!("max_recording_seconds must be a positive integer");
         }

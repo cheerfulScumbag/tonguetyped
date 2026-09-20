@@ -47,6 +47,9 @@
 
         cargoLock = {
           lockFile = ./Cargo.lock;
+          outputHashes = {
+            "vad-rs-0.1.6" = "sha256-zQr/WVa9SBcPSTrm5DIKYBa3bPuYTQTDEzFkl7cjYTI=";
+          };
         };
 
         nativeBuildInputs = with pkgs; [

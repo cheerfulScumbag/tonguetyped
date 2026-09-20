@@ -92,7 +92,7 @@ impl CoordinatorRuntime for ProductionRuntime {
             crate::model::ModelCatalog::model_path(&config.model.selected),
         );
         engine.load()?;
-        let result = engine.transcribe(&samples);
+        let result = engine.transcribe(&samples, &config.transcription.language);
         engine.unload();
         result
     }
@@ -241,8 +241,28 @@ impl Coordinator {
 
     pub fn reload_config(&self, config: Config) -> anyhow::Result<()> {
         config.validate()?;
-        self.state.lock().unwrap().config = config;
+        let mut inner = self.state.lock().unwrap();
+        if inner.config.activation.keybind != config.activation.keybind {
+            anyhow::bail!("changing activation.keybind requires a daemon restart");
+        }
+        inner.config = config;
         Ok(())
+    }
+
+    pub async fn handle_activation(&self, pressed: bool) -> anyhow::Result<CoordinatorResponse> {
+        let mode = self.state.lock().unwrap().config.activation.mode.clone();
+        match (mode, pressed) {
+            (crate::config::ActivationMode::Toggle, true) => {
+                self.handle_command(CoordinatorCommand::Toggle).await
+            }
+            (crate::config::ActivationMode::Hold, true) => {
+                self.handle_command(CoordinatorCommand::HoldPress).await
+            }
+            (crate::config::ActivationMode::Hold, false) => {
+                self.handle_command(CoordinatorCommand::HoldRelease).await
+            }
+            (crate::config::ActivationMode::Toggle, false) => Ok(CoordinatorResponse::Ok),
+        }
     }
 
     fn cancel(&self) -> CoordinatorResponse {
@@ -370,6 +390,10 @@ impl Coordinator {
 
     pub fn get_last_result(&self) -> Option<(String, u64)> {
         self.last_result.lock().unwrap().clone()
+    }
+
+    pub fn activation_keybind(&self) -> String {
+        self.state.lock().unwrap().config.activation.keybind.clone()
     }
 }
 

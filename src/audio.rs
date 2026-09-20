@@ -1,5 +1,6 @@
 use anyhow::Context;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, Sample, SizedSample};
 use rubato::{FftFixedIn, Resampler};
 use std::sync::{Arc, Mutex};
 
@@ -74,12 +75,27 @@ impl AudioRecorder {
             .supported_input_configs()
             .context("failed to query supported configs")?;
         let config_range = supported_config
-            .filter(|config| config.sample_format() == cpal::SampleFormat::F32)
-            .max_by_key(|config| config.max_sample_rate())
-            .context("no supported f32 input config")?;
+            .filter(|config| {
+                matches!(
+                    config.sample_format(),
+                    cpal::SampleFormat::F32
+                        | cpal::SampleFormat::I16
+                        | cpal::SampleFormat::U16
+                )
+            })
+            .max_by_key(|config| {
+                let format_rank = match config.sample_format() {
+                    cpal::SampleFormat::F32 => 2,
+                    cpal::SampleFormat::I16 | cpal::SampleFormat::U16 => 1,
+                    _ => 0,
+                };
+                (format_rank, config.max_sample_rate())
+            })
+            .context("no supported input sample format")?;
 
         let channels = config_range.channels();
         let source_rate = config_range.max_sample_rate();
+        let sample_format = config_range.sample_format();
 
         let config = cpal::StreamConfig {
             channels,
@@ -88,8 +104,6 @@ impl AudioRecorder {
         };
 
         let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-        let buf_clone = buffer.clone();
-
         let resampler = if source_rate.0 != target_rate {
             let rs = FftFixedIn::<f32>::new(
                 source_rate.0 as usize,
@@ -103,46 +117,25 @@ impl AudioRecorder {
             None
         };
         let pending = Arc::new(Mutex::new(Vec::new()));
-        let pending_clone = pending.clone();
-
-        let err_fn = move |err: cpal::StreamError| {
-            tracing::error!("audio stream error: {}", err);
-            if let Some(callback) = &error_callback {
-                callback(err.to_string());
-            }
+        let capture = CaptureState {
+            channels: channels as usize,
+            buffer: buffer.clone(),
+            pending,
+            resampler,
+            level_callback,
         };
-
-        let stream = device.build_input_stream(
-            &config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mono = downmix_to_mono(data, channels as usize);
-                if let Some(callback) = &level_callback {
-                    callback(compute_rms(&mono));
-                }
-                if let Some(ref rs) = resampler {
-                    let mut rs_lock = rs.lock().unwrap();
-                    let mut pending = pending_clone.lock().unwrap();
-                    pending.extend_from_slice(&mono);
-                    let input_frames = rs_lock.input_frames_next();
-                    while pending.len() >= input_frames {
-                        let input: Vec<Vec<f32>> =
-                            vec![pending.drain(..input_frames).collect()];
-                        match rs_lock.process(&input, None) {
-                            Ok(output) => buf_clone.lock().unwrap().extend_from_slice(&output[0]),
-                            Err(error) => {
-                                tracing::error!("audio resampling failed: {}", error);
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    let mut buf = buf_clone.lock().unwrap();
-                    buf.extend_from_slice(&mono);
-                }
-            },
-            err_fn,
-            None,
-        )?;
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => {
+                build_input_stream::<f32>(&device, &config, capture, error_callback)?
+            }
+            cpal::SampleFormat::I16 => {
+                build_input_stream::<i16>(&device, &config, capture, error_callback)?
+            }
+            cpal::SampleFormat::U16 => {
+                build_input_stream::<u16>(&device, &config, capture, error_callback)?
+            }
+            format => anyhow::bail!("unsupported input sample format: {format}"),
+        };
 
         Ok(AudioRecorder {
             stream: Some(stream),
@@ -170,6 +163,68 @@ impl AudioRecorder {
     pub fn take_buffer(&self) -> Vec<f32> {
         let mut buf = self.buffer.lock().unwrap();
         std::mem::take(&mut *buf)
+    }
+}
+
+struct CaptureState {
+    channels: usize,
+    buffer: Arc<Mutex<Vec<f32>>>,
+    pending: Arc<Mutex<Vec<f32>>>,
+    resampler: Option<Arc<Mutex<FftFixedIn<f32>>>>,
+    level_callback: Option<LevelCallback>,
+}
+
+fn build_input_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    capture: CaptureState,
+    error_callback: Option<ErrorCallback>,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: SizedSample,
+    f32: FromSample<T>,
+{
+    device.build_input_stream(
+        config,
+        move |data: &[T], _| {
+            let converted: Vec<f32> = data.iter().copied().map(f32::from_sample).collect();
+            capture.process(&converted);
+        },
+        move |error| {
+            tracing::error!("audio stream error: {}", error);
+            if let Some(callback) = &error_callback {
+                callback(error.to_string());
+            }
+        },
+        None,
+    )
+}
+
+impl CaptureState {
+    fn process(&self, data: &[f32]) {
+        let mono = downmix_to_mono(data, self.channels);
+        if let Some(callback) = &self.level_callback {
+            callback(compute_rms(&mono));
+        }
+        if let Some(resampler) = &self.resampler {
+            let mut resampler = resampler.lock().unwrap();
+            let mut pending = self.pending.lock().unwrap();
+            pending.extend_from_slice(&mono);
+            let input_frames = resampler.input_frames_next();
+            while pending.len() >= input_frames {
+                let input: Vec<Vec<f32>> =
+                    vec![pending.drain(..input_frames).collect()];
+                match resampler.process(&input, None) {
+                    Ok(output) => self.buffer.lock().unwrap().extend_from_slice(&output[0]),
+                    Err(error) => {
+                        tracing::error!("audio resampling failed: {}", error);
+                        break;
+                    }
+                }
+            }
+        } else {
+            self.buffer.lock().unwrap().extend_from_slice(&mono);
+        }
     }
 }
 

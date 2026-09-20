@@ -3,7 +3,7 @@ pub const HANGOVER_FRAMES: usize = 1650;
 
 pub struct VadDetector {
     inner: vad_rs::Vad,
-    prefill_buffer: Vec<f32>,
+    prefill_buffer: VecDeque<f32>,
     hangover_counter: usize,
     speech_detected: bool,
     accepted: Vec<f32>,
@@ -15,7 +15,7 @@ impl VadDetector {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(VadDetector {
             inner,
-            prefill_buffer: Vec::with_capacity(PREFILL_SAMPLES),
+            prefill_buffer: VecDeque::with_capacity(PREFILL_SAMPLES),
             hangover_counter: 0,
             speech_detected: false,
             accepted: Vec::new(),
@@ -37,9 +37,9 @@ impl VadDetector {
 
         for &sample in samples {
             if !self.speech_detected {
-                self.prefill_buffer.push(sample);
+                self.prefill_buffer.push_back(sample);
                 if self.prefill_buffer.len() > PREFILL_SAMPLES {
-                    self.prefill_buffer.remove(0);
+                    self.prefill_buffer.pop_front();
                 }
             } else {
                 self.accepted.push(sample);
@@ -48,7 +48,7 @@ impl VadDetector {
 
         if is_speech && !self.speech_detected {
             self.speech_detected = true;
-            self.accepted.extend_from_slice(&self.prefill_buffer);
+            self.accepted.extend(self.prefill_buffer.iter().copied());
             self.prefill_buffer.clear();
         }
 
@@ -94,3 +94,4 @@ mod tests {
         assert!(vad.is_err());
     }
 }
+use std::collections::VecDeque;

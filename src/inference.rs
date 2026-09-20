@@ -47,13 +47,16 @@ impl InferenceEngine {
         self.loaded = false;
     }
 
-    pub fn transcribe(&mut self, audio: &[f32]) -> anyhow::Result<String> {
+    pub fn transcribe(&mut self, audio: &[f32], language: &str) -> anyhow::Result<String> {
         let engine = self
             .engine
             .as_mut()
             .context("engine not loaded")?;
 
-        let options = transcribe_rs::TranscribeOptions::default();
+        let options = transcribe_rs::TranscribeOptions {
+            language: (language != "auto").then(|| language.to_string()),
+            ..Default::default()
+        };
         let result = engine
             .transcribe(audio, &options)
             .context("transcription failed")?;

@@ -52,7 +52,9 @@ fn detect_desktop() -> String {
 }
 
 fn check_socket_health() -> String {
-    let runtime_dir = crate::daemon::runtime_dir();
+    let Ok(runtime_dir) = crate::daemon::runtime_dir() else {
+        return "runtime_unavailable".to_string();
+    };
     let sock = runtime_dir.join("control.sock");
     if sock.exists() {
         "existing".to_string()

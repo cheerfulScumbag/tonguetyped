@@ -33,7 +33,8 @@ pub struct DownloadManager {
 impl DownloadManager {
     pub fn new() -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(60))
             .build()?;
         Ok(DownloadManager { client })
     }

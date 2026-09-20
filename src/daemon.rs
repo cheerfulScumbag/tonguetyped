@@ -8,46 +8,43 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-pub fn runtime_dir() -> PathBuf {
-    let dir = if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime).join("tonguetyped")
-    } else {
-        PathBuf::from("/tmp/tonguetyped-runtime")
-    };
-    std::fs::create_dir_all(&dir).ok();
-    dir
+pub fn runtime_dir() -> anyhow::Result<PathBuf> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("XDG_RUNTIME_DIR is not set"))?;
+    let dir = PathBuf::from(runtime).join("tonguetyped");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
-pub fn socket_path() -> PathBuf {
-    runtime_dir().join("control.sock")
+pub fn socket_path() -> anyhow::Result<PathBuf> {
+    Ok(runtime_dir()?.join("control.sock"))
 }
 
-pub fn lock_path() -> PathBuf {
-    runtime_dir().join("daemon.lock")
+pub fn lock_path() -> anyhow::Result<PathBuf> {
+    Ok(runtime_dir()?.join("daemon.lock"))
 }
 
 pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
-    let sock_path = socket_path();
+    let sock_path = socket_path()?;
     let _lock = acquire_instance_lock(&sock_path)?;
-
-    let model_path = crate::model::ModelCatalog::model_path(&config.model.selected);
-    if !model_path.exists() {
-        crate::model::DownloadManager::new()?
-            .download(
-                &config.model.selected,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await?;
-    }
-    if config.transcription.vad_enabled {
-        crate::model::DownloadManager::new()?
-            .ensure_vad_model()
-            .await?;
-    }
+    prepare_dependencies(&config).await?;
 
     let listener = UnixListener::bind(&sock_path)?;
 
     let coordinator = Arc::new(Coordinator::new(config));
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let activation = coordinator.clone();
+    let keybind = activation.activation_keybind();
+    tokio::spawn(async move {
+        if let Err(error) = crate::activation::listen(activation, keybind, ready_tx).await {
+            tracing::error!("activation listener failed: {error}");
+        }
+    });
+    ready_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("activation listener exited during startup"))?
+        .map_err(anyhow::Error::msg)?;
 
     tracing::info!("daemon listening on {}", sock_path.display());
 
@@ -62,6 +59,22 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     }
 }
 
+async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
+    let download_manager = crate::model::DownloadManager::new()?;
+    if !crate::model::ModelCatalog::model_path(&config.model.selected).exists() {
+        download_manager
+            .download(
+                &config.model.selected,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await?;
+    }
+    if config.transcription.vad_enabled {
+        download_manager.ensure_vad_model().await?;
+    }
+    Ok(())
+}
+
 struct InstanceLock {
     path: PathBuf,
     _file: File,
@@ -74,7 +87,7 @@ impl Drop for InstanceLock {
 }
 
 fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<InstanceLock> {
-    let path = lock_path();
+    let path = lock_path()?;
     for _ in 0..2 {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -94,7 +107,7 @@ fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<Instance
                 let owner_alive = std::fs::read_to_string(&path)
                     .ok()
                     .and_then(|pid| pid.trim().parse::<u32>().ok())
-                    .is_none_or(|pid| std::path::Path::new("/proc").join(pid.to_string()).exists());
+                    .is_some_and(|pid| std::path::Path::new("/proc").join(pid.to_string()).exists());
                 if owner_alive {
                     anyhow::bail!("daemon is already running");
                 }
@@ -165,7 +178,7 @@ pub async fn dispatch(
         }
         Request::ReloadConfig => {
             match Config::reload() {
-                Ok(config) => match coordinator.reload_config(config) {
+                Ok(config) => match prepare_dependencies(&config).await.and_then(|()| coordinator.reload_config(config)) {
                     Ok(()) => return Response::Ok,
                     Err(e) => {
                         return Response::Error {
