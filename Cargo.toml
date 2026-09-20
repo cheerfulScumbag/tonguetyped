@@ -1,0 +1,35 @@
+[package]
+name = "tonguetyped"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tonguetyped"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+toml_edit = "0.22"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+cpal = "0.15"
+rubato = "0.15"
+hound = "3.5"
+transcribe-rs = { version = "0.3", features = ["whisper-cpp"] }
+vad-rs = { git = "https://github.com/cjpais/vad-rs", rev = "2a412ed858695b9251f3f5a1a20d95b59fa7c498" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+ratatui = "0.29"
+crossterm = "0.28"
+indicatif = "0.17"
+arboard = "3"
+reqwest = { version = "0.12", features = ["stream"] }
+sha2 = "0.10"
+directories = "5"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-util = "0.7"
+futures-util = "0.3"

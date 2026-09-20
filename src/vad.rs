@@ -1,0 +1,86 @@
+pub const PREFILL_SAMPLES: usize = 7200;
+pub const HANGOVER_FRAMES: usize = 1650;
+
+pub struct VadDetector {
+    inner: vad_rs::Vad,
+    sample_rate: usize,
+    prefill_buffer: Vec<f32>,
+    hangover_counter: usize,
+    speech_detected: bool,
+}
+
+impl VadDetector {
+    pub fn new(model_path: &str, sample_rate: usize) -> anyhow::Result<Self> {
+        let inner = vad_rs::Vad::new(model_path, sample_rate)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(VadDetector {
+            inner,
+            sample_rate,
+            prefill_buffer: Vec::with_capacity(PREFILL_SAMPLES),
+            hangover_counter: 0,
+            speech_detected: false,
+        })
+    }
+
+    pub fn reset(&mut self) {
+        self.inner.reset();
+        self.prefill_buffer.clear();
+        self.hangover_counter = 0;
+        self.speech_detected = false;
+    }
+
+    pub fn process(&mut self, samples: &[f32]) -> anyhow::Result<Option<Vec<f32>>> {
+        let mut output = Vec::new();
+
+        let result = self.inner.compute(samples)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let is_speech = result.prob > 0.5;
+
+        for &sample in samples {
+            if !self.speech_detected {
+                self.prefill_buffer.push(sample);
+                if self.prefill_buffer.len() > PREFILL_SAMPLES {
+                    self.prefill_buffer.remove(0);
+                }
+            } else {
+                output.push(sample);
+            }
+        }
+
+        if is_speech && !self.speech_detected {
+            self.speech_detected = true;
+            output.splice(0..0, self.prefill_buffer.iter().copied());
+            self.prefill_buffer.clear();
+        }
+
+        if is_speech {
+            self.hangover_counter = HANGOVER_FRAMES;
+        } else if self.speech_detected {
+            if self.hangover_counter > 0 {
+                self.hangover_counter -= 1;
+            }
+        }
+
+        if self.speech_detected && self.hangover_counter == 0 {
+            self.speech_detected = false;
+            return Ok(Some(output));
+        }
+
+        Ok(None)
+    }
+
+    pub fn is_speech_detected(&self) -> bool {
+        self.speech_detected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vad_creation_fails_without_model() {
+        let vad = VadDetector::new("nonexistent_model.onnx", 16000);
+        assert!(vad.is_err());
+    }
+}
