@@ -32,6 +32,7 @@ pub trait CoordinatorRuntime: Send + Sync {
         microphone: &str,
         max_duration: Duration,
         signal_rx: mpsc::Receiver<RecordingSignal>,
+        started: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) -> anyhow::Result<Vec<f32>>;
     fn transcribe(&self, samples: &[f32], config: &Config) -> anyhow::Result<String>;
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
@@ -45,18 +46,31 @@ impl CoordinatorRuntime for ProductionRuntime {
         microphone: &str,
         max_duration: Duration,
         signal_rx: mpsc::Receiver<RecordingSignal>,
+        started: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) -> anyhow::Result<Vec<f32>> {
         let (error_tx, error_rx) = mpsc::channel();
         let error_callback = Arc::new(move |message: String| {
             let _ = error_tx.send(message);
         });
-        let mut recorder = crate::audio::AudioRecorder::new(
+        let mut recorder = match crate::audio::AudioRecorder::new(
             microphone,
             16_000,
             Some(Arc::new(|level| tracing::trace!(level, "microphone level"))),
             Some(error_callback),
-        )?;
-        recorder.start()?;
+        ) {
+            Ok(recorder) => recorder,
+            Err(error) => {
+                let message = error.to_string();
+                let _ = started.send(Err(message.clone()));
+                anyhow::bail!(message);
+            }
+        };
+        if let Err(error) = recorder.start() {
+            let message = error.to_string();
+            let _ = started.send(Err(message.clone()));
+            anyhow::bail!(message);
+        }
+        let _ = started.send(Ok(()));
 
         let deadline = Instant::now() + max_duration;
         loop {
@@ -79,7 +93,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         }
 
         recorder.stop();
-        Ok(recorder.take_buffer())
+        recorder.take_buffer()
     }
 
     fn transcribe(&self, samples: &[f32], config: &Config) -> anyhow::Result<String> {
@@ -88,8 +102,11 @@ impl CoordinatorRuntime for ProductionRuntime {
         } else {
             samples.to_vec()
         };
+        if samples.is_empty() {
+            return Ok(String::new());
+        }
         let mut engine = crate::inference::InferenceEngine::new(
-            crate::model::ModelCatalog::model_path(&config.model.selected),
+            crate::model::ModelCatalog::model_path(&config.model.selected)?,
         );
         engine.load()?;
         let result = engine.transcribe(&samples, &config.transcription.language);
@@ -108,7 +125,9 @@ fn apply_vad(samples: &[f32]) -> anyhow::Result<Vec<f32>> {
     detector.reset();
     let mut speech = Vec::new();
     for chunk in samples.chunks(512) {
-        if let Some(segment) = detector.process(chunk)? {
+        let mut padded = [0.0; 512];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        if let Some(segment) = detector.process_window(&padded, chunk.len())? {
             speech.extend(segment);
         }
     }
@@ -127,6 +146,8 @@ struct CoordinatorStateInner {
     pending_release: Option<(u64, Instant)>,
     generation: u64,
     signal_tx: Option<mpsc::Sender<RecordingSignal>>,
+    active_hold: bool,
+    last_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -159,6 +180,8 @@ impl Coordinator {
                 pending_release: None,
                 generation: 0,
                 signal_tx: None,
+                active_hold: false,
+                last_error: None,
             })),
             output_lock: Arc::new(Mutex::new(())),
             last_result: Arc::new(Mutex::new(last_result)),
@@ -234,23 +257,39 @@ impl Coordinator {
         };
 
         if let Some((generation, signal_rx, config)) = start {
-            self.spawn_worker(generation, signal_rx, config);
+            let started = self.spawn_worker(generation, signal_rx, config);
+            match started.await {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => return Err(anyhow::anyhow!(message)),
+                Err(_) => return Err(anyhow::anyhow!("recording worker exited during startup")),
+            }
         }
         Ok(response)
     }
 
     pub fn reload_config(&self, config: Config) -> anyhow::Result<()> {
-        config.validate()?;
+        self.validate_reload(&config)?;
         let mut inner = self.state.lock().unwrap();
-        if inner.config.activation.keybind != config.activation.keybind {
-            anyhow::bail!("changing activation.keybind requires a daemon restart");
-        }
         inner.config = config;
         Ok(())
     }
 
+    pub fn validate_reload(&self, config: &Config) -> anyhow::Result<()> {
+        config.validate()?;
+        if self.state.lock().unwrap().config.activation.keybind != config.activation.keybind {
+            anyhow::bail!("changing activation.keybind requires a daemon restart");
+        }
+        Ok(())
+    }
+
     pub async fn handle_activation(&self, pressed: bool) -> anyhow::Result<CoordinatorResponse> {
-        let mode = self.state.lock().unwrap().config.activation.mode.clone();
+        let (mode, active_hold) = {
+            let inner = self.state.lock().unwrap();
+            (inner.config.activation.mode.clone(), inner.active_hold)
+        };
+        if !pressed && active_hold {
+            return self.handle_command(CoordinatorCommand::HoldRelease).await;
+        }
         match (mode, pressed) {
             (crate::config::ActivationMode::Toggle, true) => {
                 self.handle_command(CoordinatorCommand::Toggle).await
@@ -278,6 +317,7 @@ impl Coordinator {
                 inner.state = State::Idle;
                 inner.recording_start = None;
                 inner.pending_release = None;
+                inner.active_hold = false;
                 inner.last_action = Some(Instant::now());
                 CoordinatorResponse::Cancelled
             }
@@ -304,7 +344,8 @@ impl Coordinator {
         generation: u64,
         signal_rx: mpsc::Receiver<RecordingSignal>,
         config: Config,
-    ) {
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
             let duration = Duration::from_secs(config.transcription.max_recording_seconds);
@@ -312,11 +353,12 @@ impl Coordinator {
                 &config.audio.microphone,
                 duration,
                 signal_rx,
+                started_tx,
             ) {
                 Ok(samples) => samples,
                 Err(error) => {
                     tracing::error!("recording failed: {}", error);
-                    coordinator.settle(generation);
+                    coordinator.settle_error(generation, error.to_string());
                     return;
                 }
             };
@@ -340,6 +382,10 @@ impl Coordinator {
                 }
             };
             let trimmed = transcript.trim().to_string();
+            if trimmed.is_empty() {
+                coordinator.settle(generation);
+                return;
+            }
             let _output_guard = coordinator.output_lock.lock().unwrap();
             if coordinator.state.lock().unwrap().generation != generation {
                 return;
@@ -376,6 +422,7 @@ impl Coordinator {
             }
             coordinator.settle(generation);
         });
+        started_rx
     }
 
     fn settle(&self, generation: u64) {
@@ -385,6 +432,19 @@ impl Coordinator {
             inner.signal_tx = None;
             inner.recording_start = None;
             inner.pending_release = None;
+            inner.active_hold = false;
+        }
+    }
+
+    fn settle_error(&self, generation: u64, error: String) {
+        let mut inner = self.state.lock().unwrap();
+        if inner.generation == generation {
+            inner.state = State::Idle;
+            inner.signal_tx = None;
+            inner.recording_start = None;
+            inner.pending_release = None;
+            inner.active_hold = false;
+            inner.last_error = Some(error);
         }
     }
 
@@ -407,6 +467,7 @@ fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Reserve
     inner.last_action = Some(now);
     inner.pending_release = None;
     inner.signal_tx = Some(signal_tx);
+    inner.last_error = None;
     (inner.generation, signal_rx, inner.config.clone())
 }
 
@@ -418,6 +479,7 @@ fn hold_press(
     match inner.state {
         State::Idle => {
             *start = Some(reserve_recording(inner, now));
+            inner.active_hold = true;
             CoordinatorResponse::RecordingStarted
         }
         State::Recording => CoordinatorResponse::Ignored("already recording".into()),
@@ -434,6 +496,7 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
             inner.state = State::Processing;
             inner.recording_start = None;
             inner.pending_release = None;
+            inner.active_hold = false;
             inner.last_action = Some(now);
             CoordinatorResponse::RecordingStopped
         }
@@ -459,6 +522,7 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         recording: inner.state == State::Recording,
         processing: inner.state == State::Processing,
         activation_mode: inner.config.activation.mode.to_string(),
+        error: inner.last_error.clone(),
     }
 }
 
@@ -475,5 +539,6 @@ pub enum CoordinatorResponse {
         recording: bool,
         processing: bool,
         activation_mode: String,
+        error: Option<String>,
     },
 }

@@ -1,4 +1,5 @@
 use rusqlite::Connection;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,8 +10,18 @@ pub struct HistoryStore {
 impl HistoryStore {
     pub fn new(db_path: &PathBuf) -> anyhow::Result<Self> {
         if let Some(parent) = db_path.parent() {
+            let parent_existed = parent.exists();
             std::fs::create_dir_all(parent)?;
+            if !parent_existed {
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(db_path)?;
+        std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600))?;
         let conn = Connection::open(db_path)?;
         let store = HistoryStore { conn };
         store.init_schema()?;
@@ -51,9 +62,9 @@ impl HistoryStore {
     }
 
     pub fn get_last(&self) -> anyhow::Result<Option<(i64, String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, transcript_text, language FROM history ORDER BY timestamp DESC LIMIT 1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, transcript_text, language FROM history ORDER BY timestamp DESC LIMIT 1",
+        )?;
         let mut rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -128,12 +139,14 @@ pub fn history_db_path() -> PathBuf {
         .map(|b| b.data_dir().join("tonguetyped"))
         .unwrap_or_else(|| PathBuf::from(".local/share/tonguetyped"));
     std::fs::create_dir_all(&dir).ok();
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     dir.join("history.db")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_schema_creation() {
@@ -141,6 +154,10 @@ mod tests {
         let store = HistoryStore::new(&tmp).unwrap();
         let result = store.insert("test transcript", None, "auto");
         assert!(result.is_ok());
+        assert_eq!(
+            std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 

@@ -466,12 +466,19 @@ impl Config {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         crate::activation::portal_trigger(&self.activation.keybind)?;
+        crate::model::ModelCatalog::model_file_name(&self.model.selected)?;
         if self.transcription.max_recording_seconds == 0 {
             anyhow::bail!("max_recording_seconds must be a positive integer");
         }
 
         if self.output.method == OutputMethod::None && self.output.auto_submit {
             anyhow::bail!("auto_submit cannot be true when output.method is 'none'");
+        }
+        if !matches!(
+            self.output.typing_backend.as_str(),
+            "auto" | "wtype" | "enigo" | "dotool"
+        ) {
+            anyhow::bail!("unsupported typing backend: {}", self.output.typing_backend);
         }
 
         Ok(())
@@ -490,5 +497,16 @@ mod tests {
         assert_eq!(config.model.selected, "whisper-small-q5_1");
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
         assert_eq!(config.history.max_entries, 500);
+    }
+
+    #[test]
+    fn rejects_unsupported_runtime_selections() {
+        let mut config = Config::default();
+        config.output.typing_backend = "typo".to_string();
+        assert!(config.validate().is_err());
+
+        config.output.typing_backend = "auto".to_string();
+        config.model.selected = "../custom".to_string();
+        assert!(config.validate().is_err());
     }
 }

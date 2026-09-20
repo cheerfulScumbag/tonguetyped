@@ -11,8 +11,8 @@ pub struct VadDetector {
 
 impl VadDetector {
     pub fn new(model_path: &str, sample_rate: usize) -> anyhow::Result<Self> {
-        let inner = vad_rs::Vad::new(model_path, sample_rate)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let inner =
+            vad_rs::Vad::new(model_path, sample_rate).map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(VadDetector {
             inner,
             prefill_buffer: VecDeque::with_capacity(PREFILL_SAMPLES),
@@ -31,11 +31,21 @@ impl VadDetector {
     }
 
     pub fn process(&mut self, samples: &[f32]) -> anyhow::Result<Option<Vec<f32>>> {
-        let result = self.inner.compute(samples)
+        self.process_window(samples, samples.len())
+    }
+
+    pub fn process_window(
+        &mut self,
+        samples: &[f32],
+        valid_samples: usize,
+    ) -> anyhow::Result<Option<Vec<f32>>> {
+        let result = self
+            .inner
+            .compute(samples)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let is_speech = result.prob > 0.5;
 
-        for &sample in samples {
+        for &sample in &samples[..valid_samples] {
             if !self.speech_detected {
                 self.prefill_buffer.push_back(sample);
                 if self.prefill_buffer.len() > PREFILL_SAMPLES {

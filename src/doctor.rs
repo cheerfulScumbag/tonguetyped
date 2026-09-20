@@ -13,17 +13,21 @@ pub struct DoctorReport {
     pub output_method_available: bool,
 }
 
-pub fn run_doctor(model_name: &str) -> DoctorReport {
+pub fn run_doctor(config: &crate::config::Config) -> DoctorReport {
     let compositor = detect_compositor();
     let desktop = detect_desktop();
-    let audio_available = audio::check_audio_available();
+    let audio_available =
+        audio::AudioRecorder::new(&config.audio.microphone, 16_000, None, None).is_ok();
     let audio_devices = audio::list_devices()
         .unwrap_or_default()
         .into_iter()
         .map(|d| d.name)
         .collect();
-    let model_path = crate::model::ModelCatalog::model_path(model_name);
-    let model_ready = model_path.exists();
+    let model_path = crate::model::ModelCatalog::model_path(&config.model.selected)
+        .unwrap_or_else(|_| crate::inference::InferenceEngine::models_dir().join("invalid"));
+    let mut engine = crate::inference::InferenceEngine::new(model_path.clone());
+    let model_ready = engine.load().is_ok();
+    engine.unload();
     let socket_health = check_socket_health();
     let helpers_found = crate::output::list_available_backends();
     let output_method_available = crate::output::has_any_type_backend();
@@ -42,13 +46,11 @@ pub fn run_doctor(model_name: &str) -> DoctorReport {
 }
 
 fn detect_compositor() -> String {
-    std::env::var("XDG_SESSION_TYPE")
-        .unwrap_or_else(|_| "unknown".to_string())
+    std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn detect_desktop() -> String {
-    std::env::var("XDG_CURRENT_DESKTOP")
-        .unwrap_or_else(|_| "unknown".to_string())
+    std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn check_socket_health() -> String {

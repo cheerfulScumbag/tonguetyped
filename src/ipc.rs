@@ -8,11 +8,8 @@ pub enum Request {
     Toggle,
     Cancel,
     Status,
-    Doctor,
     ReloadConfig,
     GetLastResult,
-    HoldPress,
-    HoldRelease,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,14 +25,7 @@ pub enum Response {
         recording: bool,
         processing: bool,
         activation_mode: String,
-    },
-    DoctorResult {
-        compositor: String,
-        desktop: String,
-        audio_available: bool,
-        model_ready: bool,
-        socket_health: String,
-        helpers_found: Vec<String>,
+        error: Option<String>,
     },
     LastResult {
         text: String,

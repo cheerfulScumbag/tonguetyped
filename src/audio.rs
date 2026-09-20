@@ -44,6 +44,11 @@ pub type ErrorCallback = Arc<dyn Fn(String) + Send + Sync>;
 pub struct AudioRecorder {
     stream: Option<cpal::Stream>,
     buffer: Arc<Mutex<Vec<f32>>>,
+    pending: Arc<Mutex<Vec<f32>>>,
+    resampler: Option<Arc<Mutex<FftFixedIn<f32>>>>,
+    source_frames: Arc<Mutex<usize>>,
+    source_rate: u32,
+    target_rate: u32,
 }
 
 impl AudioRecorder {
@@ -78,9 +83,7 @@ impl AudioRecorder {
             .filter(|config| {
                 matches!(
                     config.sample_format(),
-                    cpal::SampleFormat::F32
-                        | cpal::SampleFormat::I16
-                        | cpal::SampleFormat::U16
+                    cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::U16
                 )
             })
             .max_by_key(|config| {
@@ -89,12 +92,19 @@ impl AudioRecorder {
                     cpal::SampleFormat::I16 | cpal::SampleFormat::U16 => 1,
                     _ => 0,
                 };
-                (format_rank, config.max_sample_rate())
+                let min = config.min_sample_rate().0;
+                let max = config.max_sample_rate().0;
+                let chosen = target_rate.clamp(min, max);
+                let distance = chosen.abs_diff(target_rate);
+                (std::cmp::Reverse(distance), chosen, format_rank)
             })
             .context("no supported input sample format")?;
 
         let channels = config_range.channels();
-        let source_rate = config_range.max_sample_rate();
+        let source_rate = cpal::SampleRate(target_rate.clamp(
+            config_range.min_sample_rate().0,
+            config_range.max_sample_rate().0,
+        ));
         let sample_format = config_range.sample_format();
 
         let config = cpal::StreamConfig {
@@ -105,23 +115,20 @@ impl AudioRecorder {
 
         let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let resampler = if source_rate.0 != target_rate {
-            let rs = FftFixedIn::<f32>::new(
-                source_rate.0 as usize,
-                target_rate as usize,
-                1024,
-                1,
-                1,
-            )?;
+            let rs =
+                FftFixedIn::<f32>::new(source_rate.0 as usize, target_rate as usize, 1024, 1, 1)?;
             Some(Arc::new(Mutex::new(rs)))
         } else {
             None
         };
         let pending = Arc::new(Mutex::new(Vec::new()));
+        let source_frames = Arc::new(Mutex::new(0));
         let capture = CaptureState {
             channels: channels as usize,
             buffer: buffer.clone(),
-            pending,
-            resampler,
+            pending: pending.clone(),
+            resampler: resampler.clone(),
+            source_frames: source_frames.clone(),
             level_callback,
         };
         let stream = match sample_format {
@@ -140,6 +147,11 @@ impl AudioRecorder {
         Ok(AudioRecorder {
             stream: Some(stream),
             buffer,
+            pending,
+            resampler,
+            source_frames,
+            source_rate: source_rate.0,
+            target_rate,
         })
     }
 
@@ -160,10 +172,51 @@ impl AudioRecorder {
         self.buffer.lock().unwrap().len()
     }
 
-    pub fn take_buffer(&self) -> Vec<f32> {
+    pub fn take_buffer(&mut self) -> anyhow::Result<Vec<f32>> {
+        if let Some(resampler) = &self.resampler {
+            let mut resampler = resampler.lock().unwrap();
+            let mut pending = self.pending.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap();
+            finish_resampling(
+                &mut resampler,
+                &mut pending,
+                &mut buffer,
+                *self.source_frames.lock().unwrap(),
+                self.source_rate,
+                self.target_rate,
+            )?;
+        }
         let mut buf = self.buffer.lock().unwrap();
-        std::mem::take(&mut *buf)
+        Ok(std::mem::take(&mut *buf))
     }
+}
+
+fn finish_resampling(
+    resampler: &mut FftFixedIn<f32>,
+    pending: &mut Vec<f32>,
+    buffer: &mut Vec<f32>,
+    source_frames: usize,
+    source_rate: u32,
+    target_rate: u32,
+) -> anyhow::Result<()> {
+    if !pending.is_empty() {
+        let input = vec![std::mem::take(pending)];
+        let output = resampler.process_partial(Some(&input), None)?;
+        buffer.extend_from_slice(&output[0]);
+    }
+    let expected =
+        (source_frames as u64 * target_rate as u64).div_ceil(source_rate as u64) as usize;
+    let delay = resampler.output_delay();
+    while buffer.len() < delay + expected {
+        let output = resampler.process_partial::<Vec<f32>>(None, None)?;
+        if output[0].is_empty() {
+            break;
+        }
+        buffer.extend_from_slice(&output[0]);
+    }
+    buffer.drain(..delay.min(buffer.len()));
+    buffer.truncate(expected);
+    Ok(())
 }
 
 struct CaptureState {
@@ -171,6 +224,7 @@ struct CaptureState {
     buffer: Arc<Mutex<Vec<f32>>>,
     pending: Arc<Mutex<Vec<f32>>>,
     resampler: Option<Arc<Mutex<FftFixedIn<f32>>>>,
+    source_frames: Arc<Mutex<usize>>,
     level_callback: Option<LevelCallback>,
 }
 
@@ -203,6 +257,7 @@ where
 impl CaptureState {
     fn process(&self, data: &[f32]) {
         let mono = downmix_to_mono(data, self.channels);
+        *self.source_frames.lock().unwrap() += mono.len();
         if let Some(callback) = &self.level_callback {
             callback(compute_rms(&mono));
         }
@@ -212,8 +267,7 @@ impl CaptureState {
             pending.extend_from_slice(&mono);
             let input_frames = resampler.input_frames_next();
             while pending.len() >= input_frames {
-                let input: Vec<Vec<f32>> =
-                    vec![pending.drain(..input_frames).collect()];
+                let input: Vec<Vec<f32>> = vec![pending.drain(..input_frames).collect()];
                 match resampler.process(&input, None) {
                     Ok(output) => self.buffer.lock().unwrap().extend_from_slice(&output[0]),
                     Err(error) => {
@@ -266,9 +320,7 @@ mod tests {
 
     #[test]
     fn test_rms_signal() {
-        let samples: Vec<f32> = (0..100)
-            .map(|i| (i as f32 / 100.0) * 2.0 - 1.0)
-            .collect();
+        let samples: Vec<f32> = (0..100).map(|i| (i as f32 / 100.0) * 2.0 - 1.0).collect();
         let rms = compute_rms(&samples);
         assert!(rms > 0.0);
         assert!(rms <= 1.0);
@@ -277,5 +329,25 @@ mod tests {
     #[test]
     fn downmixes_interleaved_channels() {
         assert_eq!(downmix_to_mono(&[1.0, -1.0, 0.5, 0.5], 2), [0.0, 0.5]);
+    }
+
+    #[test]
+    fn finalizes_short_resampled_recording() {
+        let mut resampler = FftFixedIn::<f32>::new(48_000, 16_000, 1024, 1, 1).unwrap();
+        let mut pending = vec![1.0; 480];
+        let mut output = Vec::new();
+
+        finish_resampling(
+            &mut resampler,
+            &mut pending,
+            &mut output,
+            480,
+            48_000,
+            16_000,
+        )
+        .unwrap();
+
+        assert_eq!(output.len(), 160);
+        assert!(output.iter().any(|sample| sample.abs() > f32::EPSILON));
     }
 }

@@ -1,28 +1,30 @@
 use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
 pub struct ModelCatalog;
 
 impl ModelCatalog {
-    pub fn model_file_name(model_name: &str) -> String {
+    pub fn model_file_name(model_name: &str) -> anyhow::Result<&'static str> {
         match model_name {
-            "whisper-small-q5_1" => "ggml-small-q5_1.bin".to_string(),
-            name => format!("{}.bin", name),
+            "whisper-small-q5_1" => Ok("ggml-small-q5_1.bin"),
+            _ => anyhow::bail!("unsupported model: {model_name}"),
         }
     }
 
-    pub fn model_url(model_name: &str) -> String {
-        format!(
+    pub fn model_url(model_name: &str) -> anyhow::Result<String> {
+        Ok(format!(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-            Self::model_file_name(model_name)
-        )
+            Self::model_file_name(model_name)?
+        ))
     }
 
-    pub fn model_path(model_name: &str) -> PathBuf {
-        crate::inference::InferenceEngine::models_dir().join(Self::model_file_name(model_name))
+    pub fn model_path(model_name: &str) -> anyhow::Result<PathBuf> {
+        Ok(
+            crate::inference::InferenceEngine::models_dir()
+                .join(Self::model_file_name(model_name)?),
+        )
     }
 }
 
@@ -44,8 +46,8 @@ impl DownloadManager {
         model_name: &str,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<PathBuf> {
-        let url = ModelCatalog::model_url(model_name);
-        let dest_path = ModelCatalog::model_path(model_name);
+        let url = ModelCatalog::model_url(model_name)?;
+        let dest_path = ModelCatalog::model_path(model_name)?;
         let tmp_path = dest_path.with_extension("download");
 
         if dest_path.exists() {
@@ -105,20 +107,6 @@ impl DownloadManager {
             .context("failed to rename downloaded file")?;
 
         Ok(dest_path)
-    }
-
-    pub async fn verify_sha256(
-        &self,
-        path: &PathBuf,
-        _expected_hash: &str,
-    ) -> anyhow::Result<bool> {
-        let data = tokio::fs::read(path)
-            .await
-            .context("failed to read file for verification")?;
-        let mut hasher = Sha256::new();
-        hasher.update(&data);
-        let hash = format!("{:x}", hasher.finalize());
-        Ok(hash == _expected_hash)
     }
 
     pub async fn ensure_vad_model(&self) -> anyhow::Result<PathBuf> {

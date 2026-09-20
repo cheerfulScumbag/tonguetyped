@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use tonguetyped::{config, daemon, doctor, ipc};
 use tokio::io::AsyncWriteExt;
+use tonguetyped::{config, daemon, doctor, ipc};
 
 #[derive(Parser)]
 #[command(name = "tonguetyped", version, about = "Linux dictation application")]
@@ -27,10 +27,6 @@ enum Commands {
     Reload,
     /// Return the most recent transcription
     LastResult,
-    /// Signal a configured hold key press
-    HoldPress,
-    /// Signal a configured hold key release
-    HoldRelease,
     /// Run system diagnostics
     Doctor {
         /// Run explicit typing test
@@ -76,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
                 doctor::typing_test(&config)?;
             } else {
                 let config = config::Config::load().unwrap_or_default();
-                let report = doctor::run_doctor(&config.model.selected);
+                let report = doctor::run_doctor(&config);
                 println!("compositor:     {}", report.compositor);
                 println!("desktop:        {}", report.desktop);
                 println!(
@@ -118,8 +114,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Reload => send_command(ipc::Request::ReloadConfig).await?,
         Commands::LastResult => send_command(ipc::Request::GetLastResult).await?,
-        Commands::HoldPress => send_command(ipc::Request::HoldPress).await?,
-        Commands::HoldRelease => send_command(ipc::Request::HoldRelease).await?,
     }
 
     Ok(())
@@ -161,47 +155,15 @@ async fn send_command(request: ipc::Request) -> anyhow::Result<()> {
             recording,
             processing,
             activation_mode,
+            error,
         } => {
             println!("state:            {}", state);
             println!("recording:        {}", recording);
             println!("processing:       {}", processing);
             println!("activation mode:  {}", activation_mode);
-        }
-        ipc::Response::DoctorResult {
-            compositor,
-            desktop,
-            audio_available,
-            model_ready,
-            socket_health,
-            helpers_found,
-        } => {
-            println!("compositor:     {}", compositor);
-            println!("desktop:        {}", desktop);
-            println!(
-                "audio:          {}",
-                if audio_available {
-                    "available"
-                } else {
-                    "unavailable"
-                }
-            );
-            println!(
-                "model:          {}",
-                if model_ready {
-                    "ready"
-                } else {
-                    "not found"
-                }
-            );
-            println!("socket:         {}", socket_health);
-            println!(
-                "helpers:        {}",
-                if helpers_found.is_empty() {
-                    "none".to_string()
-                } else {
-                    helpers_found.join(", ")
-                }
-            );
+            if let Some(error) = error {
+                println!("last error:       {}", error);
+            }
         }
         ipc::Response::LastResult { text, timestamp } => {
             println!("result:   {}", text);

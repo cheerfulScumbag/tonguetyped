@@ -1,15 +1,16 @@
 use crate::coordinator::Coordinator;
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use std::sync::Arc;
 
 const SHORTCUT_ID: &str = "activation";
 
 pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
     let mut parts: Vec<&str> = keybind.split('+').map(str::trim).collect();
-    let key = parts.pop().filter(|key| !key.is_empty()).ok_or_else(|| {
-        anyhow::anyhow!("activation.keybind must contain modifiers and a key")
-    })?;
+    let key = parts
+        .pop()
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("activation.keybind must contain modifiers and a key"))?;
     if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
         anyhow::bail!("activation.keybind must contain modifiers and a key");
     }
@@ -28,7 +29,11 @@ pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
         }
         modifiers.push(modifier);
     }
-    Ok(format!("{}+{}", modifiers.join("+"), key.to_ascii_lowercase()))
+    Ok(format!(
+        "{}+{}",
+        modifiers.join("+"),
+        key.to_ascii_lowercase()
+    ))
 }
 
 pub async fn listen(
@@ -66,16 +71,27 @@ pub async fn listen(
     let mut deactivated = portal.receive_deactivated().await?;
     let _ = ready.send(Ok(()));
     loop {
+        let mut events = Vec::new();
         let event = tokio::select! {
-            event = activated.next() => event.map(|event| (event.shortcut_id() == SHORTCUT_ID, true)),
-            event = deactivated.next() => event.map(|event| (event.shortcut_id() == SHORTCUT_ID, false)),
+            event = activated.next() => event.map(|event| (event.timestamp(), event.shortcut_id() == SHORTCUT_ID, true)),
+            event = deactivated.next() => event.map(|event| (event.timestamp(), event.shortcut_id() == SHORTCUT_ID, false)),
         };
-        let Some((is_activation, pressed)) = event else {
+        let Some(event) = event else {
             anyhow::bail!("global shortcuts event stream closed");
         };
-        if is_activation {
-            if let Err(error) = coordinator.handle_activation(pressed).await {
-                tracing::error!("activation command failed: {error}");
+        events.push(event);
+        while let Some(Some(event)) = activated.next().now_or_never() {
+            events.push((event.timestamp(), event.shortcut_id() == SHORTCUT_ID, true));
+        }
+        while let Some(Some(event)) = deactivated.next().now_or_never() {
+            events.push((event.timestamp(), event.shortcut_id() == SHORTCUT_ID, false));
+        }
+        events.sort_by_key(|event| (event.0, !event.2));
+        for (_, is_activation, pressed) in events {
+            if is_activation {
+                if let Err(error) = coordinator.handle_activation(pressed).await {
+                    tracing::error!("activation command failed: {error}");
+                }
             }
         }
     }
@@ -88,7 +104,10 @@ mod tests {
     #[test]
     fn normalizes_configured_keybind_for_portal() {
         assert_eq!(portal_trigger("Super+O").unwrap(), "LOGO+o");
-        assert_eq!(portal_trigger("Ctrl+Shift+Space").unwrap(), "CTRL+SHIFT+space");
+        assert_eq!(
+            portal_trigger("Ctrl+Shift+Space").unwrap(),
+            "CTRL+SHIFT+space"
+        );
         assert!(portal_trigger("Super+Super+O").is_err());
         assert!(portal_trigger("Hyper+O").is_err());
     }

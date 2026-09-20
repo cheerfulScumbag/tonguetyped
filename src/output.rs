@@ -5,7 +5,10 @@ use std::process::Command;
 pub fn output_text(text: &str, method: &OutputMethod, backend: &str) -> anyhow::Result<()> {
     match method {
         OutputMethod::None => {
-            tracing::debug!("output method 'none': skipping output of {} chars", text.len());
+            tracing::debug!(
+                "output method 'none': skipping output of {} chars",
+                text.len()
+            );
         }
         OutputMethod::Type => {
             type_text(text, backend)?;

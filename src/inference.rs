@@ -28,14 +28,11 @@ impl InferenceEngine {
         }
 
         if !self.model_path.exists() {
-            anyhow::bail!(
-                "model file not found: {}",
-                self.model_path.display()
-            );
+            anyhow::bail!("model file not found: {}", self.model_path.display());
         }
 
-        let engine = WhisperEngine::load(&self.model_path)
-            .context("failed to create WhisperEngine")?;
+        let engine =
+            WhisperEngine::load(&self.model_path).context("failed to create WhisperEngine")?;
 
         self.engine = Some(engine);
         self.loaded = true;
@@ -48,10 +45,7 @@ impl InferenceEngine {
     }
 
     pub fn transcribe(&mut self, audio: &[f32], language: &str) -> anyhow::Result<String> {
-        let engine = self
-            .engine
-            .as_mut()
-            .context("engine not loaded")?;
+        let engine = self.engine.as_mut().context("engine not loaded")?;
 
         let options = transcribe_rs::TranscribeOptions {
             language: (language != "auto").then(|| language.to_string()),
@@ -65,7 +59,7 @@ impl InferenceEngine {
     }
 
     pub fn check_model_available(model_name: &str) -> bool {
-        crate::model::ModelCatalog::model_path(model_name).exists()
+        crate::model::ModelCatalog::model_path(model_name).is_ok_and(|path| path.exists())
     }
 
     pub fn models_dir() -> PathBuf {

@@ -30,13 +30,11 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     let _lock = acquire_instance_lock(&sock_path)?;
     prepare_dependencies(&config).await?;
 
-    let listener = UnixListener::bind(&sock_path)?;
-
     let coordinator = Arc::new(Coordinator::new(config));
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let activation = coordinator.clone();
     let keybind = activation.activation_keybind();
-    tokio::spawn(async move {
+    let mut activation_task = tokio::spawn(async move {
         if let Err(error) = crate::activation::listen(activation, keybind, ready_tx).await {
             tracing::error!("activation listener failed: {error}");
         }
@@ -45,11 +43,20 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
         .await
         .map_err(|_| anyhow::anyhow!("activation listener exited during startup"))?
         .map_err(anyhow::Error::msg)?;
+    let listener = UnixListener::bind(&sock_path)?;
 
     tracing::info!("daemon listening on {}", sock_path.display());
 
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let (stream, _addr) = tokio::select! {
+            result = listener.accept() => result?,
+            result = &mut activation_task => {
+                match result {
+                    Ok(()) => anyhow::bail!("activation listener exited"),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        };
         let coord = coordinator.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, coord).await {
@@ -61,7 +68,7 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
 
 async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
     let download_manager = crate::model::DownloadManager::new()?;
-    if !crate::model::ModelCatalog::model_path(&config.model.selected).exists() {
+    if !crate::model::ModelCatalog::model_path(&config.model.selected)?.exists() {
         download_manager
             .download(
                 &config.model.selected,
@@ -91,7 +98,10 @@ fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<Instance
     for _ in 0..2 {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
-                writeln!(file, "{}", std::process::id())?;
+                let pid = std::process::id();
+                let started = process_start_time(pid)
+                    .ok_or_else(|| anyhow::anyhow!("failed to read daemon process identity"))?;
+                writeln!(file, "{pid} {started}")?;
                 file.sync_all()?;
                 if sock_path.exists() {
                     if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
@@ -104,10 +114,13 @@ fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<Instance
                 return Ok(InstanceLock { path, _file: file });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let owner_alive = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|pid| pid.trim().parse::<u32>().ok())
-                    .is_some_and(|pid| std::path::Path::new("/proc").join(pid.to_string()).exists());
+                let owner_alive = std::fs::read_to_string(&path).ok().is_some_and(|owner| {
+                    let mut fields = owner.split_whitespace();
+                    let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
+                    let started = fields.next().and_then(|value| value.parse::<u64>().ok());
+                    pid.zip(started)
+                        .is_some_and(|(pid, started)| process_start_time(pid) == Some(started))
+                });
                 if owner_alive {
                     anyhow::bail!("daemon is already running");
                 }
@@ -117,6 +130,12 @@ fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<Instance
         }
     }
     anyhow::bail!("failed to acquire daemon lock")
+}
+
+fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat.rsplit_once(") ")?.1.split_whitespace();
+    fields.skip(19).next()?.parse().ok()
 }
 
 async fn handle_connection(
@@ -154,31 +173,22 @@ async fn handle_connection(
     Ok(())
 }
 
-pub async fn dispatch(
-    coordinator: &Arc<Coordinator>,
-    request: Request,
-) -> Response {
+pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Response {
     let cmd = match request {
         Request::Start => CoordinatorCommand::Start,
         Request::Stop => CoordinatorCommand::Stop,
         Request::Toggle => CoordinatorCommand::Toggle,
         Request::Cancel => CoordinatorCommand::Cancel,
         Request::Status => CoordinatorCommand::GetStatus,
-        Request::Doctor => {
-            let config = Config::load().unwrap_or_default();
-            let report = crate::doctor::run_doctor(&config.model.selected);
-            return Response::DoctorResult {
-                compositor: report.compositor,
-                desktop: report.desktop,
-                audio_available: report.audio_available,
-                model_ready: report.model_ready,
-                socket_health: report.socket_health,
-                helpers_found: report.helpers_found,
-            };
-        }
-        Request::ReloadConfig => {
-            match Config::reload() {
-                Ok(config) => match prepare_dependencies(&config).await.and_then(|()| coordinator.reload_config(config)) {
+        Request::ReloadConfig => match Config::reload() {
+            Ok(config) => match coordinator
+                .validate_reload(&config)
+                .and_then(|()| Ok(config))
+            {
+                Ok(config) => match prepare_dependencies(&config)
+                    .await
+                    .and_then(|()| coordinator.reload_config(config))
+                {
                     Ok(()) => return Response::Ok,
                     Err(e) => {
                         return Response::Error {
@@ -189,10 +199,15 @@ pub async fn dispatch(
                 Err(e) => {
                     return Response::Error {
                         message: format!("config reload failed: {}", e),
-                    };
+                    }
                 }
+            },
+            Err(e) => {
+                return Response::Error {
+                    message: format!("config reload failed: {}", e),
+                };
             }
-        }
+        },
         Request::GetLastResult => {
             let result = coordinator.get_last_result();
             match result {
@@ -209,8 +224,6 @@ pub async fn dispatch(
                 }
             }
         }
-        Request::HoldPress => CoordinatorCommand::HoldPress,
-        Request::HoldRelease => CoordinatorCommand::HoldRelease,
     };
 
     match coordinator.handle_command(cmd).await {
@@ -236,11 +249,13 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             recording,
             processing,
             activation_mode,
+            error,
         } => Response::Status {
             state,
             recording,
             processing,
             activation_mode,
+            error,
         },
     }
 }
