@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
                 let config = config::Config::load()?;
                 doctor::typing_test(&config)?;
             } else {
-                let config = config::Config::load().unwrap_or_default();
+                let config = config::Config::load()?;
                 let report = doctor::run_doctor(&config);
                 println!("compositor:     {}", report.compositor);
                 println!("desktop:        {}", report.desktop);
@@ -93,7 +93,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 );
                 println!("model path:     {}", report.model_path);
-                println!("socket:         {}", report.socket_health);
                 println!(
                     "helpers:        {}",
                     if report.helpers_found.is_empty() {
@@ -152,14 +151,10 @@ async fn send_command(request: ipc::Request) -> anyhow::Result<()> {
         }
         ipc::Response::Status {
             state,
-            recording,
-            processing,
             activation_mode,
             error,
         } => {
             println!("state:            {}", state);
-            println!("recording:        {}", recording);
-            println!("processing:       {}", processing);
             println!("activation mode:  {}", activation_mode);
             if let Some(error) = error {
                 println!("last error:       {}", error);

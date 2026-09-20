@@ -69,12 +69,7 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
 async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
     let download_manager = crate::model::DownloadManager::new()?;
     if !crate::model::ModelCatalog::model_path(&config.model.selected)?.exists() {
-        download_manager
-            .download(
-                &config.model.selected,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await?;
+        download_manager.download(&config.model.selected).await?;
     }
     if config.transcription.vad_enabled {
         download_manager.ensure_vad_model().await?;
@@ -246,14 +241,10 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
         },
         CoordinatorResponse::Status {
             state,
-            recording,
-            processing,
             activation_mode,
             error,
         } => Response::Status {
             state,
-            recording,
-            processing,
             activation_mode,
             error,
         },

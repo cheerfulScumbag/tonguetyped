@@ -41,11 +41,7 @@ impl DownloadManager {
         Ok(DownloadManager { client })
     }
 
-    pub async fn download(
-        &self,
-        model_name: &str,
-        cancel_token: tokio_util::sync::CancellationToken,
-    ) -> anyhow::Result<PathBuf> {
+    pub async fn download(&self, model_name: &str) -> anyhow::Result<PathBuf> {
         let url = ModelCatalog::model_url(model_name)?;
         let dest_path = ModelCatalog::model_path(model_name)?;
         let tmp_path = dest_path.with_extension("download");
@@ -89,10 +85,6 @@ impl DownloadManager {
 
         use futures_util::StreamExt;
         while let Some(chunk) = stream.next().await {
-            if cancel_token.is_cancelled() {
-                pb.finish_and_clear();
-                anyhow::bail!("download cancelled");
-            }
             let chunk = chunk.context("download chunk error")?;
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;

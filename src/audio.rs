@@ -60,7 +60,7 @@ impl AudioRecorder {
     ) -> anyhow::Result<Self> {
         let host = cpal::default_host();
 
-        let device = if device_name == "default" || device_name.is_empty() {
+        let device = if device_name == "default" {
             host.default_input_device()
                 .context("no default input device")?
         } else {

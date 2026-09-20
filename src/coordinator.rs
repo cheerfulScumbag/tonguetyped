@@ -70,9 +70,15 @@ impl CoordinatorRuntime for ProductionRuntime {
             let _ = started.send(Err(message.clone()));
             anyhow::bail!(message);
         }
+        let deadline = match Instant::now().checked_add(max_duration) {
+            Some(deadline) => deadline,
+            None => {
+                let message = "max recording duration is too large".to_string();
+                let _ = started.send(Err(message.clone()));
+                anyhow::bail!(message);
+            }
+        };
         let _ = started.send(Ok(()));
-
-        let deadline = Instant::now() + max_duration;
         loop {
             if let Ok(message) = error_rx.try_recv() {
                 anyhow::bail!("microphone stream failed: {}", message);
@@ -115,7 +121,12 @@ impl CoordinatorRuntime for ProductionRuntime {
     }
 
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()> {
-        crate::output::output_text(text, &config.output.method, &config.output.typing_backend)
+        crate::output::output_text(
+            text,
+            &config.output.method,
+            &config.output.typing_backend,
+            config.output.auto_submit,
+        )
     }
 }
 
@@ -146,7 +157,7 @@ struct CoordinatorStateInner {
     pending_release: Option<(u64, Instant)>,
     generation: u64,
     signal_tx: Option<mpsc::Sender<RecordingSignal>>,
-    active_hold: bool,
+    active_press_mode: Option<crate::config::ActivationMode>,
     last_error: Option<String>,
 }
 
@@ -180,7 +191,7 @@ impl Coordinator {
                 pending_release: None,
                 generation: 0,
                 signal_tx: None,
-                active_hold: false,
+                active_press_mode: None,
                 last_error: None,
             })),
             output_lock: Arc::new(Mutex::new(())),
@@ -263,6 +274,12 @@ impl Coordinator {
                 Ok(Err(message)) => return Err(anyhow::anyhow!(message)),
                 Err(_) => return Err(anyhow::anyhow!("recording worker exited during startup")),
             }
+            let inner = self.state.lock().unwrap();
+            if inner.generation != generation || inner.state != State::Recording {
+                return Ok(CoordinatorResponse::Ignored(
+                    "recording cancelled during startup".into(),
+                ));
+            }
         }
         Ok(response)
     }
@@ -283,13 +300,25 @@ impl Coordinator {
     }
 
     pub async fn handle_activation(&self, pressed: bool) -> anyhow::Result<CoordinatorResponse> {
-        let (mode, active_hold) = {
-            let inner = self.state.lock().unwrap();
-            (inner.config.activation.mode.clone(), inner.active_hold)
+        let mode = {
+            let mut inner = self.state.lock().unwrap();
+            if pressed {
+                let mode = inner
+                    .active_press_mode
+                    .clone()
+                    .unwrap_or_else(|| inner.config.activation.mode.clone());
+                inner.active_press_mode = Some(mode.clone());
+                mode
+            } else {
+                let Some(mode) = inner.active_press_mode.clone() else {
+                    return Ok(CoordinatorResponse::Ok);
+                };
+                if mode == crate::config::ActivationMode::Toggle {
+                    inner.active_press_mode = None;
+                }
+                mode
+            }
         };
-        if !pressed && active_hold {
-            return self.handle_command(CoordinatorCommand::HoldRelease).await;
-        }
         match (mode, pressed) {
             (crate::config::ActivationMode::Toggle, true) => {
                 self.handle_command(CoordinatorCommand::Toggle).await
@@ -317,7 +346,7 @@ impl Coordinator {
                 inner.state = State::Idle;
                 inner.recording_start = None;
                 inner.pending_release = None;
-                inner.active_hold = false;
+                inner.active_press_mode = None;
                 inner.last_action = Some(Instant::now());
                 CoordinatorResponse::Cancelled
             }
@@ -432,7 +461,7 @@ impl Coordinator {
             inner.signal_tx = None;
             inner.recording_start = None;
             inner.pending_release = None;
-            inner.active_hold = false;
+            inner.active_press_mode = None;
         }
     }
 
@@ -443,7 +472,7 @@ impl Coordinator {
             inner.signal_tx = None;
             inner.recording_start = None;
             inner.pending_release = None;
-            inner.active_hold = false;
+            inner.active_press_mode = None;
             inner.last_error = Some(error);
         }
     }
@@ -479,7 +508,6 @@ fn hold_press(
     match inner.state {
         State::Idle => {
             *start = Some(reserve_recording(inner, now));
-            inner.active_hold = true;
             CoordinatorResponse::RecordingStarted
         }
         State::Recording => CoordinatorResponse::Ignored("already recording".into()),
@@ -496,7 +524,7 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
             inner.state = State::Processing;
             inner.recording_start = None;
             inner.pending_release = None;
-            inner.active_hold = false;
+            inner.active_press_mode = None;
             inner.last_action = Some(now);
             CoordinatorResponse::RecordingStopped
         }
@@ -519,8 +547,6 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
             State::Processing => "processing",
         }
         .to_string(),
-        recording: inner.state == State::Recording,
-        processing: inner.state == State::Processing,
         activation_mode: inner.config.activation.mode.to_string(),
         error: inner.last_error.clone(),
     }
@@ -536,8 +562,6 @@ pub enum CoordinatorResponse {
     Ignored(String),
     Status {
         state: String,
-        recording: bool,
-        processing: bool,
         activation_mode: String,
         error: Option<String>,
     },

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub activation: ActivationConfig,
@@ -38,6 +39,7 @@ impl Default for Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivationConfig {
     #[serde(default = "default_activation_mode")]
     pub mode: ActivationMode,
@@ -74,6 +76,7 @@ impl std::fmt::Display for ActivationMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     #[serde(default = "default_model_selected")]
     pub selected: String,
@@ -91,6 +94,7 @@ impl Default for ModelConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdleUnloadConfig {
     #[serde(default = "default_idle_unload_policy")]
     pub policy: IdleUnloadPolicy,
@@ -127,6 +131,7 @@ impl std::fmt::Display for IdleUnloadPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AudioConfig {
     #[serde(default = "default_microphone")]
     pub microphone: String,
@@ -153,12 +158,14 @@ impl Default for AudioConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct MutePlaybackConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     #[serde(default = "default_output_method")]
     pub method: OutputMethod,
@@ -199,6 +206,7 @@ impl std::fmt::Display for OutputMethod {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PasteConfig {
     #[serde(default = "default_paste_shortcut")]
     pub shortcut: String,
@@ -222,6 +230,7 @@ impl Default for PasteConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TranscriptionConfig {
     #[serde(default = "default_true")]
     pub vad_enabled: bool,
@@ -245,6 +254,7 @@ impl Default for TranscriptionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -268,6 +278,7 @@ impl Default for HistoryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordingExpiryConfig {
     #[serde(default = "default_recording_expiry_policy")]
     pub policy: RecordingExpiryPolicy,
@@ -304,6 +315,7 @@ impl std::fmt::Display for RecordingExpiryPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OverlayConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
@@ -324,6 +336,7 @@ impl Default for OverlayConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct StartupConfig {
     #[serde(default = "default_false")]
     pub autostart: bool,
@@ -422,16 +435,16 @@ fn default_overlay_monitor() -> String {
 }
 
 impl Config {
-    pub fn config_path() -> PathBuf {
+    pub fn config_path() -> anyhow::Result<PathBuf> {
         let dir = directories::BaseDirs::new()
             .map(|b| b.config_dir().join("tonguetyped"))
-            .unwrap_or_else(|| PathBuf::from(".config/tonguetyped"));
-        fs::create_dir_all(&dir).ok();
-        dir.join("config.toml")
+            .ok_or_else(|| anyhow::anyhow!("cannot determine the user configuration directory"))?;
+        fs::create_dir_all(&dir)?;
+        Ok(dir.join("config.toml"))
     }
 
     pub fn load() -> anyhow::Result<Self> {
-        let path = Self::config_path();
+        let path = Self::config_path()?;
         if !path.exists() {
             let config = Config::default();
             config.save()?;
@@ -444,7 +457,7 @@ impl Config {
     }
 
     pub fn reload() -> anyhow::Result<Self> {
-        let path = Self::config_path();
+        let path = Self::config_path()?;
         if !path.exists() {
             return Ok(Config::default());
         }
@@ -456,7 +469,7 @@ impl Config {
 
     pub fn save(&self) -> anyhow::Result<()> {
         self.validate()?;
-        let path = Self::config_path();
+        let path = Self::config_path()?;
         let content = toml::to_string_pretty(self)?;
         let tmp_path = path.with_extension("tmp");
         fs::write(&tmp_path, &content)?;
@@ -469,6 +482,14 @@ impl Config {
         crate::model::ModelCatalog::model_file_name(&self.model.selected)?;
         if self.transcription.max_recording_seconds == 0 {
             anyhow::bail!("max_recording_seconds must be a positive integer");
+        }
+        if std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(
+                self.transcription.max_recording_seconds,
+            ))
+            .is_none()
+        {
+            anyhow::bail!("max_recording_seconds is too large");
         }
 
         if self.output.method == OutputMethod::None && self.output.auto_submit {
@@ -507,6 +528,15 @@ mod tests {
 
         config.output.typing_backend = "auto".to_string();
         config.model.selected = "../custom".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_and_unrepresentable_recording_duration() {
+        assert!(toml::from_str::<Config>("[transcription]\nmax_recording_second = 10\n").is_err());
+
+        let mut config = Config::default();
+        config.transcription.max_recording_seconds = u64::MAX;
         assert!(config.validate().is_err());
     }
 }

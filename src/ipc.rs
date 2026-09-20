@@ -22,8 +22,6 @@ pub enum Response {
     Busy,
     Status {
         state: String,
-        recording: bool,
-        processing: bool,
         activation_mode: String,
         error: Option<String>,
     },

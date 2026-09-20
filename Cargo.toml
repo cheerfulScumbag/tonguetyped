@@ -24,7 +24,6 @@ directories = "5"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio-util = "0.7"
 futures-util = "0.3"
 enigo = "0.3"
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }

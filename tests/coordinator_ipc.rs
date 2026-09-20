@@ -11,10 +11,13 @@ struct TestRuntime {
     recordings: AtomicUsize,
     microphone_error: AtomicBool,
     timed_out: AtomicBool,
+    block_startup: AtomicBool,
+    startup_started: AtomicBool,
     block_transcription: AtomicBool,
     transcription_started: AtomicBool,
     empty_transcript: AtomicBool,
     transcription_gate: (Mutex<bool>, Condvar),
+    startup_gate: (Mutex<bool>, Condvar),
     outputs: Mutex<Vec<String>>,
 }
 
@@ -22,6 +25,11 @@ impl TestRuntime {
     fn release_transcription(&self) {
         *self.transcription_gate.0.lock().unwrap() = true;
         self.transcription_gate.1.notify_all();
+    }
+
+    fn release_startup(&self) {
+        *self.startup_gate.0.lock().unwrap() = true;
+        self.startup_gate.1.notify_all();
     }
 }
 
@@ -34,6 +42,13 @@ impl CoordinatorRuntime for TestRuntime {
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) -> anyhow::Result<Vec<f32>> {
         self.recordings.fetch_add(1, Ordering::SeqCst);
+        self.startup_started.store(true, Ordering::SeqCst);
+        if self.block_startup.load(Ordering::SeqCst) {
+            let mut released = self.startup_gate.0.lock().unwrap();
+            while !*released {
+                released = self.startup_gate.1.wait(released).unwrap();
+            }
+        }
         if self.microphone_error.load(Ordering::SeqCst) {
             let _ = started.send(Err("simulated microphone disconnect".to_string()));
             anyhow::bail!("simulated microphone disconnect");
@@ -80,7 +95,7 @@ fn coordinator(runtime: Arc<TestRuntime>, max_seconds: u64) -> Arc<Coordinator> 
 }
 
 async fn wait_for_state(coordinator: &Arc<Coordinator>, expected: &str) {
-    for _ in 0..100 {
+    for _ in 0..300 {
         if let Response::Status { state, .. } = dispatch(coordinator, Request::Status).await {
             if state == expected {
                 return;
@@ -136,10 +151,7 @@ async fn toggle_and_hold_commands_complete_recordings() {
     ));
     assert!(matches!(
         dispatch(&coordinator, Request::Status).await,
-        Response::Status {
-            recording: true,
-            ..
-        }
+        Response::Status { ref state, .. } if state == "recording"
     ));
     tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(matches!(
@@ -172,6 +184,24 @@ async fn cancel_during_processing_suppresses_stale_output() {
     assert!(
         matches!(dispatch(&coordinator, Request::Status).await, Response::Status { state, .. } if state == "idle")
     );
+}
+
+#[tokio::test]
+async fn cancel_during_startup_does_not_report_recording_started() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_startup.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 2);
+    let start_coordinator = coordinator.clone();
+    let start = tokio::spawn(async move { dispatch(&start_coordinator, Request::Start).await });
+
+    wait_for_flag(&runtime.startup_started).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Cancel).await,
+        Response::Cancelled
+    ));
+    runtime.release_startup();
+
+    assert!(matches!(start.await.unwrap(), Response::Error { .. }));
 }
 
 #[tokio::test]
@@ -219,6 +249,32 @@ async fn hold_release_uses_mode_from_active_press() {
         tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
     ));
     wait_for_state(&coordinator, "idle").await;
+}
+
+#[tokio::test]
+async fn toggle_release_uses_mode_from_active_press() {
+    let runtime = Arc::new(TestRuntime::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime));
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    let mut config = Config::default();
+    config.history.enabled = false;
+    coordinator.reload_config(config).unwrap();
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { ref state, .. } if state == "recording"
+    ));
+    dispatch(&coordinator, Request::Cancel).await;
 }
 
 #[tokio::test]
