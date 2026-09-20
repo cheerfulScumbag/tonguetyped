@@ -17,6 +17,8 @@ Adapted modules and their origins in Handy:
 MIT License (Handy):
 
 ```
+Copyright (c) 2025 CJ Pais
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

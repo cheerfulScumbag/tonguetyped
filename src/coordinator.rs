@@ -23,7 +23,6 @@ pub enum CoordinatorCommand {
 pub enum RecordingSignal {
     Stop,
     Cancel,
-    MicrophoneError(String),
 }
 
 pub trait CoordinatorRuntime: Send + Sync {
@@ -90,9 +89,6 @@ impl CoordinatorRuntime for ProductionRuntime {
             match signal_rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
                 Ok(RecordingSignal::Stop) => break,
                 Ok(RecordingSignal::Cancel) => anyhow::bail!("recording cancelled"),
-                Ok(RecordingSignal::MicrophoneError(message)) => {
-                    anyhow::bail!("microphone stream failed: {}", message)
-                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }

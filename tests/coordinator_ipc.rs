@@ -18,6 +18,7 @@ struct TestRuntime {
     empty_transcript: AtomicBool,
     transcription_gate: (Mutex<bool>, Condvar),
     startup_gate: (Mutex<bool>, Condvar),
+    microphone_error_gate: (Mutex<bool>, Condvar),
     outputs: Mutex<Vec<String>>,
 }
 
@@ -30,6 +31,11 @@ impl TestRuntime {
     fn release_startup(&self) {
         *self.startup_gate.0.lock().unwrap() = true;
         self.startup_gate.1.notify_all();
+    }
+
+    fn release_microphone_error(&self) {
+        *self.microphone_error_gate.0.lock().unwrap() = true;
+        self.microphone_error_gate.1.notify_all();
     }
 }
 
@@ -49,15 +55,17 @@ impl CoordinatorRuntime for TestRuntime {
                 released = self.startup_gate.1.wait(released).unwrap();
             }
         }
+        let _ = started.send(Ok(()));
         if self.microphone_error.load(Ordering::SeqCst) {
-            let _ = started.send(Err("simulated microphone disconnect".to_string()));
+            let mut failed = self.microphone_error_gate.0.lock().unwrap();
+            while !*failed {
+                failed = self.microphone_error_gate.1.wait(failed).unwrap();
+            }
             anyhow::bail!("simulated microphone disconnect");
         }
-        let _ = started.send(Ok(()));
         match signal_rx.recv_timeout(max_duration) {
             Ok(RecordingSignal::Stop) => Ok(vec![0.1; 512]),
             Ok(RecordingSignal::Cancel) => anyhow::bail!("cancelled"),
-            Ok(RecordingSignal::MicrophoneError(message)) => anyhow::bail!(message),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.timed_out.store(true, Ordering::SeqCst);
                 Ok(vec![0.1; 512])
@@ -116,6 +124,16 @@ async fn wait_for_flag(flag: &AtomicBool) {
     panic!("expected operation did not start");
 }
 
+async fn wait_for_worker_completion(runtime: &Arc<TestRuntime>, owner_count: usize) {
+    for _ in 0..100 {
+        if Arc::strong_count(runtime) == owner_count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("recording worker did not finish");
+}
+
 #[tokio::test]
 async fn toggle_and_hold_commands_complete_recordings() {
     let runtime = Arc::new(TestRuntime::default());
@@ -167,6 +185,7 @@ async fn cancel_during_processing_suppresses_stale_output() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.block_transcription.store(true, Ordering::SeqCst);
     let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
 
     dispatch(&coordinator, Request::Start).await;
     tokio::time::sleep(Duration::from_millis(35)).await;
@@ -178,7 +197,7 @@ async fn cancel_during_processing_suppresses_stale_output() {
         Response::Cancelled
     ));
     runtime.release_transcription();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    wait_for_worker_completion(&runtime, owner_count).await;
 
     assert!(runtime.outputs.lock().unwrap().is_empty());
     assert!(
@@ -208,12 +227,13 @@ async fn cancel_during_startup_does_not_report_recording_started() {
 async fn microphone_errors_restore_idle_state() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.microphone_error.store(true, Ordering::SeqCst);
-    let coordinator = coordinator(runtime, 2);
+    let coordinator = coordinator(runtime.clone(), 2);
 
     assert!(matches!(
         dispatch(&coordinator, Request::Start).await,
-        Response::Error { .. }
+        Response::RecordingStarted
     ));
+    runtime.release_microphone_error();
     wait_for_state(&coordinator, "idle").await;
     assert!(matches!(
         dispatch(&coordinator, Request::Status).await,
