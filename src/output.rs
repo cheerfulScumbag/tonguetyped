@@ -10,9 +10,6 @@ pub fn output_text(text: &str, method: &OutputMethod, backend: &str) -> anyhow::
         OutputMethod::Type => {
             type_text(text, backend)?;
         }
-        OutputMethod::Paste | OutputMethod::ClipboardOnly => {
-            anyhow::bail!("paste/clipboard-only output not implemented in Stage 1");
-        }
     }
     Ok(())
 }
@@ -26,15 +23,21 @@ fn type_text(text: &str, backend: &str) -> anyhow::Result<()> {
 
     match backend.as_str() {
         "wtype" => {
-            let status = Command::new("wtype")
+            let mut child = Command::new("wtype")
                 .args(["-"])
                 .stdin(std::process::Stdio::piped())
                 .spawn()
                 .context("failed to spawn wtype")?;
-            if let Some(mut stdin) = status.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write;
                 stdin.write_all(text.as_bytes())?;
             }
+            require_success("wtype", child.wait()?)?;
+        }
+        "enigo" => {
+            use enigo::{Enigo, Keyboard, Settings};
+            let mut enigo = Enigo::new(&Settings::default())?;
+            enigo.text(text)?;
         }
         "dotool" => {
             let mut child = Command::new("dotool")
@@ -45,19 +48,7 @@ fn type_text(text: &str, backend: &str) -> anyhow::Result<()> {
                 use std::io::Write;
                 writeln!(stdin, "type {}", text)?;
             }
-            child.wait()?;
-        }
-        "ydotool" => {
-            let mut child = Command::new("ydotool")
-                .args(["type", "--file", "-"])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .context("failed to spawn ydotool")?;
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                stdin.write_all(text.as_bytes())?;
-            }
-            child.wait()?;
+            require_success("dotool", child.wait()?)?;
         }
         _ => {
             anyhow::bail!("unsupported typing backend: {}", backend);
@@ -68,40 +59,46 @@ fn type_text(text: &str, backend: &str) -> anyhow::Result<()> {
 }
 
 pub fn probe_type_backend() -> String {
-    if which_exists("wtype") {
+    if helper_self_test("wtype") {
         return "wtype".to_string();
     }
-    if which_exists("dotool") {
-        return "dotool".to_string();
+    if enigo_available() {
+        return "enigo".to_string();
     }
-    if which_exists("ydotool") {
-        return "ydotool".to_string();
+    if helper_self_test("dotool") {
+        return "dotool".to_string();
     }
     "none".to_string()
 }
 
 pub fn list_available_backends() -> Vec<String> {
     let mut backends = Vec::new();
-    if which_exists("enigo") {
-        backends.push("enigo".to_string());
-    }
-    if which_exists("wtype") {
+    if helper_self_test("wtype") {
         backends.push("wtype".to_string());
     }
-    if which_exists("dotool") {
-        backends.push("dotool".to_string());
+    if enigo_available() {
+        backends.push("enigo".to_string());
     }
-    if which_exists("ydotool") {
-        backends.push("ydotool".to_string());
+    if helper_self_test("dotool") {
+        backends.push("dotool".to_string());
     }
     backends
 }
 
 pub fn has_any_type_backend() -> bool {
-    which_exists("wtype")
-        || which_exists("dotool")
-        || which_exists("ydotool")
-        || which_exists("enigo")
+    helper_self_test("wtype") || enigo_available() || helper_self_test("dotool")
+}
+
+fn enigo_available() -> bool {
+    use enigo::{Enigo, Settings};
+    Enigo::new(&Settings::default()).is_ok()
+}
+
+fn require_success(backend: &str, status: std::process::ExitStatus) -> anyhow::Result<()> {
+    if !status.success() {
+        anyhow::bail!("{} exited with status {}", backend, status);
+    }
+    Ok(())
 }
 
 fn which_exists(cmd: &str) -> bool {
@@ -112,6 +109,19 @@ fn which_exists(cmd: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn helper_self_test(command: &str) -> bool {
+    if !which_exists(command) {
+        return false;
+    }
+    let argument = if command == "wtype" { "--version" } else { "--help" };
+    Command::new(command)
+        .arg(argument)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]
@@ -128,11 +138,5 @@ mod tests {
     fn test_probe_returns_string() {
         let backend = probe_type_backend();
         assert!(!backend.is_empty());
-    }
-
-    #[test]
-    fn test_list_backends() {
-        let backends = list_available_backends();
-        assert!(!backends.is_empty() || backends.is_empty());
     }
 }

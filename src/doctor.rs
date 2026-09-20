@@ -22,8 +22,7 @@ pub fn run_doctor(model_name: &str) -> DoctorReport {
         .into_iter()
         .map(|d| d.name)
         .collect();
-    let model_path = crate::inference::InferenceEngine::models_dir()
-        .join(format!("{}.bin", model_name));
+    let model_path = crate::model::ModelCatalog::model_path(model_name);
     let model_ready = model_path.exists();
     let socket_health = check_socket_health();
     let helpers_found = crate::output::list_available_backends();
@@ -40,16 +39,6 @@ pub fn run_doctor(model_name: &str) -> DoctorReport {
         helpers_found,
         output_method_available,
     }
-}
-
-pub fn run_typing_test() -> anyhow::Result<()> {
-    let backend = crate::output::probe_type_backend();
-    if backend == "none" {
-        println!("WARNING: No typing backend found! Text output will only work in 'none' mode.");
-    } else {
-        println!("Typing test skipped (explicit user trigger). Backend available: {}", backend);
-    }
-    Ok(())
 }
 
 fn detect_compositor() -> String {
@@ -72,7 +61,13 @@ fn check_socket_health() -> String {
     }
 }
 
-pub fn typing_test() {
-    println!("Typing test: this is an explicit user-triggered test.");
-    println!("No text will be injected into random windows.");
+pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<()> {
+    if config.output.method == crate::config::OutputMethod::None {
+        anyhow::bail!("typing test requires output.method = 'type'");
+    }
+    crate::output::output_text(
+        "TongueTyped typing test",
+        &config.output.method,
+        &config.output.typing_backend,
+    )
 }

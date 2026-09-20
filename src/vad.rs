@@ -3,10 +3,10 @@ pub const HANGOVER_FRAMES: usize = 1650;
 
 pub struct VadDetector {
     inner: vad_rs::Vad,
-    sample_rate: usize,
     prefill_buffer: Vec<f32>,
     hangover_counter: usize,
     speech_detected: bool,
+    accepted: Vec<f32>,
 }
 
 impl VadDetector {
@@ -15,10 +15,10 @@ impl VadDetector {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(VadDetector {
             inner,
-            sample_rate,
             prefill_buffer: Vec::with_capacity(PREFILL_SAMPLES),
             hangover_counter: 0,
             speech_detected: false,
+            accepted: Vec::new(),
         })
     }
 
@@ -27,11 +27,10 @@ impl VadDetector {
         self.prefill_buffer.clear();
         self.hangover_counter = 0;
         self.speech_detected = false;
+        self.accepted.clear();
     }
 
     pub fn process(&mut self, samples: &[f32]) -> anyhow::Result<Option<Vec<f32>>> {
-        let mut output = Vec::new();
-
         let result = self.inner.compute(samples)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let is_speech = result.prob > 0.5;
@@ -43,13 +42,13 @@ impl VadDetector {
                     self.prefill_buffer.remove(0);
                 }
             } else {
-                output.push(sample);
+                self.accepted.push(sample);
             }
         }
 
         if is_speech && !self.speech_detected {
             self.speech_detected = true;
-            output.splice(0..0, self.prefill_buffer.iter().copied());
+            self.accepted.extend_from_slice(&self.prefill_buffer);
             self.prefill_buffer.clear();
         }
 
@@ -57,16 +56,27 @@ impl VadDetector {
             self.hangover_counter = HANGOVER_FRAMES;
         } else if self.speech_detected {
             if self.hangover_counter > 0 {
-                self.hangover_counter -= 1;
+                self.hangover_counter = self.hangover_counter.saturating_sub(samples.len());
             }
         }
 
         if self.speech_detected && self.hangover_counter == 0 {
             self.speech_detected = false;
-            return Ok(Some(output));
+            return Ok(Some(std::mem::take(&mut self.accepted)));
         }
 
         Ok(None)
+    }
+
+    pub fn finish(&mut self) -> Option<Vec<f32>> {
+        self.speech_detected = false;
+        self.hangover_counter = 0;
+        self.prefill_buffer.clear();
+        if self.accepted.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.accepted))
+        }
     }
 
     pub fn is_speech_detected(&self) -> bool {

@@ -62,9 +62,7 @@ impl InferenceEngine {
     }
 
     pub fn check_model_available(model_name: &str) -> bool {
-        let models_dir = Self::models_dir();
-        let model_path = models_dir.join(format!("{}.bin", model_name));
-        model_path.exists()
+        crate::model::ModelCatalog::model_path(model_name).exists()
     }
 
     pub fn models_dir() -> PathBuf {

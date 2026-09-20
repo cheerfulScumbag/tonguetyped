@@ -1,16 +1,5 @@
-mod audio;
-mod config;
-mod coordinator;
-mod daemon;
-mod doctor;
-mod history;
-mod inference;
-mod ipc;
-mod model;
-mod output;
-mod vad;
-
 use clap::{Parser, Subcommand};
+use tonguetyped::{config, daemon, doctor, ipc};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Parser)]
@@ -34,6 +23,14 @@ enum Commands {
     Cancel,
     /// Get daemon status
     Status,
+    /// Reload daemon configuration
+    Reload,
+    /// Return the most recent transcription
+    LastResult,
+    /// Signal a configured hold key press
+    HoldPress,
+    /// Signal a configured hold key release
+    HoldRelease,
     /// Run system diagnostics
     Doctor {
         /// Run explicit typing test
@@ -75,7 +72,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Doctor { test_type } => {
             if test_type {
-                doctor::typing_test();
+                let config = config::Config::load()?;
+                doctor::typing_test(&config)?;
             } else {
                 let config = config::Config::load().unwrap_or_default();
                 let report = doctor::run_doctor(&config.model.selected);
@@ -118,6 +116,10 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Commands::Reload => send_command(ipc::Request::ReloadConfig).await?,
+        Commands::LastResult => send_command(ipc::Request::GetLastResult).await?,
+        Commands::HoldPress => send_command(ipc::Request::HoldPress).await?,
+        Commands::HoldRelease => send_command(ipc::Request::HoldRelease).await?,
     }
 
     Ok(())
@@ -152,7 +154,7 @@ async fn send_command(request: ipc::Request) -> anyhow::Result<()> {
         ipc::Response::RecordingStopped => println!("recording stopped"),
         ipc::Response::Cancelled => println!("cancelled"),
         ipc::Response::Error { message } => {
-            eprintln!("error: {}", message);
+            anyhow::bail!(message);
         }
         ipc::Response::Status {
             state,

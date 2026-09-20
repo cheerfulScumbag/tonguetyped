@@ -1,0 +1,11 @@
+pub mod audio;
+pub mod config;
+pub mod coordinator;
+pub mod daemon;
+pub mod doctor;
+pub mod history;
+pub mod inference;
+pub mod ipc;
+pub mod model;
+pub mod output;
+pub mod vad;

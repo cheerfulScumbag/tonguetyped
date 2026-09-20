@@ -1,6 +1,8 @@
 use crate::config::Config;
-use crate::ipc::{encode_frame, decode_frame, Request, Response};
 use crate::coordinator::{Coordinator, CoordinatorCommand, CoordinatorResponse};
+use crate::ipc::{decode_frame, encode_frame, Request, Response};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26,9 +28,21 @@ pub fn lock_path() -> PathBuf {
 
 pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     let sock_path = socket_path();
+    let _lock = acquire_instance_lock(&sock_path)?;
 
-    if sock_path.exists() {
-        let _ = std::fs::remove_file(&sock_path);
+    let model_path = crate::model::ModelCatalog::model_path(&config.model.selected);
+    if !model_path.exists() {
+        crate::model::DownloadManager::new()?
+            .download(
+                &config.model.selected,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await?;
+    }
+    if config.transcription.vad_enabled {
+        crate::model::DownloadManager::new()?
+            .ensure_vad_model()
+            .await?;
     }
 
     let listener = UnixListener::bind(&sock_path)?;
@@ -46,6 +60,50 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+}
+
+struct InstanceLock {
+    path: PathBuf,
+    _file: File,
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<InstanceLock> {
+    let path = lock_path();
+    for _ in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                writeln!(file, "{}", std::process::id())?;
+                file.sync_all()?;
+                if sock_path.exists() {
+                    if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        anyhow::bail!("daemon is already running");
+                    }
+                    std::fs::remove_file(sock_path)?;
+                }
+                return Ok(InstanceLock { path, _file: file });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let owner_alive = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    .is_none_or(|pid| std::path::Path::new("/proc").join(pid.to_string()).exists());
+                if owner_alive {
+                    anyhow::bail!("daemon is already running");
+                }
+                std::fs::remove_file(&path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("failed to acquire daemon lock")
 }
 
 async fn handle_connection(
@@ -83,7 +141,7 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn dispatch(
+pub async fn dispatch(
     coordinator: &Arc<Coordinator>,
     request: Request,
 ) -> Response {
@@ -107,9 +165,14 @@ async fn dispatch(
         }
         Request::ReloadConfig => {
             match Config::reload() {
-                Ok(_config) => {
-                    return Response::Ok;
-                }
+                Ok(config) => match coordinator.reload_config(config) {
+                    Ok(()) => return Response::Ok,
+                    Err(e) => {
+                        return Response::Error {
+                            message: format!("config reload failed: {}", e),
+                        }
+                    }
+                },
                 Err(e) => {
                     return Response::Error {
                         message: format!("config reload failed: {}", e),

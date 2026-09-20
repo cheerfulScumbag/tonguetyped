@@ -7,15 +7,22 @@ use tokio::io::AsyncWriteExt;
 pub struct ModelCatalog;
 
 impl ModelCatalog {
+    pub fn model_file_name(model_name: &str) -> String {
+        match model_name {
+            "whisper-small-q5_1" => "ggml-small-q5_1.bin".to_string(),
+            name => format!("{}.bin", name),
+        }
+    }
+
     pub fn model_url(model_name: &str) -> String {
         format!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}.bin",
-            model_name
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+            Self::model_file_name(model_name)
         )
     }
 
     pub fn model_path(model_name: &str) -> PathBuf {
-        crate::inference::InferenceEngine::models_dir().join(format!("{}.bin", model_name))
+        crate::inference::InferenceEngine::models_dir().join(Self::model_file_name(model_name))
     }
 }
 
@@ -40,8 +47,16 @@ impl DownloadManager {
         let dest_path = ModelCatalog::model_path(model_name);
         let tmp_path = dest_path.with_extension("download");
 
+        if dest_path.exists() {
+            return Ok(dest_path);
+        }
+        if let Some(parent) = dest_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&tmp_path)
             .await
@@ -52,7 +67,9 @@ impl DownloadManager {
             .get(&url)
             .send()
             .await
-            .context("failed to start download")?;
+            .context("failed to start download")?
+            .error_for_status()
+            .context("model download failed")?;
 
         let total_size = response.content_length().unwrap_or(0);
 
@@ -101,5 +118,23 @@ impl DownloadManager {
         hasher.update(&data);
         let hash = format!("{:x}", hasher.finalize());
         Ok(hash == _expected_hash)
+    }
+
+    pub async fn ensure_vad_model(&self) -> anyhow::Result<PathBuf> {
+        let path = crate::inference::InferenceEngine::models_dir().join("silero_vad_v4.onnx");
+        if path.exists() {
+            return Ok(path);
+        }
+        let temporary = path.with_extension("download");
+        let response = self
+            .client
+            .get("https://raw.githubusercontent.com/cjpais/Handy/8f9cf53cd1410cda26beea39ff802ac306e39585/src-tauri/resources/models/silero_vad_v4.onnx")
+            .send()
+            .await?
+            .error_for_status()?;
+        let bytes = response.bytes().await?;
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(&temporary, &path).await?;
+        Ok(path)
     }
 }

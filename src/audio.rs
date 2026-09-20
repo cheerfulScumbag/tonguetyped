@@ -38,6 +38,7 @@ pub fn check_audio_available() -> bool {
 }
 
 pub type LevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
+pub type ErrorCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 pub struct AudioRecorder {
     stream: Option<cpal::Stream>,
@@ -48,7 +49,8 @@ impl AudioRecorder {
     pub fn new(
         device_name: &str,
         target_rate: u32,
-        _level_callback: Option<LevelCallback>,
+        level_callback: Option<LevelCallback>,
+        error_callback: Option<ErrorCallback>,
     ) -> anyhow::Result<Self> {
         let host = cpal::default_host();
 
@@ -68,12 +70,13 @@ impl AudioRecorder {
             found.context(format!("input device '{}' not found", device_name))?
         };
 
-        let mut supported_config = device
+        let supported_config = device
             .supported_input_configs()
             .context("failed to query supported configs")?;
         let config_range = supported_config
-            .next()
-            .context("no supported config")?;
+            .filter(|config| config.sample_format() == cpal::SampleFormat::F32)
+            .max_by_key(|config| config.max_sample_rate())
+            .context("no supported f32 input config")?;
 
         let channels = config_range.channels();
         let source_rate = config_range.max_sample_rate();
@@ -99,24 +102,42 @@ impl AudioRecorder {
         } else {
             None
         };
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let pending_clone = pending.clone();
 
-        let err_fn = move |err| {
+        let err_fn = move |err: cpal::StreamError| {
             tracing::error!("audio stream error: {}", err);
+            if let Some(callback) = &error_callback {
+                callback(err.to_string());
+            }
         };
 
         let stream = device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mono = downmix_to_mono(data, channels as usize);
+                if let Some(callback) = &level_callback {
+                    callback(compute_rms(&mono));
+                }
                 if let Some(ref rs) = resampler {
                     let mut rs_lock = rs.lock().unwrap();
-                    let input: Vec<Vec<f32>> = vec![data.to_vec()];
-                    if let Ok(output) = rs_lock.process(&input, None) {
-                        let mut buf = buf_clone.lock().unwrap();
-                        buf.extend_from_slice(&output[0]);
+                    let mut pending = pending_clone.lock().unwrap();
+                    pending.extend_from_slice(&mono);
+                    let input_frames = rs_lock.input_frames_next();
+                    while pending.len() >= input_frames {
+                        let input: Vec<Vec<f32>> =
+                            vec![pending.drain(..input_frames).collect()];
+                        match rs_lock.process(&input, None) {
+                            Ok(output) => buf_clone.lock().unwrap().extend_from_slice(&output[0]),
+                            Err(error) => {
+                                tracing::error!("audio resampling failed: {}", error);
+                                break;
+                            }
+                        }
                     }
                 } else {
                     let mut buf = buf_clone.lock().unwrap();
-                    buf.extend_from_slice(data);
+                    buf.extend_from_slice(&mono);
                 }
             },
             err_fn,
@@ -150,6 +171,16 @@ impl AudioRecorder {
         let mut buf = self.buffer.lock().unwrap();
         std::mem::take(&mut *buf)
     }
+}
+
+fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    samples
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
 }
 
 impl Drop for AudioRecorder {
@@ -186,5 +217,10 @@ mod tests {
         let rms = compute_rms(&samples);
         assert!(rms > 0.0);
         assert!(rms <= 1.0);
+    }
+
+    #[test]
+    fn downmixes_interleaved_channels() {
+        assert_eq!(downmix_to_mono(&[1.0, -1.0, 0.5, 0.5], 2), [0.0, 0.5]);
     }
 }

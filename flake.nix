@@ -26,13 +26,17 @@
         buildInputs = with pkgs; [
           rustToolchain
           cmake
+          libclang
           pkg-config
           alsa-lib
           openssl
+          xdotool
         ];
 
         shellHook = ''
           export RUST_BACKTRACE=1
+          export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
         '';
       };
 
@@ -47,13 +51,18 @@
 
         nativeBuildInputs = with pkgs; [
           cmake
+          libclang
           pkg-config
         ];
 
         buildInputs = with pkgs; [
           alsa-lib
           openssl
+          xdotool
         ];
+
+        LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+        CMAKE_POLICY_VERSION_MINIMUM = "3.5";
       };
     });
 }

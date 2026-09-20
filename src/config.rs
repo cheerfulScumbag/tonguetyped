@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub activation: ActivationConfig,
@@ -20,6 +20,21 @@ pub struct Config {
     pub overlay: OverlayConfig,
     #[serde(default)]
     pub startup: StartupConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            activation: ActivationConfig::default(),
+            model: ModelConfig::default(),
+            audio: AudioConfig::default(),
+            output: OutputConfig::default(),
+            transcription: TranscriptionConfig::default(),
+            history: HistoryConfig::default(),
+            overlay: OverlayConfig::default(),
+            startup: StartupConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +73,7 @@ impl std::fmt::Display for ActivationMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     #[serde(default = "default_model_selected")]
     pub selected: String,
@@ -66,12 +81,30 @@ pub struct ModelConfig {
     pub idle_unload: IdleUnloadConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            selected: default_model_selected(),
+            idle_unload: IdleUnloadConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdleUnloadConfig {
     #[serde(default = "default_idle_unload_policy")]
     pub policy: IdleUnloadPolicy,
     #[serde(default = "default_idle_timeout_minutes")]
     pub timeout_minutes: u64,
+}
+
+impl Default for IdleUnloadConfig {
+    fn default() -> Self {
+        Self {
+            policy: IdleUnloadPolicy::AfterIdle,
+            timeout_minutes: default_idle_timeout_minutes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -93,7 +126,7 @@ impl std::fmt::Display for IdleUnloadPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioConfig {
     #[serde(default = "default_microphone")]
     pub microphone: String,
@@ -107,13 +140,25 @@ pub struct AudioConfig {
     pub mute_playback: MutePlaybackConfig,
 }
 
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            microphone: default_microphone(),
+            feedback_sounds: true,
+            feedback_volume: default_feedback_volume(),
+            feedback_device: default_feedback_device(),
+            mute_playback: MutePlaybackConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MutePlaybackConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
     #[serde(default = "default_output_method")]
     pub method: OutputMethod,
@@ -125,14 +170,23 @@ pub struct OutputConfig {
     pub paste: PasteConfig,
 }
 
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            method: OutputMethod::None,
+            typing_backend: default_typing_backend(),
+            auto_submit: false,
+            paste: PasteConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputMethod {
     #[default]
     None,
     Type,
-    Paste,
-    ClipboardOnly,
 }
 
 impl std::fmt::Display for OutputMethod {
@@ -140,13 +194,11 @@ impl std::fmt::Display for OutputMethod {
         match self {
             OutputMethod::None => write!(f, "none"),
             OutputMethod::Type => write!(f, "type"),
-            OutputMethod::Paste => write!(f, "paste"),
-            OutputMethod::ClipboardOnly => write!(f, "clipboard-only"),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasteConfig {
     #[serde(default = "default_paste_shortcut")]
     pub shortcut: String,
@@ -158,7 +210,18 @@ pub struct PasteConfig {
     pub delay_after_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for PasteConfig {
+    fn default() -> Self {
+        Self {
+            shortcut: default_paste_shortcut(),
+            restore_clipboard: true,
+            delay_before_ms: default_50(),
+            delay_after_ms: default_300(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionConfig {
     #[serde(default = "default_true")]
     pub vad_enabled: bool,
@@ -170,7 +233,18 @@ pub struct TranscriptionConfig {
     pub max_recording_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for TranscriptionConfig {
+    fn default() -> Self {
+        Self {
+            vad_enabled: true,
+            language: default_language(),
+            trailing_space: true,
+            max_recording_seconds: default_max_recording_seconds(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -182,12 +256,32 @@ pub struct HistoryConfig {
     pub recording_expiry: RecordingExpiryConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries: default_max_entries(),
+            save_recordings: false,
+            recording_expiry: RecordingExpiryConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingExpiryConfig {
     #[serde(default = "default_recording_expiry_policy")]
     pub policy: RecordingExpiryPolicy,
     #[serde(default = "default_1440")]
     pub after_minutes: u64,
+}
+
+impl Default for RecordingExpiryConfig {
+    fn default() -> Self {
+        Self {
+            policy: RecordingExpiryPolicy::Immediately,
+            after_minutes: default_1440(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -209,7 +303,7 @@ impl std::fmt::Display for RecordingExpiryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
@@ -217,6 +311,16 @@ pub struct OverlayConfig {
     pub position: String,
     #[serde(default = "default_overlay_monitor")]
     pub monitor: String,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position: default_overlay_position(),
+            monitor: default_overlay_monitor(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -242,7 +346,7 @@ fn default_model_selected() -> String {
 }
 
 fn default_idle_unload_policy() -> IdleUnloadPolicy {
-    IdleUnloadPolicy::Never
+    IdleUnloadPolicy::AfterIdle
 }
 
 fn default_idle_timeout_minutes() -> u64 {
@@ -369,12 +473,21 @@ impl Config {
             anyhow::bail!("auto_submit cannot be true when output.method is 'none'");
         }
 
-        if self.output.method == OutputMethod::ClipboardOnly && self.output.auto_submit {
-            anyhow::bail!(
-                "auto_submit cannot be true when output.method is 'clipboard-only'"
-            );
-        }
-
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_valid_and_match_stage_one_contract() {
+        let config = Config::default();
+        config.validate().unwrap();
+        assert_eq!(config.transcription.max_recording_seconds, 120);
+        assert_eq!(config.model.selected, "whisper-small-q5_1");
+        assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
+        assert_eq!(config.history.max_entries, 500);
     }
 }

@@ -67,6 +67,19 @@ impl HistoryStore {
         }
     }
 
+    pub fn get_last_result(&self) -> anyhow::Result<Option<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT transcript_text, timestamp FROM history ORDER BY timestamp DESC, id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn delete_recording_path(&self, id: i64) -> anyhow::Result<()> {
         let mut stmt = self
             .conn
