@@ -165,8 +165,14 @@ struct CoordinatorStateInner {
     pending_release: Option<(u64, Instant)>,
     generation: u64,
     signal_tx: Option<mpsc::Sender<RecordingSignal>>,
-    active_press_mode: Option<crate::config::ActivationMode>,
+    physical_press: Option<PhysicalPress>,
     last_error: Option<String>,
+}
+
+#[derive(Clone)]
+enum PhysicalPress {
+    Active(crate::config::ActivationMode),
+    Detached,
 }
 
 #[derive(Clone)]
@@ -200,7 +206,7 @@ impl Coordinator {
                 pending_release: None,
                 generation: 0,
                 signal_tx: None,
-                active_press_mode: None,
+                physical_press: None,
                 last_error: None,
             })),
             output_lock: Arc::new(Mutex::new(())),
@@ -243,8 +249,7 @@ impl Coordinator {
                 CoordinatorCommand::Start => match inner.state {
                     State::Idle => {
                         if detach_physical_press {
-                            inner.pending_release = None;
-                            inner.active_press_mode = None;
+                            detach_physical_press_for_ipc(&mut inner);
                         }
                         start = Some(reserve_recording(&mut inner, now));
                         CoordinatorResponse::RecordingStarted
@@ -256,8 +261,7 @@ impl Coordinator {
                 CoordinatorCommand::Toggle => match inner.state {
                     State::Idle => {
                         if detach_physical_press {
-                            inner.pending_release = None;
-                            inner.active_press_mode = None;
+                            detach_physical_press_for_ipc(&mut inner);
                         }
                         start = Some(reserve_recording(&mut inner, now));
                         CoordinatorResponse::RecordingStarted
@@ -329,19 +333,30 @@ impl Coordinator {
                     inner.pending_release = None;
                     complete_activation_release(&mut inner, generation);
                 }
-                let mode = inner
-                    .active_press_mode
-                    .clone()
-                    .unwrap_or_else(|| inner.config.activation.mode.clone());
-                inner.active_press_mode = Some(mode.clone());
+                if matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
+                    return Ok(CoordinatorResponse::Ignored("detached physical press".into()));
+                }
+                let mode = match &inner.physical_press {
+                    Some(PhysicalPress::Active(mode)) => mode.clone(),
+                    Some(PhysicalPress::Detached) => unreachable!(),
+                    None => inner.config.activation.mode.clone(),
+                };
+                inner.physical_press = Some(PhysicalPress::Active(mode.clone()));
                 (mode, None)
             } else {
-                let Some(mode) = inner.active_press_mode.clone() else {
+                let Some(physical_press) = inner.physical_press.clone() else {
                     return Ok(CoordinatorResponse::Ok);
                 };
                 let released_at = Instant::now();
                 let generation = inner.generation;
                 inner.pending_release = Some((generation, released_at));
+                let mode = match physical_press {
+                    PhysicalPress::Active(mode) => mode,
+                    PhysicalPress::Detached => {
+                        self.schedule_activation_release(generation, released_at);
+                        return Ok(CoordinatorResponse::Ok);
+                    }
+                };
                 (mode, Some((generation, released_at)))
             }
         };
@@ -378,7 +393,7 @@ impl Coordinator {
                 }
                 inner.state = State::Idle;
                 inner.pending_release = None;
-                inner.active_press_mode = None;
+                inner.physical_press = None;
                 inner.last_action = Some(Instant::now());
                 CoordinatorResponse::Cancelled
             }
@@ -523,6 +538,14 @@ fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Reserve
     (inner.generation, signal_rx, inner.config.clone())
 }
 
+fn detach_physical_press_for_ipc(inner: &mut CoordinatorStateInner) {
+    if inner.pending_release.take().is_some() {
+        inner.physical_press = None;
+    } else if matches!(inner.physical_press, Some(PhysicalPress::Active(_))) {
+        inner.physical_press = Some(PhysicalPress::Detached);
+    }
+}
+
 fn hold_press(
     inner: &mut CoordinatorStateInner,
     now: Instant,
@@ -545,8 +568,10 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
                 let _ = sender.send(RecordingSignal::Stop);
             }
             inner.state = State::Processing;
-            inner.pending_release = None;
-            inner.active_press_mode = None;
+            if !matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
+                inner.pending_release = None;
+                inner.physical_press = None;
+            }
             inner.last_action = Some(now);
             CoordinatorResponse::RecordingStopped
         }
@@ -559,12 +584,13 @@ fn complete_activation_release(inner: &mut CoordinatorStateInner, generation: u6
     if inner.generation != generation {
         return;
     }
-    if inner.state == State::Recording
-        && inner.active_press_mode == Some(crate::config::ActivationMode::Hold)
-    {
-        stop_recording(inner, Instant::now());
-    } else {
-        inner.active_press_mode = None;
+    match inner.physical_press.clone() {
+        Some(PhysicalPress::Active(crate::config::ActivationMode::Hold))
+            if inner.state == State::Recording =>
+        {
+            stop_recording(inner, Instant::now());
+        }
+        _ => inner.physical_press = None,
     }
 }
 
