@@ -60,10 +60,8 @@ impl VadDetector {
 
         if is_speech {
             self.hangover_counter = HANGOVER_FRAMES;
-        } else if self.speech_detected {
-            if self.hangover_counter > 0 {
-                self.hangover_counter = self.hangover_counter.saturating_sub(samples.len());
-            }
+        } else if self.speech_detected && self.hangover_counter > 0 {
+            self.hangover_counter = self.hangover_counter.saturating_sub(samples.len());
         }
 
         if self.speech_detected && self.hangover_counter == 0 {

@@ -4,7 +4,7 @@ This project adapts logic from the following open-source projects under the MIT 
 
 ### Handy (github.com/cjpais/Handy)
 
-Commit: 8f9cf53  
+Commit: 8f9cf53
 License: MIT
 
 Adapted modules and their origins in Handy:
@@ -40,7 +40,7 @@ SOFTWARE.
 
 ### vad-rs (github.com/cjpais/vad-rs)
 
-Commit: 2a412ed858695b9251f3f5a1a20d95b59fa7c498  
+Commit: 2a412ed858695b9251f3f5a1a20d95b59fa7c498
 License: MIT
 
 ### transcribe-rs (github.com/thewh1teagle/transcribe-rs)

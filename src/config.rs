@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -21,21 +21,6 @@ pub struct Config {
     pub overlay: OverlayConfig,
     #[serde(default)]
     pub startup: StartupConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            activation: ActivationConfig::default(),
-            model: ModelConfig::default(),
-            audio: AudioConfig::default(),
-            output: OutputConfig::default(),
-            transcription: TranscriptionConfig::default(),
-            history: HistoryConfig::default(),
-            overlay: OverlayConfig::default(),
-            startup: StartupConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

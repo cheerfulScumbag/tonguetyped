@@ -129,8 +129,8 @@ fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<Instance
 
 fn process_start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields = stat.rsplit_once(") ")?.1.split_whitespace();
-    fields.skip(19).next()?.parse().ok()
+    let mut fields = stat.rsplit_once(") ")?.1.split_whitespace();
+    fields.nth(19)?.parse().ok()
 }
 
 async fn handle_connection(
@@ -176,10 +176,7 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
         Request::Cancel => CoordinatorCommand::Cancel,
         Request::Status => CoordinatorCommand::GetStatus,
         Request::ReloadConfig => match Config::reload() {
-            Ok(config) => match coordinator
-                .validate_reload(&config)
-                .and_then(|()| Ok(config))
-            {
+            Ok(config) => match coordinator.validate_reload(&config).map(|()| config) {
                 Ok(config) => match prepare_dependencies(&config)
                     .await
                     .and_then(|()| coordinator.reload_config(config))
