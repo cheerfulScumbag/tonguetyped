@@ -598,6 +598,43 @@ async fn completed_hold_release_does_not_detach_the_next_activation() {
 }
 
 #[tokio::test]
+async fn rejected_hold_press_cannot_stop_an_ipc_recording() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime.clone(), 2);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { ref state, .. } if state == "recording"
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 1);
+    dispatch(&coordinator, Request::Cancel).await;
+}
+
+#[tokio::test]
 async fn ipc_start_preserves_pending_release_before_mode_reload() {
     let runtime = Arc::new(TestRuntime::default());
     let coordinator = coordinator(runtime, 1);

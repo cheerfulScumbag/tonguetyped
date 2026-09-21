@@ -322,7 +322,7 @@ impl Coordinator {
     }
 
     pub async fn handle_activation(&self, pressed: bool) -> anyhow::Result<CoordinatorResponse> {
-        let (mode, release) = {
+        let (mode, release, new_press) = {
             let mut inner = self.state.lock().unwrap();
             if pressed {
                 if let Some((generation, released_at)) = inner.pending_release {
@@ -343,8 +343,9 @@ impl Coordinator {
                     Some(PhysicalPress::Detached) => unreachable!(),
                     None => inner.config.activation.mode.clone(),
                 };
+                let new_press = inner.physical_press.is_none();
                 inner.physical_press = Some(PhysicalPress::Active(mode.clone()));
-                (mode, None)
+                (mode, None, new_press)
             } else {
                 let Some(physical_press) = inner.physical_press.clone() else {
                     return Ok(CoordinatorResponse::Ok);
@@ -359,7 +360,7 @@ impl Coordinator {
                         return Ok(CoordinatorResponse::Ok);
                     }
                 };
-                (mode, Some((generation, released_at)))
+                (mode, Some((generation, released_at)), false)
             }
         };
         let response = match (&mode, pressed) {
@@ -379,6 +380,18 @@ impl Coordinator {
         }?;
         if let Some((generation, released_at)) = release {
             self.schedule_activation_release(generation, released_at);
+        }
+        if new_press
+            && matches!(mode, crate::config::ActivationMode::Hold)
+            && !matches!(response, CoordinatorResponse::RecordingStarted)
+        {
+            let mut inner = self.state.lock().unwrap();
+            if matches!(
+                inner.physical_press,
+                Some(PhysicalPress::Active(crate::config::ActivationMode::Hold))
+            ) {
+                inner.physical_press = Some(PhysicalPress::Detached);
+            }
         }
         Ok(response)
     }
