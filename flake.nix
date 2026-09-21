@@ -30,7 +30,6 @@
           pkg-config
           alsa-lib
           openssl
-          xdotool
         ];
 
         shellHook = ''
@@ -61,7 +60,6 @@
         buildInputs = with pkgs; [
           alsa-lib
           openssl
-          xdotool
         ];
 
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";

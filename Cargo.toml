@@ -15,7 +15,7 @@ tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 cpal = "0.15"
 rubato = "0.15"
-transcribe-rs = { version = "0.3", features = ["whisper-cpp"] }
+transcribe-rs = { version = "=0.3.11", features = ["whisper-cpp"] }
 vad-rs = { git = "https://github.com/cjpais/vad-rs", rev = "2a412ed858695b9251f3f5a1a20d95b59fa7c498" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 indicatif = "0.17"
