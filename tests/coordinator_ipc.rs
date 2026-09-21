@@ -508,6 +508,56 @@ async fn toggle_mode_absorbs_autorepeat_until_final_release() {
 }
 
 #[tokio::test]
+async fn toggle_stop_absorbs_autorepeat_after_transcription_settles() {
+    let runtime = Arc::new(TestRuntime::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime.clone()).unwrap());
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { ref state, .. } if state == "idle"
+    ));
+
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    dispatch(&coordinator, Request::Cancel).await;
+}
+
+#[tokio::test]
 async fn ipc_start_preserves_pending_release_before_mode_reload() {
     let runtime = Arc::new(TestRuntime::default());
     let coordinator = coordinator(runtime, 1);

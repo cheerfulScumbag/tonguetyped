@@ -569,10 +569,6 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
                 let _ = sender.send(RecordingSignal::Stop);
             }
             inner.state = State::Processing;
-            if !matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
-                inner.pending_release = None;
-                inner.physical_press = None;
-            }
             inner.last_action = Some(now);
             CoordinatorResponse::RecordingStopped
         }
