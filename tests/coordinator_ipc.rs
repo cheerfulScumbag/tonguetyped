@@ -152,6 +152,30 @@ async fn output_failure_preserves_transcript_and_is_reported_in_status() {
     ));
 }
 
+#[tokio::test]
+async fn successful_recording_does_not_hide_activation_listener_failure() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime, 2);
+    coordinator.set_runtime_error("activation listener failed: portal unavailable".to_string());
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { error: Some(ref error), .. }
+            if error.contains("activation listener failed")
+    ));
+}
+
 fn coordinator(runtime: Arc<TestRuntime>, max_seconds: u64) -> Arc<Coordinator> {
     let mut config = Config::default();
     config.history.enabled = false;

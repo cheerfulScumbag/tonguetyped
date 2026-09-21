@@ -37,9 +37,67 @@ pub trait CoordinatorRuntime: Send + Sync {
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
 }
 
-#[derive(Default)]
 struct ProductionRuntime {
     inference: Arc<Mutex<EngineLifecycle<crate::inference::InferenceEngine>>>,
+    idle_unload: IdleUnloadTimer,
+}
+
+struct IdleUnloadTimer {
+    schedule_tx: mpsc::Sender<(u64, Instant)>,
+}
+
+impl IdleUnloadTimer {
+    fn new<E: Send + 'static>(lifecycle: Arc<Mutex<EngineLifecycle<E>>>) -> anyhow::Result<Self> {
+        let (schedule_tx, schedule_rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("tonguetyped-idle-unload".to_string())
+            .spawn(move || {
+                let mut deadline: Option<(u64, Instant)> = None;
+                loop {
+                    let received = match deadline {
+                        Some((_, at)) => {
+                            schedule_rx.recv_timeout(at.saturating_duration_since(Instant::now()))
+                        }
+                        None => match schedule_rx.recv() {
+                            Ok(schedule) => {
+                                deadline = Some(schedule);
+                                continue;
+                            }
+                            Err(_) => return,
+                        },
+                    };
+                    match received {
+                        Ok(schedule) => deadline = Some(schedule),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let (generation, _) = deadline.take().unwrap();
+                            lifecycle.lock().unwrap().unload_if_idle(generation);
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            })?;
+        Ok(Self { schedule_tx })
+    }
+
+    fn schedule(&self, generation: u64, delay: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now()
+            .checked_add(delay)
+            .ok_or_else(|| anyhow::anyhow!("idle unload timeout is too large"))?;
+        self.schedule_tx
+            .send((generation, deadline))
+            .map_err(|_| anyhow::anyhow!("idle unload timer stopped"))
+    }
+}
+
+impl ProductionRuntime {
+    fn new() -> anyhow::Result<Self> {
+        let inference = Arc::new(Mutex::new(EngineLifecycle::default()));
+        let idle_unload = IdleUnloadTimer::new(Arc::clone(&inference))?;
+        Ok(Self {
+            inference,
+            idle_unload,
+        })
+    }
 }
 
 struct EngineLifecycle<E> {
@@ -158,28 +216,21 @@ impl CoordinatorRuntime for ProductionRuntime {
         if samples.is_empty() {
             return Ok(String::new());
         }
-        let (result, idle_unload) = {
-            let mut lifecycle = self.inference.lock().unwrap();
-            let engine = lifecycle.ensure(&config.model.selected, || {
-                let mut engine = crate::inference::InferenceEngine::new(
-                    crate::model::ModelCatalog::model_path(&config.model.selected)?,
-                );
-                engine.load()?;
-                Ok(engine)
-            })?;
-            let result = engine.transcribe(&samples, &config.transcription.language);
-            let idle_unload = lifecycle.finish(
-                &config.model.idle_unload.policy,
-                config.model.idle_unload.timeout_minutes,
+        let mut lifecycle = self.inference.lock().unwrap();
+        let engine = lifecycle.ensure(&config.model.selected, || {
+            let mut engine = crate::inference::InferenceEngine::new(
+                crate::model::ModelCatalog::model_path(&config.model.selected)?,
             );
-            (result, idle_unload)
-        };
+            engine.load()?;
+            Ok(engine)
+        })?;
+        let result = engine.transcribe(&samples, &config.transcription.language);
+        let idle_unload = lifecycle.finish(
+            &config.model.idle_unload.policy,
+            config.model.idle_unload.timeout_minutes,
+        );
         if let Some((generation, delay)) = idle_unload {
-            let inference = Arc::clone(&self.inference);
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                inference.lock().unwrap().unload_if_idle(generation);
-            });
+            self.idle_unload.schedule(generation, delay)?;
         }
         result
     }
@@ -251,6 +302,7 @@ struct CoordinatorStateInner {
     signal_tx: Option<mpsc::Sender<RecordingSignal>>,
     physical_press: Option<PhysicalPress>,
     last_error: Option<String>,
+    runtime_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -269,7 +321,7 @@ pub struct Coordinator {
 
 impl Coordinator {
     pub fn new(config: Config) -> anyhow::Result<Self> {
-        Self::with_runtime(config, Arc::new(ProductionRuntime::default()))
+        Self::with_runtime(config, Arc::new(ProductionRuntime::new()?))
     }
 
     pub fn with_runtime(
@@ -292,6 +344,7 @@ impl Coordinator {
                 signal_tx: None,
                 physical_press: None,
                 last_error: None,
+                runtime_error: None,
             })),
             output_lock: Arc::new(Mutex::new(())),
             last_result: Arc::new(Mutex::new(last_result)),
@@ -631,7 +684,7 @@ impl Coordinator {
     }
 
     pub fn set_runtime_error(&self, error: String) {
-        self.state.lock().unwrap().last_error = Some(error);
+        self.state.lock().unwrap().runtime_error = Some(error);
     }
 }
 
@@ -717,7 +770,10 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         }
         .to_string(),
         activation_mode: inner.config.activation.mode.to_string(),
-        error: inner.last_error.clone(),
+        error: inner
+            .last_error
+            .clone()
+            .or_else(|| inner.runtime_error.clone()),
     }
 }
 
@@ -811,5 +867,37 @@ mod tests {
             .unwrap();
         lifecycle.unload_if_idle(stale.0);
         assert!(lifecycle.is_loaded());
+    }
+
+    #[test]
+    fn idle_unload_timer_resets_to_latest_deadline() {
+        let lifecycle = Arc::new(Mutex::new(EngineLifecycle::default()));
+        let timer = IdleUnloadTimer::new(Arc::clone(&lifecycle)).unwrap();
+        let first_generation = {
+            let mut lifecycle = lifecycle.lock().unwrap();
+            lifecycle
+                .ensure("model", || Ok::<_, anyhow::Error>(()))
+                .unwrap();
+            lifecycle.generation
+        };
+        timer
+            .schedule(first_generation, Duration::from_millis(30))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        let second_generation = {
+            let mut lifecycle = lifecycle.lock().unwrap();
+            lifecycle
+                .ensure("model", || Ok::<_, anyhow::Error>(()))
+                .unwrap();
+            lifecycle.generation
+        };
+        timer
+            .schedule(second_generation, Duration::from_millis(80))
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(lifecycle.lock().unwrap().is_loaded());
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!lifecycle.lock().unwrap().is_loaded());
     }
 }
