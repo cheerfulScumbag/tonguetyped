@@ -589,6 +589,7 @@ fn complete_activation_release(inner: &mut CoordinatorStateInner, generation: u6
         Some(PhysicalPress::Active(crate::config::ActivationMode::Hold))
             if inner.state == State::Recording =>
         {
+            inner.physical_press = None;
             stop_recording(inner, Instant::now());
         }
         _ => inner.physical_press = None,

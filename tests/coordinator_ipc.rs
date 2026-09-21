@@ -558,6 +558,46 @@ async fn toggle_stop_absorbs_autorepeat_after_transcription_settles() {
 }
 
 #[tokio::test]
+async fn completed_hold_release_does_not_detach_the_next_activation() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime.clone(), 2);
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
+    coordinator.reload_config(config).unwrap();
+    tokio::time::sleep(Duration::from_millis(35)).await;
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 3);
+    dispatch(&coordinator, Request::Cancel).await;
+}
+
+#[tokio::test]
 async fn ipc_start_preserves_pending_release_before_mode_reload() {
     let runtime = Arc::new(TestRuntime::default());
     let coordinator = coordinator(runtime, 1);
