@@ -334,7 +334,9 @@ impl Coordinator {
                     complete_activation_release(&mut inner, generation);
                 }
                 if matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
-                    return Ok(CoordinatorResponse::Ignored("detached physical press".into()));
+                    return Ok(CoordinatorResponse::Ignored(
+                        "detached physical press".into(),
+                    ));
                 }
                 let mode = match &inner.physical_press {
                     Some(PhysicalPress::Active(mode)) => mode.clone(),
@@ -392,8 +394,9 @@ impl Coordinator {
                     let _ = sender.send(RecordingSignal::Cancel);
                 }
                 inner.state = State::Idle;
-                inner.pending_release = None;
-                inner.physical_press = None;
+                if inner.physical_press.is_some() {
+                    inner.physical_press = Some(PhysicalPress::Detached);
+                }
                 inner.last_action = Some(Instant::now());
                 CoordinatorResponse::Cancelled
             }
@@ -539,9 +542,7 @@ fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Reserve
 }
 
 fn detach_physical_press_for_ipc(inner: &mut CoordinatorStateInner) {
-    if inner.pending_release.take().is_some() {
-        inner.physical_press = None;
-    } else if matches!(inner.physical_press, Some(PhysicalPress::Active(_))) {
+    if inner.physical_press.is_some() {
         inner.physical_press = Some(PhysicalPress::Detached);
     }
 }
@@ -581,6 +582,10 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
 }
 
 fn complete_activation_release(inner: &mut CoordinatorStateInner, generation: u64) {
+    if matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
+        inner.physical_press = None;
+        return;
+    }
     if inner.generation != generation {
         return;
     }
