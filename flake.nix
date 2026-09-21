@@ -29,6 +29,7 @@
           libclang
           pkg-config
           alsa-lib
+          xdotool
           openssl
         ];
 
@@ -59,6 +60,7 @@
 
         buildInputs = with pkgs; [
           alsa-lib
+          xdotool
           openssl
         ];
 
