@@ -72,9 +72,8 @@ async fn main() -> anyhow::Result<()> {
                 doctor::typing_test(&config)?;
             } else {
                 let config = config::Config::load()?;
-                let report = doctor::run_doctor(&config);
+                let report = doctor::run_doctor(&config)?;
                 println!("compositor:     {}", report.compositor);
-                println!("desktop:        {}", report.desktop);
                 println!(
                     "audio:          {}",
                     if report.audio_available {

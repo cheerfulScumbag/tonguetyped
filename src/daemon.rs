@@ -30,7 +30,7 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     let _lock = acquire_instance_lock(&sock_path)?;
     prepare_dependencies(&config).await?;
 
-    let coordinator = Arc::new(Coordinator::new(config));
+    let coordinator = Arc::new(Coordinator::new(config)?);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let activation = coordinator.clone();
     let keybind = activation.activation_keybind();

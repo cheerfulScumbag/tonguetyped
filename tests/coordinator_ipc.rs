@@ -99,7 +99,7 @@ fn coordinator(runtime: Arc<TestRuntime>, max_seconds: u64) -> Arc<Coordinator> 
     let mut config = Config::default();
     config.history.enabled = false;
     config.transcription.max_recording_seconds = max_seconds;
-    Arc::new(Coordinator::with_runtime(config, runtime))
+    Arc::new(Coordinator::with_runtime(config, runtime).unwrap())
 }
 
 async fn wait_for_state(coordinator: &Arc<Coordinator>, expected: &str) {
@@ -290,7 +290,7 @@ async fn toggle_release_uses_mode_from_active_press() {
     let mut config = Config::default();
     config.history.enabled = false;
     config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
-    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime));
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime).unwrap());
 
     assert!(matches!(
         coordinator.handle_activation(true).await.unwrap(),
@@ -413,6 +413,44 @@ async fn ignored_hold_press_absorbs_autorepeat_until_final_release() {
     config.history.enabled = false;
     config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
     coordinator.reload_config(config).unwrap();
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { ref state, .. } if state == "recording"
+    ));
+    dispatch(&coordinator, Request::Cancel).await;
+}
+
+#[tokio::test]
+async fn hold_release_during_processing_uses_reloaded_mode_for_next_press() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 1);
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    wait_for_state(&coordinator, "processing").await;
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Busy
+    ));
+
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
+    coordinator.reload_config(config).unwrap();
+    runtime.release_transcription();
+    wait_for_state(&coordinator, "idle").await;
+
     assert!(matches!(
         coordinator.handle_activation(true).await.unwrap(),
         tonguetyped::coordinator::CoordinatorResponse::RecordingStarted

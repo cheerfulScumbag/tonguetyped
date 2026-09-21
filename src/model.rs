@@ -21,10 +21,8 @@ impl ModelCatalog {
     }
 
     pub fn model_path(model_name: &str) -> anyhow::Result<PathBuf> {
-        Ok(
-            crate::inference::InferenceEngine::models_dir()
-                .join(Self::model_file_name(model_name)?),
-        )
+        Ok(crate::inference::InferenceEngine::models_dir()?
+            .join(Self::model_file_name(model_name)?))
     }
 }
 
@@ -102,7 +100,7 @@ impl DownloadManager {
     }
 
     pub async fn ensure_vad_model(&self) -> anyhow::Result<PathBuf> {
-        let path = crate::inference::InferenceEngine::models_dir().join("silero_vad_v4.onnx");
+        let path = crate::inference::InferenceEngine::models_dir()?.join("silero_vad_v4.onnx");
         if path.exists() {
             return Ok(path);
         }

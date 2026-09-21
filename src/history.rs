@@ -91,13 +91,11 @@ impl HistoryStore {
     }
 }
 
-pub fn history_db_path() -> PathBuf {
-    let dir = directories::BaseDirs::new()
+pub fn history_db_path() -> anyhow::Result<PathBuf> {
+    directories::BaseDirs::new()
         .map(|b| b.data_dir().join("tonguetyped"))
-        .unwrap_or_else(|| PathBuf::from(".local/share/tonguetyped"));
-    std::fs::create_dir_all(&dir).ok();
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    dir.join("history.db")
+        .map(|dir| dir.join("history.db"))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine the user data directory"))
 }
 
 #[cfg(test)]

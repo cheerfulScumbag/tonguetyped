@@ -50,12 +50,10 @@ impl InferenceEngine {
         Ok(result.text)
     }
 
-    pub fn models_dir() -> PathBuf {
-        let dir = directories::BaseDirs::new()
+    pub fn models_dir() -> anyhow::Result<PathBuf> {
+        directories::BaseDirs::new()
             .map(|b| b.data_dir().join("tonguetyped").join("models"))
-            .unwrap_or_else(|| PathBuf::from(".local/share/tonguetyped/models"));
-        std::fs::create_dir_all(&dir).ok();
-        dir
+            .ok_or_else(|| anyhow::anyhow!("cannot determine the user data directory"))
     }
 }
 
@@ -65,7 +63,7 @@ mod tests {
 
     #[test]
     fn test_models_dir_returns_path() {
-        let dir = InferenceEngine::models_dir();
+        let dir = InferenceEngine::models_dir().unwrap();
         assert!(dir.to_str().is_some());
     }
 }

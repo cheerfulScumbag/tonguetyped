@@ -140,7 +140,7 @@ fn wait_for_recording_end(
 }
 
 fn apply_vad(samples: &[f32]) -> anyhow::Result<Vec<f32>> {
-    let model_path = crate::inference::InferenceEngine::models_dir().join("silero_vad_v4.onnx");
+    let model_path = crate::inference::InferenceEngine::models_dir()?.join("silero_vad_v4.onnx");
     let mut detector = crate::vad::VadDetector::new(model_path.to_string_lossy().as_ref(), 16_000)?;
     detector.reset();
     let mut speech = Vec::new();
@@ -178,19 +178,21 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> anyhow::Result<Self> {
         Self::with_runtime(config, Arc::new(ProductionRuntime))
     }
 
-    pub fn with_runtime(config: Config, runtime: Arc<dyn CoordinatorRuntime>) -> Self {
+    pub fn with_runtime(
+        config: Config,
+        runtime: Arc<dyn CoordinatorRuntime>,
+    ) -> anyhow::Result<Self> {
         let last_result = if config.history.enabled {
-            crate::history::HistoryStore::new(&crate::history::history_db_path())
-                .and_then(|store| store.get_last_result())
-                .unwrap_or(None)
+            crate::history::HistoryStore::new(&crate::history::history_db_path()?)?
+                .get_last_result()?
         } else {
             None
         };
-        Self {
+        Ok(Self {
             state: Arc::new(Mutex::new(CoordinatorStateInner {
                 state: State::Idle,
                 config,
@@ -204,7 +206,7 @@ impl Coordinator {
             output_lock: Arc::new(Mutex::new(())),
             last_result: Arc::new(Mutex::new(last_result)),
             runtime,
-        }
+        })
     }
 
     pub async fn handle_command(
@@ -271,7 +273,10 @@ impl Coordinator {
                         self.schedule_hold_release(token, now);
                         CoordinatorResponse::RecordingStopped
                     }
-                    State::Processing => CoordinatorResponse::Busy,
+                    State::Processing => {
+                        inner.active_press_mode = None;
+                        CoordinatorResponse::Busy
+                    }
                     State::Idle => {
                         let token = inner.generation;
                         inner.pending_release = Some((token, now));
@@ -459,7 +464,9 @@ impl Coordinator {
                 .as_secs();
             *coordinator.last_result.lock().unwrap() = Some((trimmed.clone(), timestamp));
             if config.history.enabled {
-                match crate::history::HistoryStore::new(&crate::history::history_db_path()) {
+                match crate::history::history_db_path()
+                    .and_then(|path| crate::history::HistoryStore::new(&path))
+                {
                     Ok(store) => {
                         if let Err(error) = store
                             .insert(&trimmed, None, &config.transcription.language)

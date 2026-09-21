@@ -3,7 +3,6 @@ use crate::audio;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DoctorReport {
     pub compositor: String,
-    pub desktop: String,
     pub audio_available: bool,
     pub audio_devices: Vec<String>,
     pub model_ready: bool,
@@ -12,9 +11,8 @@ pub struct DoctorReport {
     pub output_method_available: bool,
 }
 
-pub fn run_doctor(config: &crate::config::Config) -> DoctorReport {
+pub fn run_doctor(config: &crate::config::Config) -> anyhow::Result<DoctorReport> {
     let compositor = detect_compositor();
-    let desktop = detect_desktop();
     let audio_available = audio::AudioRecorder::new(&config.audio.microphone, 16_000, None, None)
         .and_then(|mut recorder| {
             recorder.start()?;
@@ -27,8 +25,7 @@ pub fn run_doctor(config: &crate::config::Config) -> DoctorReport {
         .into_iter()
         .map(|d| d.name)
         .collect();
-    let model_path = crate::model::ModelCatalog::model_path(&config.model.selected)
-        .unwrap_or_else(|_| crate::inference::InferenceEngine::models_dir().join("invalid"));
+    let model_path = crate::model::ModelCatalog::model_path(&config.model.selected)?;
     let mut engine = crate::inference::InferenceEngine::new(model_path.clone());
     let model_ready = engine.load().is_ok();
     engine.unload();
@@ -36,24 +33,37 @@ pub fn run_doctor(config: &crate::config::Config) -> DoctorReport {
     let output_method_available = config.output.method == crate::config::OutputMethod::None
         || crate::output::type_backend_available(&config.output.typing_backend);
 
-    DoctorReport {
+    Ok(DoctorReport {
         compositor,
-        desktop,
         audio_available,
         audio_devices,
         model_ready,
         model_path: model_path.to_string_lossy().to_string(),
         helpers_found,
         output_method_available,
-    }
+    })
 }
 
 fn detect_compositor() -> String {
-    std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string())
-}
+    let session_type = std::env::var("XDG_SESSION_TYPE")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let desktop = [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .into_iter()
+    .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
 
-fn detect_desktop() -> String {
-    std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".to_string())
+    match (desktop, session_type) {
+        (Some(desktop), Some(session_type)) if !desktop.eq_ignore_ascii_case(&session_type) => {
+            format!("{desktop} ({session_type})")
+        }
+        (Some(desktop), _) => desktop,
+        (None, Some(session_type)) => session_type,
+        (None, None) => "unknown".to_string(),
+    }
 }
 
 pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<()> {
