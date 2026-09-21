@@ -120,7 +120,7 @@ impl std::fmt::Display for IdleUnloadPolicy {
 pub struct AudioConfig {
     #[serde(default = "default_microphone")]
     pub microphone: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub feedback_sounds: bool,
     #[serde(default = "default_feedback_volume")]
     pub feedback_volume: f64,
@@ -134,7 +134,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             microphone: default_microphone(),
-            feedback_sounds: true,
+            feedback_sounds: false,
             feedback_volume: default_feedback_volume(),
             feedback_device: default_feedback_device(),
             mute_playback: MutePlaybackConfig::default(),
@@ -486,6 +486,21 @@ impl Config {
         ) {
             anyhow::bail!("unsupported typing backend: {}", self.output.typing_backend);
         }
+        if self.audio.feedback_sounds {
+            anyhow::bail!("audio.feedback_sounds is not supported in Stage 1");
+        }
+        if self.audio.mute_playback.enabled {
+            anyhow::bail!("audio.mute_playback.enabled is not supported in Stage 1");
+        }
+        if self.history.save_recordings {
+            anyhow::bail!("history.save_recordings is not supported in Stage 1");
+        }
+        if self.overlay.enabled {
+            anyhow::bail!("overlay.enabled is not supported in Stage 1");
+        }
+        if self.startup.autostart {
+            anyhow::bail!("startup.autostart is not supported in Stage 1");
+        }
 
         Ok(())
     }
@@ -499,6 +514,7 @@ mod tests {
     fn defaults_are_valid_and_match_stage_one_contract() {
         let config = Config::default();
         config.validate().unwrap();
+        assert!(!config.audio.feedback_sounds);
         assert_eq!(config.transcription.max_recording_seconds, 120);
         assert_eq!(config.model.selected, "whisper-small-q5_1");
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
@@ -513,6 +529,29 @@ mod tests {
 
         config.output.typing_backend = "auto".to_string();
         config.model.selected = "../custom".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_enabled_later_stage_features() {
+        let mut config = Config::default();
+        config.audio.feedback_sounds = true;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.audio.mute_playback.enabled = true;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.history.save_recordings = true;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.overlay.enabled = true;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.startup.autostart = true;
         assert!(config.validate().is_err());
     }
 

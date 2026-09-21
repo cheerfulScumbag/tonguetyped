@@ -37,7 +37,74 @@ pub trait CoordinatorRuntime: Send + Sync {
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
 }
 
-struct ProductionRuntime;
+#[derive(Default)]
+struct ProductionRuntime {
+    inference: Arc<Mutex<EngineLifecycle<crate::inference::InferenceEngine>>>,
+}
+
+struct EngineLifecycle<E> {
+    engine: Option<(String, E)>,
+    generation: u64,
+}
+
+impl<E> Default for EngineLifecycle<E> {
+    fn default() -> Self {
+        Self {
+            engine: None,
+            generation: 0,
+        }
+    }
+}
+
+impl<E> EngineLifecycle<E> {
+    fn ensure(
+        &mut self,
+        model: &str,
+        load: impl FnOnce() -> anyhow::Result<E>,
+    ) -> anyhow::Result<&mut E> {
+        if self
+            .engine
+            .as_ref()
+            .is_some_and(|(loaded_model, _)| loaded_model != model)
+        {
+            self.engine = None;
+        }
+        if self.engine.is_none() {
+            self.engine = Some((model.to_string(), load()?));
+        }
+        self.generation = self.generation.wrapping_add(1);
+        Ok(&mut self.engine.as_mut().unwrap().1)
+    }
+
+    fn finish(
+        &mut self,
+        policy: &crate::config::IdleUnloadPolicy,
+        timeout_minutes: u64,
+    ) -> Option<(u64, Duration)> {
+        match policy {
+            crate::config::IdleUnloadPolicy::Never => None,
+            crate::config::IdleUnloadPolicy::AfterTranscription => {
+                self.engine = None;
+                None
+            }
+            crate::config::IdleUnloadPolicy::AfterIdle => Some((
+                self.generation,
+                Duration::from_secs(timeout_minutes.saturating_mul(60)),
+            )),
+        }
+    }
+
+    fn unload_if_idle(&mut self, generation: u64) {
+        if self.generation == generation {
+            self.engine = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_loaded(&self) -> bool {
+        self.engine.is_some()
+    }
+}
 
 impl CoordinatorRuntime for ProductionRuntime {
     fn record(
@@ -91,12 +158,29 @@ impl CoordinatorRuntime for ProductionRuntime {
         if samples.is_empty() {
             return Ok(String::new());
         }
-        let mut engine = crate::inference::InferenceEngine::new(
-            crate::model::ModelCatalog::model_path(&config.model.selected)?,
-        );
-        engine.load()?;
-        let result = engine.transcribe(&samples, &config.transcription.language);
-        engine.unload();
+        let (result, idle_unload) = {
+            let mut lifecycle = self.inference.lock().unwrap();
+            let engine = lifecycle.ensure(&config.model.selected, || {
+                let mut engine = crate::inference::InferenceEngine::new(
+                    crate::model::ModelCatalog::model_path(&config.model.selected)?,
+                );
+                engine.load()?;
+                Ok(engine)
+            })?;
+            let result = engine.transcribe(&samples, &config.transcription.language);
+            let idle_unload = lifecycle.finish(
+                &config.model.idle_unload.policy,
+                config.model.idle_unload.timeout_minutes,
+            );
+            (result, idle_unload)
+        };
+        if let Some((generation, delay)) = idle_unload {
+            let inference = Arc::clone(&self.inference);
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                inference.lock().unwrap().unload_if_idle(generation);
+            });
+        }
         result
     }
 
@@ -185,7 +269,7 @@ pub struct Coordinator {
 
 impl Coordinator {
     pub fn new(config: Config) -> anyhow::Result<Self> {
-        Self::with_runtime(config, Arc::new(ProductionRuntime))
+        Self::with_runtime(config, Arc::new(ProductionRuntime::default()))
     }
 
     pub fn with_runtime(
@@ -466,7 +550,7 @@ impl Coordinator {
                 Ok(text) => text,
                 Err(error) => {
                     tracing::error!("transcription failed: {}", error);
-                    coordinator.settle(generation);
+                    coordinator.settle_error(generation, format!("transcription failed: {error}"));
                     return;
                 }
             };
@@ -480,22 +564,23 @@ impl Coordinator {
                 return;
             }
 
-            if !trimmed.is_empty() {
-                let output_text = if config.transcription.trailing_space {
-                    format!("{} ", trimmed)
-                } else {
-                    trimmed.clone()
-                };
-                if let Err(error) = coordinator.runtime.output(&output_text, &config) {
-                    tracing::error!("output failed: {}", error);
-                }
-            }
-
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             *coordinator.last_result.lock().unwrap() = Some((trimmed.clone(), timestamp));
+            let output_error = if config.transcription.trailing_space {
+                coordinator
+                    .runtime
+                    .output(&format!("{} ", trimmed), &config)
+            } else {
+                coordinator.runtime.output(&trimmed, &config)
+            }
+            .err()
+            .map(|error| format!("output failed: {error}"));
+            if let Some(error) = &output_error {
+                tracing::error!("{error}");
+            }
             if config.history.enabled {
                 match crate::history::history_db_path()
                     .and_then(|path| crate::history::HistoryStore::new(&path))
@@ -511,7 +596,11 @@ impl Coordinator {
                     Err(error) => tracing::error!("history unavailable: {}", error),
                 }
             }
-            coordinator.settle(generation);
+            if let Some(error) = output_error {
+                coordinator.settle_error(generation, error);
+            } else {
+                coordinator.settle(generation);
+            }
         });
         started_rx
     }
@@ -539,6 +628,10 @@ impl Coordinator {
 
     pub fn activation_keybind(&self) -> String {
         self.state.lock().unwrap().config.activation.keybind.clone()
+    }
+
+    pub fn set_runtime_error(&self, error: String) {
+        self.state.lock().unwrap().last_error = Some(error);
     }
 }
 
@@ -664,5 +757,59 @@ mod tests {
             result.unwrap_err().to_string(),
             "microphone stream failed: device disconnected"
         );
+    }
+
+    #[test]
+    fn engine_lifecycle_honors_unload_policies() {
+        let mut lifecycle = EngineLifecycle::default();
+        let mut loads = 0;
+
+        lifecycle
+            .ensure("model", || {
+                loads += 1;
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap();
+        assert!(lifecycle
+            .finish(&crate::config::IdleUnloadPolicy::Never, 15)
+            .is_none());
+        lifecycle
+            .ensure("model", || {
+                loads += 1;
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap();
+        assert_eq!(loads, 1);
+
+        lifecycle.finish(&crate::config::IdleUnloadPolicy::AfterTranscription, 15);
+        lifecycle
+            .ensure("model", || {
+                loads += 1;
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap();
+        assert_eq!(loads, 2);
+
+        let idle = lifecycle
+            .finish(&crate::config::IdleUnloadPolicy::AfterIdle, 15)
+            .unwrap();
+        lifecycle.unload_if_idle(idle.0);
+        assert!(!lifecycle.is_loaded());
+    }
+
+    #[test]
+    fn stale_idle_timer_cannot_unload_reused_engine() {
+        let mut lifecycle = EngineLifecycle::default();
+        lifecycle
+            .ensure("model", || Ok::<_, anyhow::Error>(()))
+            .unwrap();
+        let stale = lifecycle
+            .finish(&crate::config::IdleUnloadPolicy::AfterIdle, 15)
+            .unwrap();
+        lifecycle
+            .ensure("model", || Ok::<_, anyhow::Error>(()))
+            .unwrap();
+        lifecycle.unload_if_idle(stale.0);
+        assert!(lifecycle.is_loaded());
     }
 }

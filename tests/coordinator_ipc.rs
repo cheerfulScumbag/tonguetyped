@@ -16,6 +16,8 @@ struct TestRuntime {
     block_transcription: AtomicBool,
     transcription_started: AtomicBool,
     empty_transcript: AtomicBool,
+    transcription_error: AtomicBool,
+    output_error: AtomicBool,
     transcription_gate: (Mutex<bool>, Condvar),
     startup_gate: (Mutex<bool>, Condvar),
     microphone_error_gate: (Mutex<bool>, Condvar),
@@ -84,15 +86,70 @@ impl CoordinatorRuntime for TestRuntime {
         }
         if self.empty_transcript.load(Ordering::SeqCst) {
             Ok("   ".to_string())
+        } else if self.transcription_error.load(Ordering::SeqCst) {
+            anyhow::bail!("simulated transcription failure")
         } else {
             Ok("test transcript".to_string())
         }
     }
 
     fn output(&self, text: &str, _config: &Config) -> anyhow::Result<()> {
+        if self.output_error.load(Ordering::SeqCst) {
+            anyhow::bail!("simulated output failure");
+        }
         self.outputs.lock().unwrap().push(text.to_string());
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn transcription_failure_is_reported_in_status() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.transcription_error.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime, 2);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { error: Some(ref error), .. }
+            if error.contains("transcription failed")
+    ));
+}
+
+#[tokio::test]
+async fn output_failure_preserves_transcript_and_is_reported_in_status() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.output_error.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime, 2);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::GetLastResult).await,
+        Response::LastResult { ref text, .. } if text == "test transcript"
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { error: Some(ref error), .. }
+            if error.contains("output failed")
+    ));
 }
 
 fn coordinator(runtime: Arc<TestRuntime>, max_seconds: u64) -> Arc<Coordinator> {

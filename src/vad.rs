@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
+
 pub const PREFILL_SAMPLES: usize = 7200;
-pub const HANGOVER_FRAMES: usize = 1650;
+pub const HANGOVER_MILLISECONDS: usize = 1650;
 
 pub struct VadDetector {
     inner: vad_rs::Vad,
@@ -7,6 +9,7 @@ pub struct VadDetector {
     hangover_counter: usize,
     speech_detected: bool,
     accepted: Vec<f32>,
+    hangover_samples: usize,
 }
 
 impl VadDetector {
@@ -19,6 +22,7 @@ impl VadDetector {
             hangover_counter: 0,
             speech_detected: false,
             accepted: Vec::new(),
+            hangover_samples: hangover_samples(sample_rate),
         })
     }
 
@@ -59,9 +63,9 @@ impl VadDetector {
         }
 
         if is_speech {
-            self.hangover_counter = HANGOVER_FRAMES;
+            self.hangover_counter = self.hangover_samples;
         } else if self.speech_detected && self.hangover_counter > 0 {
-            self.hangover_counter = self.hangover_counter.saturating_sub(samples.len());
+            self.hangover_counter = self.hangover_counter.saturating_sub(valid_samples);
         }
 
         if self.speech_detected && self.hangover_counter == 0 {
@@ -84,6 +88,10 @@ impl VadDetector {
     }
 }
 
+fn hangover_samples(sample_rate: usize) -> usize {
+    sample_rate * HANGOVER_MILLISECONDS / 1000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +101,9 @@ mod tests {
         let vad = VadDetector::new("nonexistent_model.onnx", 16000);
         assert!(vad.is_err());
     }
+
+    #[test]
+    fn hangover_duration_is_converted_to_samples() {
+        assert_eq!(hangover_samples(16_000), 26_400);
+    }
 }
-use std::collections::VecDeque;

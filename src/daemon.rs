@@ -31,32 +31,22 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     prepare_dependencies(&config).await?;
 
     let coordinator = Arc::new(Coordinator::new(config)?);
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let listener = UnixListener::bind(&sock_path)?;
+    let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
     let activation = coordinator.clone();
+    let activation_status = coordinator.clone();
     let keybind = activation.activation_keybind();
-    let mut activation_task = tokio::spawn(async move {
+    tokio::spawn(async move {
         if let Err(error) = crate::activation::listen(activation, keybind, ready_tx).await {
             tracing::error!("activation listener failed: {error}");
+            activation_status.set_runtime_error(format!("activation listener failed: {error}"));
         }
     });
-    ready_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("activation listener exited during startup"))?
-        .map_err(anyhow::Error::msg)?;
-    let listener = UnixListener::bind(&sock_path)?;
 
     tracing::info!("daemon listening on {}", sock_path.display());
 
     loop {
-        let (stream, _addr) = tokio::select! {
-            result = listener.accept() => result?,
-            result = &mut activation_task => {
-                match result {
-                    Ok(()) => anyhow::bail!("activation listener exited"),
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        };
+        let (stream, _addr) = listener.accept().await?;
         let coord = coordinator.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, coord).await {
@@ -78,59 +68,36 @@ async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
 }
 
 struct InstanceLock {
-    path: PathBuf,
     _file: File,
-}
-
-impl Drop for InstanceLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 fn acquire_instance_lock(sock_path: &std::path::Path) -> anyhow::Result<InstanceLock> {
     let path = lock_path()?;
-    for _ in 0..2 {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                let pid = std::process::id();
-                let started = process_start_time(pid)
-                    .ok_or_else(|| anyhow::anyhow!("failed to read daemon process identity"))?;
-                writeln!(file, "{pid} {started}")?;
-                file.sync_all()?;
-                if sock_path.exists() {
-                    if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
-                        drop(file);
-                        let _ = std::fs::remove_file(&path);
-                        anyhow::bail!("daemon is already running");
-                    }
-                    std::fs::remove_file(sock_path)?;
-                }
-                return Ok(InstanceLock { path, _file: file });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let owner_alive = std::fs::read_to_string(&path).ok().is_some_and(|owner| {
-                    let mut fields = owner.split_whitespace();
-                    let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
-                    let started = fields.next().and_then(|value| value.parse::<u64>().ok());
-                    pid.zip(started)
-                        .is_some_and(|(pid, started)| process_start_time(pid) == Some(started))
-                });
-                if owner_alive {
-                    anyhow::bail!("daemon is already running");
-                }
-                std::fs::remove_file(&path)?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    anyhow::bail!("failed to acquire daemon lock")
+    acquire_instance_lock_at(&path, sock_path)
 }
 
-fn process_start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let mut fields = stat.rsplit_once(") ")?.1.split_whitespace();
-    fields.nth(19)?.parse().ok()
+fn acquire_instance_lock_at(
+    path: &std::path::Path,
+    sock_path: &std::path::Path,
+) -> anyhow::Result<InstanceLock> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.try_lock()
+        .map_err(|_| anyhow::anyhow!("daemon is already running"))?;
+    if sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
+            anyhow::bail!("daemon is already running");
+        }
+        std::fs::remove_file(sock_path)?;
+    }
+    file.set_len(0)?;
+    writeln!(file, "{}", std::process::id())?;
+    file.sync_all()?;
+    Ok(InstanceLock { _file: file })
 }
 
 async fn handle_connection(
@@ -245,5 +212,32 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             activation_mode,
             error,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_lock_cannot_be_stolen_during_startup() {
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-lock-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let lock_path = root.join("daemon.lock");
+        let socket_path = root.join("control.sock");
+
+        let first = acquire_instance_lock_at(&lock_path, &socket_path).unwrap();
+        assert!(acquire_instance_lock_at(&lock_path, &socket_path).is_err());
+        drop(first);
+        assert!(acquire_instance_lock_at(&lock_path, &socket_path).is_ok());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

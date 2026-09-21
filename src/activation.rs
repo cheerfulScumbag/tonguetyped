@@ -5,6 +5,31 @@ use std::sync::Arc;
 
 const SHORTCUT_ID: &str = "activation";
 
+pub async fn portal_error(keybind: &str) -> Option<String> {
+    async {
+        let portal = GlobalShortcuts::new().await?;
+        let session = portal.create_session().await?;
+        let trigger = portal_trigger(keybind)?;
+        let shortcut = NewShortcut::new(SHORTCUT_ID, "Start or stop dictation")
+            .preferred_trigger(Some(trigger.as_str()));
+        let response = portal
+            .bind_shortcuts(&session, &[shortcut], None)
+            .await?
+            .response()?;
+        if !response
+            .shortcuts()
+            .iter()
+            .any(|shortcut| shortcut.id() == SHORTCUT_ID)
+        {
+            anyhow::bail!("global shortcuts portal did not bind activation key");
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await
+    .err()
+    .map(|error| error.to_string())
+}
+
 pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
     let mut parts: Vec<&str> = keybind.split('+').map(str::trim).collect();
     let key = parts

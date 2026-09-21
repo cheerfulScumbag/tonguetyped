@@ -9,9 +9,10 @@ pub struct DoctorReport {
     pub model_path: String,
     pub helpers_found: Vec<String>,
     pub output_method_available: bool,
+    pub shortcut_portal_error: Option<String>,
 }
 
-pub fn run_doctor(config: &crate::config::Config) -> anyhow::Result<DoctorReport> {
+pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<DoctorReport> {
     let compositor = detect_compositor();
     let audio_available = audio::AudioRecorder::new(&config.audio.microphone, 16_000, None, None)
         .and_then(|mut recorder| {
@@ -32,6 +33,7 @@ pub fn run_doctor(config: &crate::config::Config) -> anyhow::Result<DoctorReport
     let helpers_found = crate::output::list_available_backends();
     let output_method_available = config.output.method == crate::config::OutputMethod::None
         || crate::output::type_backend_available(&config.output.typing_backend);
+    let shortcut_portal_error = crate::activation::portal_error(&config.activation.keybind).await;
 
     Ok(DoctorReport {
         compositor,
@@ -41,6 +43,7 @@ pub fn run_doctor(config: &crate::config::Config) -> anyhow::Result<DoctorReport
         model_path: model_path.to_string_lossy().to_string(),
         helpers_found,
         output_method_available,
+        shortcut_portal_error,
     })
 }
 

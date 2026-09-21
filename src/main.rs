@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
                 doctor::typing_test(&config)?;
             } else {
                 let config = config::Config::load()?;
-                let report = doctor::run_doctor(&config)?;
+                let report = doctor::run_doctor(&config).await?;
                 println!("compositor:     {}", report.compositor);
                 println!(
                     "audio:          {}",
@@ -108,6 +108,16 @@ async fn main() -> anyhow::Result<()> {
                         "unavailable (none mode only)"
                     }
                 );
+                println!(
+                    "shortcut portal: {}",
+                    report
+                        .shortcut_portal_error
+                        .as_deref()
+                        .map_or("available", |_| "unavailable")
+                );
+                if let Some(error) = report.shortcut_portal_error {
+                    println!("shortcut error:  {error}");
+                }
             }
         }
         Commands::Reload => send_command(ipc::Request::ReloadConfig).await?,
