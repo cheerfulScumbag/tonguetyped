@@ -18,10 +18,6 @@ impl InferenceEngine {
         }
     }
 
-    pub fn is_loaded(&self) -> bool {
-        self.loaded
-    }
-
     pub fn load(&mut self) -> anyhow::Result<()> {
         if self.loaded {
             return Ok(());
@@ -58,10 +54,6 @@ impl InferenceEngine {
         Ok(result.text)
     }
 
-    pub fn check_model_available(model_name: &str) -> bool {
-        crate::model::ModelCatalog::model_path(model_name).is_ok_and(|path| path.exists())
-    }
-
     pub fn models_dir() -> PathBuf {
         let dir = directories::BaseDirs::new()
             .map(|b| b.data_dir().join("tonguetyped").join("models"))
@@ -79,17 +71,5 @@ mod tests {
     fn test_models_dir_returns_path() {
         let dir = InferenceEngine::models_dir();
         assert!(dir.to_str().is_some());
-    }
-
-    #[test]
-    fn test_engine_starts_unloaded() {
-        let engine = InferenceEngine::new(PathBuf::from("nonexistent.bin"));
-        assert!(!engine.is_loaded());
-    }
-
-    #[test]
-    fn test_check_model_unavailable() {
-        let available = InferenceEngine::check_model_available("nonexistent-model-xyz");
-        assert!(!available);
     }
 }

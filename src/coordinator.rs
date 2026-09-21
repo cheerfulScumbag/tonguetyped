@@ -78,23 +78,7 @@ impl CoordinatorRuntime for ProductionRuntime {
             }
         };
         let _ = started.send(Ok(()));
-        loop {
-            if let Ok(message) = error_rx.try_recv() {
-                anyhow::bail!("microphone stream failed: {}", message);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match signal_rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
-                Ok(RecordingSignal::Stop) => break,
-                Ok(RecordingSignal::Cancel) => anyhow::bail!("recording cancelled"),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-
-        recorder.stop();
+        wait_for_recording_end(&signal_rx, &error_rx, deadline, || recorder.stop())?;
         recorder.take_buffer()
     }
 
@@ -124,6 +108,35 @@ impl CoordinatorRuntime for ProductionRuntime {
             config.output.auto_submit,
         )
     }
+}
+
+fn wait_for_recording_end(
+    signal_rx: &mpsc::Receiver<RecordingSignal>,
+    error_rx: &mpsc::Receiver<String>,
+    deadline: Instant,
+    stop: impl FnOnce(),
+) -> anyhow::Result<()> {
+    let result = loop {
+        if let Ok(message) = error_rx.try_recv() {
+            break Err(anyhow::anyhow!("microphone stream failed: {}", message));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break Ok(());
+        }
+        match signal_rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(RecordingSignal::Stop) => break Ok(()),
+            Ok(RecordingSignal::Cancel) => break Err(anyhow::anyhow!("recording cancelled")),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+        }
+    };
+
+    stop();
+    if let Ok(message) = error_rx.try_recv() {
+        anyhow::bail!("microphone stream failed: {}", message);
+    }
+    result
 }
 
 fn apply_vad(samples: &[f32]) -> anyhow::Result<Vec<f32>> {
@@ -309,9 +322,7 @@ impl Coordinator {
                 let Some(mode) = inner.active_press_mode.clone() else {
                     return Ok(CoordinatorResponse::Ok);
                 };
-                if mode == crate::config::ActivationMode::Toggle {
-                    inner.active_press_mode = None;
-                }
+                inner.active_press_mode = None;
                 mode
             }
         };
@@ -561,4 +572,28 @@ pub enum CoordinatorResponse {
         activation_mode: String,
         error: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn microphone_error_at_stop_rejects_recording() {
+        let (signal_tx, signal_rx) = mpsc::channel();
+        let (error_tx, error_rx) = mpsc::channel();
+        signal_tx.send(RecordingSignal::Stop).unwrap();
+
+        let result = wait_for_recording_end(
+            &signal_rx,
+            &error_rx,
+            Instant::now() + Duration::from_secs(1),
+            || error_tx.send("device disconnected".to_string()).unwrap(),
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "microphone stream failed: device disconnected"
+        );
+    }
 }

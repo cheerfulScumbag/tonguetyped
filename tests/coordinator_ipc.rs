@@ -298,6 +298,49 @@ async fn toggle_release_uses_mode_from_active_press() {
 }
 
 #[tokio::test]
+async fn ignored_hold_press_does_not_survive_its_release() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime, 2);
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Cancel).await,
+        Response::Cancelled
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
+    coordinator.reload_config(config).unwrap();
+    tokio::time::sleep(Duration::from_millis(35)).await;
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { ref state, .. } if state == "recording"
+    ));
+    dispatch(&coordinator, Request::Cancel).await;
+}
+
+#[tokio::test]
 async fn whitespace_transcript_is_not_published() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.empty_transcript.store(true, Ordering::SeqCst);

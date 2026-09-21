@@ -33,11 +33,6 @@ pub fn list_devices() -> anyhow::Result<Vec<AudioDevice>> {
     Ok(devices)
 }
 
-pub fn check_audio_available() -> bool {
-    let host = cpal::default_host();
-    host.default_input_device().is_some()
-}
-
 pub type LevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
 pub type ErrorCallback = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -163,13 +158,9 @@ impl AudioRecorder {
     }
 
     pub fn stop(&mut self) {
-        if let Some(ref stream) = self.stream {
+        if let Some(stream) = self.stream.take() {
             let _ = stream.pause();
         }
-    }
-
-    pub fn buffer_len(&self) -> usize {
-        self.buffer.lock().unwrap().len()
     }
 
     pub fn take_buffer(&mut self) -> anyhow::Result<Vec<f32>> {

@@ -30,10 +30,6 @@ impl VadDetector {
         self.accepted.clear();
     }
 
-    pub fn process(&mut self, samples: &[f32]) -> anyhow::Result<Option<Vec<f32>>> {
-        self.process_window(samples, samples.len())
-    }
-
     pub fn process_window(
         &mut self,
         samples: &[f32],
@@ -87,10 +83,6 @@ impl VadDetector {
         } else {
             Some(std::mem::take(&mut self.accepted))
         }
-    }
-
-    pub fn is_speech_detected(&self) -> bool {
-        self.speech_detected
     }
 }
 
