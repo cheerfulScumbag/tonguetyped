@@ -160,7 +160,6 @@ fn apply_vad(samples: &[f32]) -> anyhow::Result<Vec<f32>> {
 
 struct CoordinatorStateInner {
     state: State,
-    recording_start: Option<Instant>,
     config: Config,
     last_action: Option<Instant>,
     pending_release: Option<(u64, Instant)>,
@@ -194,7 +193,6 @@ impl Coordinator {
         Self {
             state: Arc::new(Mutex::new(CoordinatorStateInner {
                 state: State::Idle,
-                recording_start: None,
                 config,
                 last_action: None,
                 pending_release: None,
@@ -222,6 +220,11 @@ impl Coordinator {
             let mut inner = self.state.lock().unwrap();
             let now = Instant::now();
             match cmd {
+                CoordinatorCommand::Start | CoordinatorCommand::Toggle
+                    if inner.state == State::Processing =>
+                {
+                    CoordinatorResponse::Busy
+                }
                 CoordinatorCommand::Start | CoordinatorCommand::Toggle
                     if !debounce_elapsed(&inner, now) =>
                 {
@@ -322,11 +325,10 @@ impl Coordinator {
                 let Some(mode) = inner.active_press_mode.clone() else {
                     return Ok(CoordinatorResponse::Ok);
                 };
-                inner.active_press_mode = None;
                 mode
             }
         };
-        match (mode, pressed) {
+        let response = match (&mode, pressed) {
             (crate::config::ActivationMode::Toggle, true) => {
                 self.handle_command(CoordinatorCommand::Toggle).await
             }
@@ -337,7 +339,17 @@ impl Coordinator {
                 self.handle_command(CoordinatorCommand::HoldRelease).await
             }
             (crate::config::ActivationMode::Toggle, false) => Ok(CoordinatorResponse::Ok),
+        }?;
+        let release_is_complete = !pressed
+            && (mode == crate::config::ActivationMode::Toggle
+                || matches!(&response, CoordinatorResponse::Ignored(reason) if reason == "not recording"));
+        if release_is_complete {
+            let mut inner = self.state.lock().unwrap();
+            if inner.active_press_mode.as_ref() == Some(&mode) {
+                inner.active_press_mode = None;
+            }
         }
+        Ok(response)
     }
 
     fn cancel(&self) -> CoordinatorResponse {
@@ -351,7 +363,6 @@ impl Coordinator {
                     let _ = sender.send(RecordingSignal::Cancel);
                 }
                 inner.state = State::Idle;
-                inner.recording_start = None;
                 inner.pending_release = None;
                 inner.active_press_mode = None;
                 inner.last_action = Some(Instant::now());
@@ -406,7 +417,6 @@ impl Coordinator {
                 }
                 inner.state = State::Processing;
                 inner.signal_tx = None;
-                inner.recording_start = None;
             }
 
             let transcript = match coordinator.runtime.transcribe(&samples, &config) {
@@ -466,7 +476,6 @@ impl Coordinator {
         if inner.generation == generation {
             inner.state = State::Idle;
             inner.signal_tx = None;
-            inner.recording_start = None;
             inner.pending_release = None;
             inner.active_press_mode = None;
         }
@@ -477,7 +486,6 @@ impl Coordinator {
         if inner.generation == generation {
             inner.state = State::Idle;
             inner.signal_tx = None;
-            inner.recording_start = None;
             inner.pending_release = None;
             inner.active_press_mode = None;
             inner.last_error = Some(error);
@@ -499,7 +507,6 @@ fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Reserve
     let (signal_tx, signal_rx) = mpsc::channel();
     inner.generation += 1;
     inner.state = State::Recording;
-    inner.recording_start = Some(now);
     inner.last_action = Some(now);
     inner.pending_release = None;
     inner.signal_tx = Some(signal_tx);
@@ -529,7 +536,6 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
                 let _ = sender.send(RecordingSignal::Stop);
             }
             inner.state = State::Processing;
-            inner.recording_start = None;
             inner.pending_release = None;
             inner.active_press_mode = None;
             inner.last_action = Some(now);

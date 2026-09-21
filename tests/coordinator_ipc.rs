@@ -298,6 +298,71 @@ async fn toggle_release_uses_mode_from_active_press() {
 }
 
 #[tokio::test]
+async fn hold_mode_survives_reload_and_autorepeat_until_final_release() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime, 2);
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
+    coordinator.reload_config(config).unwrap();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            coordinator.handle_activation(false).await.unwrap(),
+            tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
+        ));
+        assert!(matches!(
+            coordinator.handle_activation(true).await.unwrap(),
+            tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+        ));
+    }
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { ref state, .. } if state == "recording"
+    ));
+
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+}
+
+#[tokio::test]
+async fn start_and_toggle_report_busy_during_processing_before_debounce() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 2);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::Busy
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Toggle).await,
+        Response::Busy
+    ));
+
+    runtime.release_transcription();
+    wait_for_state(&coordinator, "idle").await;
+}
+
+#[tokio::test]
 async fn ignored_hold_press_does_not_survive_its_release() {
     let runtime = Arc::new(TestRuntime::default());
     let coordinator = coordinator(runtime, 2);

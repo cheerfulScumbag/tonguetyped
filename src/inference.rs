@@ -6,7 +6,6 @@ use transcribe_rs::SpeechModel;
 pub struct InferenceEngine {
     engine: Option<WhisperEngine>,
     model_path: PathBuf,
-    loaded: bool,
 }
 
 impl InferenceEngine {
@@ -14,12 +13,11 @@ impl InferenceEngine {
         InferenceEngine {
             engine: None,
             model_path,
-            loaded: false,
         }
     }
 
     pub fn load(&mut self) -> anyhow::Result<()> {
-        if self.loaded {
+        if self.engine.is_some() {
             return Ok(());
         }
 
@@ -31,13 +29,11 @@ impl InferenceEngine {
             WhisperEngine::load(&self.model_path).context("failed to create WhisperEngine")?;
 
         self.engine = Some(engine);
-        self.loaded = true;
         Ok(())
     }
 
     pub fn unload(&mut self) {
         self.engine = None;
-        self.loaded = false;
     }
 
     pub fn transcribe(&mut self, audio: &[f32], language: &str) -> anyhow::Result<String> {
