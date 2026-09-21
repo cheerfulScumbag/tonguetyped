@@ -517,6 +517,38 @@ async fn toggle_mode_absorbs_autorepeat_until_final_release() {
 }
 
 #[tokio::test]
+async fn ipc_start_finalizes_pending_release_before_mode_reload() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime, 1);
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    wait_for_state(&coordinator, "idle").await;
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
+    coordinator.reload_config(config).unwrap();
+    tokio::time::sleep(Duration::from_millis(35)).await;
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+}
+
+#[tokio::test]
 async fn whitespace_transcript_is_not_published() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.empty_transcript.store(true, Ordering::SeqCst);

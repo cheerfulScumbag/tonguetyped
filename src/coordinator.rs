@@ -496,10 +496,12 @@ type ReservedRecording = (u64, mpsc::Receiver<RecordingSignal>, Config);
 
 fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> ReservedRecording {
     let (signal_tx, signal_rx) = mpsc::channel();
+    if inner.pending_release.take().is_some() {
+        inner.active_press_mode = None;
+    }
     inner.generation += 1;
     inner.state = State::Recording;
     inner.last_action = Some(now);
-    inner.pending_release = None;
     inner.signal_tx = Some(signal_tx);
     inner.last_error = None;
     (inner.generation, signal_rx, inner.config.clone())
