@@ -274,7 +274,9 @@ impl Coordinator {
                         CoordinatorResponse::RecordingStopped
                     }
                     State::Processing => {
-                        inner.active_press_mode = None;
+                        let token = inner.generation;
+                        inner.pending_release = Some((token, now));
+                        self.schedule_hold_release(token, now);
                         CoordinatorResponse::Busy
                     }
                     State::Idle => {

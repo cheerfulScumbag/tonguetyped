@@ -429,7 +429,7 @@ async fn ignored_hold_press_absorbs_autorepeat_until_final_release() {
 }
 
 #[tokio::test]
-async fn hold_release_during_processing_uses_reloaded_mode_for_next_press() {
+async fn hold_release_during_processing_absorbs_autorepeat_before_reloaded_mode() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.block_transcription.store(true, Ordering::SeqCst);
     let coordinator = coordinator(runtime.clone(), 1);
@@ -450,6 +450,17 @@ async fn hold_release_during_processing_uses_reloaded_mode_for_next_press() {
     coordinator.reload_config(config).unwrap();
     runtime.release_transcription();
     wait_for_state(&coordinator, "idle").await;
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(60)).await;
 
     assert!(matches!(
         coordinator.handle_activation(true).await.unwrap(),
