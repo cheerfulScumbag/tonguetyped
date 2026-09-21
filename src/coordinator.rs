@@ -250,16 +250,7 @@ impl Coordinator {
                     State::Processing => CoordinatorResponse::Busy,
                 },
                 CoordinatorCommand::HoldPress => {
-                    if let Some((_, released_at)) = inner.pending_release {
-                        if now.duration_since(released_at) < Duration::from_millis(50) {
-                            inner.pending_release = None;
-                            CoordinatorResponse::Ignored("auto-repeat defense".into())
-                        } else if !debounce_elapsed(&inner, now) {
-                            CoordinatorResponse::Ignored("debounce".into())
-                        } else {
-                            hold_press(&mut inner, now, &mut start)
-                        }
-                    } else if !debounce_elapsed(&inner, now) {
+                    if !debounce_elapsed(&inner, now) {
                         CoordinatorResponse::Ignored("debounce".into())
                     } else {
                         hold_press(&mut inner, now, &mut start)
@@ -268,23 +259,10 @@ impl Coordinator {
                 CoordinatorCommand::HoldRelease => match inner.state {
                     State::Recording => {
                         inner.last_action = Some(now);
-                        let token = inner.generation;
-                        inner.pending_release = Some((token, now));
-                        self.schedule_hold_release(token, now);
                         CoordinatorResponse::RecordingStopped
                     }
-                    State::Processing => {
-                        let token = inner.generation;
-                        inner.pending_release = Some((token, now));
-                        self.schedule_hold_release(token, now);
-                        CoordinatorResponse::Busy
-                    }
-                    State::Idle => {
-                        let token = inner.generation;
-                        inner.pending_release = Some((token, now));
-                        self.schedule_hold_release(token, now);
-                        CoordinatorResponse::Ignored("not recording".into())
-                    }
+                    State::Processing => CoordinatorResponse::Busy,
+                    State::Idle => CoordinatorResponse::Ignored("not recording".into()),
                 },
                 CoordinatorCommand::GetStatus => build_status(&inner),
                 CoordinatorCommand::Cancel => unreachable!(),
@@ -324,20 +302,31 @@ impl Coordinator {
     }
 
     pub async fn handle_activation(&self, pressed: bool) -> anyhow::Result<CoordinatorResponse> {
-        let mode = {
+        let (mode, release) = {
             let mut inner = self.state.lock().unwrap();
             if pressed {
+                if let Some((generation, released_at)) = inner.pending_release {
+                    if Instant::now().duration_since(released_at) < Duration::from_millis(50) {
+                        inner.pending_release = None;
+                        return Ok(CoordinatorResponse::Ignored("auto-repeat defense".into()));
+                    }
+                    inner.pending_release = None;
+                    complete_activation_release(&mut inner, generation);
+                }
                 let mode = inner
                     .active_press_mode
                     .clone()
                     .unwrap_or_else(|| inner.config.activation.mode.clone());
                 inner.active_press_mode = Some(mode.clone());
-                mode
+                (mode, None)
             } else {
                 let Some(mode) = inner.active_press_mode.clone() else {
                     return Ok(CoordinatorResponse::Ok);
                 };
-                mode
+                let released_at = Instant::now();
+                let generation = inner.generation;
+                inner.pending_release = Some((generation, released_at));
+                (mode, Some((generation, released_at)))
             }
         };
         let response = match (&mode, pressed) {
@@ -352,12 +341,8 @@ impl Coordinator {
             }
             (crate::config::ActivationMode::Toggle, false) => Ok(CoordinatorResponse::Ok),
         }?;
-        let release_is_complete = !pressed && mode == crate::config::ActivationMode::Toggle;
-        if release_is_complete {
-            let mut inner = self.state.lock().unwrap();
-            if inner.active_press_mode.as_ref() == Some(&mode) {
-                inner.active_press_mode = None;
-            }
+        if let Some((generation, released_at)) = release {
+            self.schedule_activation_release(generation, released_at);
         }
         Ok(response)
     }
@@ -381,7 +366,7 @@ impl Coordinator {
         }
     }
 
-    fn schedule_hold_release(&self, generation: u64, released_at: Instant) {
+    fn schedule_activation_release(&self, generation: u64, released_at: Instant) {
         let coordinator = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -389,11 +374,7 @@ impl Coordinator {
             if matches!(inner.pending_release, Some((token, pending_at)) if token == generation && pending_at == released_at)
             {
                 inner.pending_release = None;
-                if inner.generation == generation && inner.state == State::Recording {
-                    stop_recording(&mut inner, Instant::now());
-                } else if inner.generation == generation {
-                    inner.active_press_mode = None;
-                }
+                complete_activation_release(&mut inner, generation);
             }
         });
     }
@@ -553,6 +534,19 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
         }
         State::Processing => CoordinatorResponse::Busy,
         State::Idle => CoordinatorResponse::Ignored("not recording".into()),
+    }
+}
+
+fn complete_activation_release(inner: &mut CoordinatorStateInner, generation: u64) {
+    if inner.generation != generation {
+        return;
+    }
+    if inner.state == State::Recording
+        && inner.active_press_mode == Some(crate::config::ActivationMode::Hold)
+    {
+        stop_recording(inner, Instant::now());
+    } else {
+        inner.active_press_mode = None;
     }
 }
 
