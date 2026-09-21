@@ -571,6 +571,7 @@ async fn completed_hold_release_does_not_detach_the_next_activation() {
         tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
     ));
     wait_for_state(&coordinator, "idle").await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
 
     assert!(matches!(
         dispatch(&coordinator, Request::Start).await,
