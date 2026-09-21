@@ -549,6 +549,36 @@ async fn ipc_start_finalizes_pending_release_before_mode_reload() {
 }
 
 #[tokio::test]
+async fn ipc_start_detaches_held_activation_before_its_final_release() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 1);
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    wait_for_state(&coordinator, "processing").await;
+    runtime.release_transcription();
+    wait_for_state(&coordinator, "idle").await;
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ok
+    ));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status { ref state, .. } if state == "recording"
+    ));
+    dispatch(&coordinator, Request::Cancel).await;
+}
+
+#[tokio::test]
 async fn whitespace_transcript_is_not_published() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.empty_transcript.store(true, Ordering::SeqCst);

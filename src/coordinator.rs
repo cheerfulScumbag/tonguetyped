@@ -213,6 +213,14 @@ impl Coordinator {
         &self,
         cmd: CoordinatorCommand,
     ) -> anyhow::Result<CoordinatorResponse> {
+        self.handle_command_inner(cmd, true).await
+    }
+
+    async fn handle_command_inner(
+        &self,
+        cmd: CoordinatorCommand,
+        detach_physical_press: bool,
+    ) -> anyhow::Result<CoordinatorResponse> {
         if matches!(cmd, CoordinatorCommand::Cancel) {
             return Ok(self.cancel());
         }
@@ -234,6 +242,10 @@ impl Coordinator {
                 }
                 CoordinatorCommand::Start => match inner.state {
                     State::Idle => {
+                        if detach_physical_press {
+                            inner.pending_release = None;
+                            inner.active_press_mode = None;
+                        }
                         start = Some(reserve_recording(&mut inner, now));
                         CoordinatorResponse::RecordingStarted
                     }
@@ -243,6 +255,10 @@ impl Coordinator {
                 CoordinatorCommand::Stop => stop_recording(&mut inner, now),
                 CoordinatorCommand::Toggle => match inner.state {
                     State::Idle => {
+                        if detach_physical_press {
+                            inner.pending_release = None;
+                            inner.active_press_mode = None;
+                        }
                         start = Some(reserve_recording(&mut inner, now));
                         CoordinatorResponse::RecordingStarted
                     }
@@ -331,13 +347,16 @@ impl Coordinator {
         };
         let response = match (&mode, pressed) {
             (crate::config::ActivationMode::Toggle, true) => {
-                self.handle_command(CoordinatorCommand::Toggle).await
+                self.handle_command_inner(CoordinatorCommand::Toggle, false)
+                    .await
             }
             (crate::config::ActivationMode::Hold, true) => {
-                self.handle_command(CoordinatorCommand::HoldPress).await
+                self.handle_command_inner(CoordinatorCommand::HoldPress, false)
+                    .await
             }
             (crate::config::ActivationMode::Hold, false) => {
-                self.handle_command(CoordinatorCommand::HoldRelease).await
+                self.handle_command_inner(CoordinatorCommand::HoldRelease, false)
+                    .await
             }
             (crate::config::ActivationMode::Toggle, false) => Ok(CoordinatorResponse::Ok),
         }?;
@@ -496,9 +515,6 @@ type ReservedRecording = (u64, mpsc::Receiver<RecordingSignal>, Config);
 
 fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> ReservedRecording {
     let (signal_tx, signal_rx) = mpsc::channel();
-    if inner.pending_release.take().is_some() {
-        inner.active_press_mode = None;
-    }
     inner.generation += 1;
     inner.state = State::Recording;
     inner.last_action = Some(now);
