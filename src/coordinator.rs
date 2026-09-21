@@ -268,11 +268,16 @@ impl Coordinator {
                         inner.last_action = Some(now);
                         let token = inner.generation;
                         inner.pending_release = Some((token, now));
-                        self.schedule_hold_release(token);
+                        self.schedule_hold_release(token, now);
                         CoordinatorResponse::RecordingStopped
                     }
                     State::Processing => CoordinatorResponse::Busy,
-                    State::Idle => CoordinatorResponse::Ignored("not recording".into()),
+                    State::Idle => {
+                        let token = inner.generation;
+                        inner.pending_release = Some((token, now));
+                        self.schedule_hold_release(token, now);
+                        CoordinatorResponse::Ignored("not recording".into())
+                    }
                 },
                 CoordinatorCommand::GetStatus => build_status(&inner),
                 CoordinatorCommand::Cancel => unreachable!(),
@@ -340,9 +345,7 @@ impl Coordinator {
             }
             (crate::config::ActivationMode::Toggle, false) => Ok(CoordinatorResponse::Ok),
         }?;
-        let release_is_complete = !pressed
-            && (mode == crate::config::ActivationMode::Toggle
-                || matches!(&response, CoordinatorResponse::Ignored(reason) if reason == "not recording"));
+        let release_is_complete = !pressed && mode == crate::config::ActivationMode::Toggle;
         if release_is_complete {
             let mut inner = self.state.lock().unwrap();
             if inner.active_press_mode.as_ref() == Some(&mode) {
@@ -371,17 +374,19 @@ impl Coordinator {
         }
     }
 
-    fn schedule_hold_release(&self, generation: u64) {
+    fn schedule_hold_release(&self, generation: u64, released_at: Instant) {
         let coordinator = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let mut inner = coordinator.state.lock().unwrap();
-            if matches!(inner.pending_release, Some((token, _)) if token == generation)
-                && inner.state == State::Recording
-                && inner.generation == generation
+            if matches!(inner.pending_release, Some((token, pending_at)) if token == generation && pending_at == released_at)
             {
                 inner.pending_release = None;
-                stop_recording(&mut inner, Instant::now());
+                if inner.generation == generation && inner.state == State::Recording {
+                    stop_recording(&mut inner, Instant::now());
+                } else if inner.generation == generation {
+                    inner.active_press_mode = None;
+                }
             }
         });
     }
@@ -476,8 +481,6 @@ impl Coordinator {
         if inner.generation == generation {
             inner.state = State::Idle;
             inner.signal_tx = None;
-            inner.pending_release = None;
-            inner.active_press_mode = None;
         }
     }
 
@@ -486,8 +489,6 @@ impl Coordinator {
         if inner.generation == generation {
             inner.state = State::Idle;
             inner.signal_tx = None;
-            inner.pending_release = None;
-            inner.active_press_mode = None;
             inner.last_error = Some(error);
         }
     }

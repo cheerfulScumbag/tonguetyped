@@ -82,16 +82,12 @@ impl AudioRecorder {
                 )
             })
             .max_by_key(|config| {
-                let format_rank = match config.sample_format() {
-                    cpal::SampleFormat::F32 => 2,
-                    cpal::SampleFormat::I16 | cpal::SampleFormat::U16 => 1,
-                    _ => 0,
-                };
-                let min = config.min_sample_rate().0;
-                let max = config.max_sample_rate().0;
-                let chosen = target_rate.clamp(min, max);
-                let distance = chosen.abs_diff(target_rate);
-                (std::cmp::Reverse(distance), chosen, format_rank)
+                input_config_rank(
+                    config.sample_format(),
+                    config.min_sample_rate().0,
+                    config.max_sample_rate().0,
+                    target_rate,
+                )
             })
             .context("no supported input sample format")?;
 
@@ -180,6 +176,25 @@ impl AudioRecorder {
         let mut buf = self.buffer.lock().unwrap();
         Ok(std::mem::take(&mut *buf))
     }
+}
+
+fn input_config_rank(
+    sample_format: cpal::SampleFormat,
+    min_rate: u32,
+    max_rate: u32,
+    target_rate: u32,
+) -> (bool, std::cmp::Reverse<u32>, u8) {
+    let chosen_rate = target_rate.clamp(min_rate, max_rate);
+    let format_rank = match sample_format {
+        cpal::SampleFormat::F32 => 2,
+        cpal::SampleFormat::I16 | cpal::SampleFormat::U16 => 1,
+        _ => 0,
+    };
+    (
+        chosen_rate >= target_rate,
+        std::cmp::Reverse(chosen_rate.abs_diff(target_rate)),
+        format_rank,
+    )
 }
 
 fn finish_resampling(
@@ -340,5 +355,13 @@ mod tests {
 
         assert_eq!(output.len(), 160);
         assert!(output.iter().any(|sample| sample.abs() > f32::EPSILON));
+    }
+
+    #[test]
+    fn prefers_oversampled_input_to_closer_undersampled_input() {
+        let undersampled = input_config_rank(cpal::SampleFormat::F32, 8_000, 8_000, 16_000);
+        let oversampled = input_config_rank(cpal::SampleFormat::I16, 48_000, 48_000, 16_000);
+
+        assert!(oversampled > undersampled);
     }
 }

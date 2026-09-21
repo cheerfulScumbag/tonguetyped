@@ -246,9 +246,22 @@ async fn maximum_duration_stops_recording() {
     let runtime = Arc::new(TestRuntime::default());
     let coordinator = coordinator(runtime.clone(), 1);
 
-    dispatch(&coordinator, Request::Start).await;
+    coordinator.handle_activation(true).await.unwrap();
     wait_for_state(&coordinator, "idle").await;
     assert!(runtime.timed_out.load(Ordering::SeqCst));
+
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 1);
+
+    coordinator.handle_activation(false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
 }
 
 #[tokio::test]
@@ -363,9 +376,9 @@ async fn start_and_toggle_report_busy_during_processing_before_debounce() {
 }
 
 #[tokio::test]
-async fn ignored_hold_press_does_not_survive_its_release() {
+async fn ignored_hold_press_absorbs_autorepeat_until_final_release() {
     let runtime = Arc::new(TestRuntime::default());
-    let coordinator = coordinator(runtime, 2);
+    let coordinator = coordinator(runtime.clone(), 2);
 
     assert!(matches!(
         coordinator.handle_activation(true).await.unwrap(),
@@ -379,17 +392,27 @@ async fn ignored_hold_press_does_not_survive_its_release() {
         coordinator.handle_activation(true).await.unwrap(),
         tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
     ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(matches!(
         coordinator.handle_activation(false).await.unwrap(),
         tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
     ));
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        coordinator.handle_activation(false).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::Ignored(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(60)).await;
 
     let mut config = Config::default();
     config.history.enabled = false;
     config.activation.mode = tonguetyped::config::ActivationMode::Toggle;
     coordinator.reload_config(config).unwrap();
-    tokio::time::sleep(Duration::from_millis(35)).await;
-
     assert!(matches!(
         coordinator.handle_activation(true).await.unwrap(),
         tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
