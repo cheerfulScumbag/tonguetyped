@@ -59,7 +59,10 @@ impl TestRuntime {
             .1
             .wait_timeout_while(started, Duration::from_secs(1), |started| !*started)
             .unwrap();
-        assert!(!timeout.timed_out() && *started, "idle policy did not start");
+        assert!(
+            !timeout.timed_out() && *started,
+            "idle policy did not start"
+        );
     }
 
     fn wait_for_second_idle_policy_start(&self) {

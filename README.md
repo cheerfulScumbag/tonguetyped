@@ -58,7 +58,7 @@ tonguetyped start        Start recording
 tonguetyped stop         Stop and transcribe the recording
 tonguetyped toggle       Start or stop recording
 tonguetyped cancel       Cancel recording or discard in-flight processing
-tonguetyped status       Show daemon state and activation mode
+tonguetyped status       Show daemon state, activation mode, and shortcut health
 tonguetyped reload       Validate and reload the config
 tonguetyped last-result  Print the latest transcription
 tonguetyped doctor       Check runtime dependencies
