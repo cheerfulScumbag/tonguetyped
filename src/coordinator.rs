@@ -43,12 +43,18 @@ struct ProductionRuntime {
 }
 
 struct IdleUnloadTimer {
-    schedule_tx: mpsc::Sender<(u64, Instant)>,
+    command_tx: mpsc::Sender<IdleUnloadCommand>,
+}
+
+enum IdleUnloadCommand {
+    Schedule(u64, Instant),
+    #[cfg(test)]
+    Expire(mpsc::Sender<()>),
 }
 
 impl IdleUnloadTimer {
     fn new<E: Send + 'static>(lifecycle: Arc<Mutex<EngineLifecycle<E>>>) -> anyhow::Result<Self> {
-        let (schedule_tx, schedule_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("tonguetyped-idle-unload".to_string())
             .spawn(move || {
@@ -56,18 +62,32 @@ impl IdleUnloadTimer {
                 loop {
                     let received = match deadline {
                         Some((_, at)) => {
-                            schedule_rx.recv_timeout(at.saturating_duration_since(Instant::now()))
+                            command_rx.recv_timeout(at.saturating_duration_since(Instant::now()))
                         }
-                        None => match schedule_rx.recv() {
-                            Ok(schedule) => {
-                                deadline = Some(schedule);
+                        None => match command_rx.recv() {
+                            Ok(IdleUnloadCommand::Schedule(generation, at)) => {
+                                deadline = Some((generation, at));
+                                continue;
+                            }
+                            #[cfg(test)]
+                            Ok(IdleUnloadCommand::Expire(done)) => {
+                                let _ = done.send(());
                                 continue;
                             }
                             Err(_) => return,
                         },
                     };
                     match received {
-                        Ok(schedule) => deadline = Some(schedule),
+                        Ok(IdleUnloadCommand::Schedule(generation, at)) => {
+                            deadline = Some((generation, at));
+                        }
+                        #[cfg(test)]
+                        Ok(IdleUnloadCommand::Expire(done)) => {
+                            if let Some((generation, _)) = deadline.take() {
+                                lifecycle.lock().unwrap().unload_if_idle(generation);
+                            }
+                            let _ = done.send(());
+                        }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
                             let (generation, _) = deadline.take().unwrap();
                             lifecycle.lock().unwrap().unload_if_idle(generation);
@@ -76,16 +96,25 @@ impl IdleUnloadTimer {
                     }
                 }
             })?;
-        Ok(Self { schedule_tx })
+        Ok(Self { command_tx })
     }
 
     fn schedule(&self, generation: u64, delay: Duration) -> anyhow::Result<()> {
         let deadline = Instant::now()
             .checked_add(delay)
             .ok_or_else(|| anyhow::anyhow!("idle unload timeout is too large"))?;
-        self.schedule_tx
-            .send((generation, deadline))
+        self.command_tx
+            .send(IdleUnloadCommand::Schedule(generation, deadline))
             .map_err(|_| anyhow::anyhow!("idle unload timer stopped"))
+    }
+
+    #[cfg(test)]
+    fn expire(&self) {
+        let (done_tx, done_rx) = mpsc::channel();
+        self.command_tx
+            .send(IdleUnloadCommand::Expire(done_tx))
+            .unwrap();
+        done_rx.recv().unwrap();
     }
 }
 
@@ -303,6 +332,7 @@ struct CoordinatorStateInner {
     physical_press: Option<PhysicalPress>,
     last_error: Option<String>,
     runtime_error: Option<String>,
+    worker_active: bool,
 }
 
 #[derive(Clone)]
@@ -345,6 +375,7 @@ impl Coordinator {
                 physical_press: None,
                 last_error: None,
                 runtime_error: None,
+                worker_active: false,
             })),
             output_lock: Arc::new(Mutex::new(())),
             last_result: Arc::new(Mutex::new(last_result)),
@@ -375,6 +406,13 @@ impl Coordinator {
             match cmd {
                 CoordinatorCommand::Start | CoordinatorCommand::Toggle
                     if inner.state == State::Processing =>
+                {
+                    CoordinatorResponse::Busy
+                }
+                CoordinatorCommand::Start
+                | CoordinatorCommand::Toggle
+                | CoordinatorCommand::HoldPress
+                    if inner.worker_active && inner.state == State::Idle =>
                 {
                     CoordinatorResponse::Busy
                 }
@@ -575,6 +613,10 @@ impl Coordinator {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
+            let _completion = WorkerCompletion {
+                coordinator: coordinator.clone(),
+                generation,
+            };
             let duration = Duration::from_secs(config.transcription.max_recording_seconds);
             let samples = match coordinator.runtime.record(
                 &config.audio.microphone,
@@ -686,6 +728,25 @@ impl Coordinator {
     pub fn set_runtime_error(&self, error: String) {
         self.state.lock().unwrap().runtime_error = Some(error);
     }
+
+    fn worker_finished(&self, generation: u64) {
+        let mut inner = self.state.lock().unwrap();
+        inner.worker_active = false;
+        if inner.generation != generation && inner.state == State::Idle {
+            inner.signal_tx = None;
+        }
+    }
+}
+
+struct WorkerCompletion {
+    coordinator: Coordinator,
+    generation: u64,
+}
+
+impl Drop for WorkerCompletion {
+    fn drop(&mut self) {
+        self.coordinator.worker_finished(self.generation);
+    }
 }
 
 type ReservedRecording = (u64, mpsc::Receiver<RecordingSignal>, Config);
@@ -697,6 +758,7 @@ fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Reserve
     inner.last_action = Some(now);
     inner.signal_tx = Some(signal_tx);
     inner.last_error = None;
+    inner.worker_active = true;
     (inner.generation, signal_rx, inner.config.clone())
 }
 
@@ -770,10 +832,8 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         }
         .to_string(),
         activation_mode: inner.config.activation.mode.to_string(),
-        error: inner
-            .last_error
-            .clone()
-            .or_else(|| inner.runtime_error.clone()),
+        operation_error: inner.last_error.clone(),
+        activation_error: inner.runtime_error.clone(),
     }
 }
 
@@ -788,7 +848,8 @@ pub enum CoordinatorResponse {
     Status {
         state: String,
         activation_mode: String,
-        error: Option<String>,
+        operation_error: Option<String>,
+        activation_error: Option<String>,
     },
 }
 
@@ -881,9 +942,8 @@ mod tests {
             lifecycle.generation
         };
         timer
-            .schedule(first_generation, Duration::from_millis(30))
+            .schedule(first_generation, Duration::from_secs(60))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(10));
         let second_generation = {
             let mut lifecycle = lifecycle.lock().unwrap();
             lifecycle
@@ -892,12 +952,9 @@ mod tests {
             lifecycle.generation
         };
         timer
-            .schedule(second_generation, Duration::from_millis(80))
+            .schedule(second_generation, Duration::from_secs(60))
             .unwrap();
-
-        std::thread::sleep(Duration::from_millis(40));
-        assert!(lifecycle.lock().unwrap().is_loaded());
-        std::thread::sleep(Duration::from_millis(60));
+        timer.expire();
         assert!(!lifecycle.lock().unwrap().is_loaded());
     }
 }

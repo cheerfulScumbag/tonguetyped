@@ -6,8 +6,9 @@ locally with whisper.cpp, and can type the result into the focused application.
 
 ## Requirements
 
-TongueTyped requires a Linux desktop with an XDG Global Shortcuts portal and an
-ALSA-compatible input device. Building from source requires Rust, CMake,
+TongueTyped requires Linux and an ALSA-compatible input device. Desktop shortcut
+activation also requires an XDG Global Shortcuts portal; terminal IPC commands
+remain available without one. Building from source requires Rust, CMake,
 libclang, OpenSSL, pkg-config, and ALSA development files. The Nix flake provides
 these build dependencies:
 

@@ -476,6 +476,20 @@ impl Config {
         {
             anyhow::bail!("max_recording_seconds is too large");
         }
+        if self.model.idle_unload.policy == IdleUnloadPolicy::AfterIdle {
+            let seconds = self
+                .model
+                .idle_unload
+                .timeout_minutes
+                .checked_mul(60)
+                .ok_or_else(|| anyhow::anyhow!("idle unload timeout is too large"))?;
+            if std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(seconds))
+                .is_none()
+            {
+                anyhow::bail!("idle unload timeout is too large");
+            }
+        }
 
         if self.output.method == OutputMethod::None && self.output.auto_submit {
             anyhow::bail!("auto_submit cannot be true when output.method is 'none'");
@@ -561,6 +575,10 @@ mod tests {
 
         let mut config = Config::default();
         config.transcription.max_recording_seconds = u64::MAX;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.model.idle_unload.timeout_minutes = u64::MAX;
         assert!(config.validate().is_err());
     }
 }

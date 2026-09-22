@@ -23,7 +23,8 @@ pub enum Response {
     Status {
         state: String,
         activation_mode: String,
-        error: Option<String>,
+        operation_error: Option<String>,
+        activation_error: Option<String>,
     },
     LastResult {
         text: String,

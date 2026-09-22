@@ -120,7 +120,7 @@ async fn transcription_failure_is_reported_in_status() {
 
     assert!(matches!(
         dispatch(&coordinator, Request::Status).await,
-        Response::Status { error: Some(ref error), .. }
+        Response::Status { operation_error: Some(ref error), .. }
             if error.contains("transcription failed")
     ));
 }
@@ -147,7 +147,7 @@ async fn output_failure_preserves_transcript_and_is_reported_in_status() {
     ));
     assert!(matches!(
         dispatch(&coordinator, Request::Status).await,
-        Response::Status { error: Some(ref error), .. }
+        Response::Status { operation_error: Some(ref error), .. }
             if error.contains("output failed")
     ));
 }
@@ -155,6 +155,7 @@ async fn output_failure_preserves_transcript_and_is_reported_in_status() {
 #[tokio::test]
 async fn successful_recording_does_not_hide_activation_listener_failure() {
     let runtime = Arc::new(TestRuntime::default());
+    runtime.output_error.store(true, Ordering::SeqCst);
     let coordinator = coordinator(runtime, 2);
     coordinator.set_runtime_error("activation listener failed: portal unavailable".to_string());
 
@@ -171,8 +172,12 @@ async fn successful_recording_does_not_hide_activation_listener_failure() {
 
     assert!(matches!(
         dispatch(&coordinator, Request::Status).await,
-        Response::Status { error: Some(ref error), .. }
-            if error.contains("activation listener failed")
+        Response::Status {
+            operation_error: Some(ref operation_error),
+            activation_error: Some(ref activation_error),
+            ..
+        } if operation_error.contains("output failed")
+            && activation_error.contains("activation listener failed")
     ));
 }
 
@@ -299,9 +304,26 @@ async fn cancel_during_startup_does_not_report_recording_started() {
         dispatch(&coordinator, Request::Cancel).await,
         Response::Cancelled
     ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::Busy
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 1);
     runtime.release_startup();
 
     assert!(matches!(start.await.unwrap(), Response::Error { .. }));
+    wait_for_worker_completion(&runtime, 2).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        dispatch(&coordinator, Request::Cancel).await,
+        Response::Cancelled
+    ));
 }
 
 #[tokio::test]
@@ -318,7 +340,7 @@ async fn microphone_errors_restore_idle_state() {
     wait_for_state(&coordinator, "idle").await;
     assert!(matches!(
         dispatch(&coordinator, Request::Status).await,
-        Response::Status { error: Some(error), .. } if error.contains("simulated microphone disconnect")
+        Response::Status { operation_error: Some(error), .. } if error.contains("simulated microphone disconnect")
     ));
 }
 

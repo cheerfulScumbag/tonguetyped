@@ -206,11 +206,13 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
         CoordinatorResponse::Status {
             state,
             activation_mode,
-            error,
+            operation_error,
+            activation_error,
         } => Response::Status {
             state,
             activation_mode,
-            error,
+            operation_error,
+            activation_error,
         },
     }
 }

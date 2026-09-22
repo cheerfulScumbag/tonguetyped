@@ -87,11 +87,16 @@ async fn main() -> anyhow::Result<()> {
                     "model:          {}",
                     if report.model_ready {
                         "ready"
+                    } else if report.model_error.is_some() {
+                        "invalid"
                     } else {
                         "not found"
                     }
                 );
                 println!("model path:     {}", report.model_path);
+                if let Some(error) = report.model_error {
+                    println!("model error:    {error}");
+                }
                 println!(
                     "helpers:        {}",
                     if report.helpers_found.is_empty() {
@@ -161,12 +166,16 @@ async fn send_command(request: ipc::Request) -> anyhow::Result<()> {
         ipc::Response::Status {
             state,
             activation_mode,
-            error,
+            operation_error,
+            activation_error,
         } => {
             println!("state:            {}", state);
             println!("activation mode:  {}", activation_mode);
-            if let Some(error) = error {
+            if let Some(error) = operation_error {
                 println!("last error:       {}", error);
+            }
+            if let Some(error) = activation_error {
+                println!("shortcut error:   {}", error);
             }
         }
         ipc::Response::LastResult { text, timestamp } => {

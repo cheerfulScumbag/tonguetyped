@@ -80,6 +80,19 @@ fn ipc_starts_when_shortcut_portal_is_unavailable() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
+    let doctor = Command::new(binary)
+        .arg("doctor")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .output()
+        .unwrap();
+    assert!(doctor.status.success());
+    assert!(String::from_utf8(doctor.stdout)
+        .unwrap()
+        .contains("shortcut error:  activation listener failed:"));
+
     drop(daemon);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -108,6 +121,35 @@ fn doctor_reports_unavailable_shortcut_portal() {
     assert!(String::from_utf8(output.stdout)
         .unwrap()
         .contains("shortcut portal: unavailable"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn doctor_distinguishes_invalid_model_from_missing_model() {
+    let root = std::env::temp_dir().join(format!("tt-invalid-model-{}", std::process::id()));
+    let config_home = root.join("config");
+    let data_home = root.join("data");
+    std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
+    std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
+    std::fs::write(
+        config_home.join("tonguetyped/config.toml"),
+        "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
+    )
+    .unwrap();
+    std::fs::write(data_home.join("tonguetyped/models/ggml-small-q5_1.bin"), []).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
+        .arg("doctor")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success());
+    assert!(stdout.contains("model:          invalid"));
+    assert!(stdout.contains("model error:"));
 
     std::fs::remove_dir_all(root).unwrap();
 }

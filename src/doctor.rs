@@ -1,4 +1,5 @@
 use crate::audio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DoctorReport {
@@ -6,6 +7,7 @@ pub struct DoctorReport {
     pub audio_available: bool,
     pub audio_devices: Vec<String>,
     pub model_ready: bool,
+    pub model_error: Option<String>,
     pub model_path: String,
     pub helpers_found: Vec<String>,
     pub output_method_available: bool,
@@ -27,24 +29,67 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         .map(|d| d.name)
         .collect();
     let model_path = crate::model::ModelCatalog::model_path(&config.model.selected)?;
-    let mut engine = crate::inference::InferenceEngine::new(model_path.clone());
-    let model_ready = engine.load().is_ok();
-    engine.unload();
+    let (model_ready, model_error) = if model_path.exists() {
+        let mut engine = crate::inference::InferenceEngine::new(model_path.clone());
+        match engine.load() {
+            Ok(()) => {
+                engine.unload();
+                (true, None)
+            }
+            Err(error) => (false, Some(error.to_string())),
+        }
+    } else {
+        (false, None)
+    };
     let helpers_found = crate::output::list_available_backends();
     let output_method_available = config.output.method == crate::config::OutputMethod::None
         || crate::output::type_backend_available(&config.output.typing_backend);
-    let shortcut_portal_error = crate::activation::portal_error(&config.activation.keybind).await;
+    let shortcut_portal_error = match daemon_activation_error().await {
+        Some(error) => error,
+        None => crate::activation::portal_error(&config.activation.keybind).await,
+    };
 
     Ok(DoctorReport {
         compositor,
         audio_available,
         audio_devices,
         model_ready,
+        model_error,
         model_path: model_path.to_string_lossy().to_string(),
         helpers_found,
         output_method_available,
         shortcut_portal_error,
     })
+}
+
+async fn daemon_activation_error() -> Option<Option<String>> {
+    let socket_path = crate::daemon::socket_path().ok()?;
+    if !socket_path.exists() {
+        return None;
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        daemon_activation_error_at(&socket_path),
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn daemon_activation_error_at(socket_path: &std::path::Path) -> Option<Option<String>> {
+    let stream = tokio::net::UnixStream::connect(socket_path).await.ok()?;
+    let (reader, mut writer) = stream.into_split();
+    let frame = crate::ipc::encode_frame(&crate::ipc::Request::Status).ok()?;
+    writer.write_all(frame.as_bytes()).await.ok()?;
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.ok()?;
+    match crate::ipc::decode_frame::<crate::ipc::Response>(&line).ok()? {
+        crate::ipc::Response::Status {
+            activation_error, ..
+        } => Some(activation_error),
+        _ => None,
+    }
 }
 
 fn detect_compositor() -> String {
@@ -79,4 +124,50 @@ pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<()> {
         &config.output.typing_backend,
         config.output.auto_submit,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reads_activation_health_from_running_daemon() {
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-doctor-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket_path = root.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: crate::ipc::Request = crate::ipc::decode_frame(&line).unwrap();
+            assert!(matches!(request, crate::ipc::Request::Status));
+            let response = crate::ipc::Response::Status {
+                state: "idle".to_string(),
+                activation_mode: "hold".to_string(),
+                operation_error: Some("output failed".to_string()),
+                activation_error: Some("activation listener failed".to_string()),
+            };
+            writer
+                .write_all(crate::ipc::encode_frame(&response).unwrap().as_bytes())
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(
+            daemon_activation_error_at(&socket_path).await,
+            Some(Some("activation listener failed".to_string()))
+        );
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

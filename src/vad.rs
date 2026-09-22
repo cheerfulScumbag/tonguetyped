@@ -45,27 +45,24 @@ impl VadDetector {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let is_speech = result.prob > 0.5;
 
-        for &sample in &samples[..valid_samples] {
-            if !self.speech_detected {
+        if !self.speech_detected {
+            for &sample in &samples[..valid_samples] {
                 self.prefill_buffer.push_back(sample);
                 if self.prefill_buffer.len() > PREFILL_SAMPLES {
                     self.prefill_buffer.pop_front();
                 }
-            } else {
-                self.accepted.push(sample);
             }
-        }
-
-        if is_speech && !self.speech_detected {
-            self.speech_detected = true;
-            self.accepted.extend(self.prefill_buffer.iter().copied());
-            self.prefill_buffer.clear();
-        }
-
-        if is_speech {
+            if is_speech {
+                self.speech_detected = true;
+                self.accepted.extend(self.prefill_buffer.drain(..));
+                self.hangover_counter = self.hangover_samples;
+            }
+        } else if is_speech {
+            self.accepted.extend_from_slice(&samples[..valid_samples]);
             self.hangover_counter = self.hangover_samples;
-        } else if self.speech_detected && self.hangover_counter > 0 {
-            self.hangover_counter = self.hangover_counter.saturating_sub(valid_samples);
+        } else {
+            let retained = retain_hangover_samples(&mut self.hangover_counter, valid_samples);
+            self.accepted.extend_from_slice(&samples[..retained]);
         }
 
         if self.speech_detected && self.hangover_counter == 0 {
@@ -92,6 +89,12 @@ fn hangover_samples(sample_rate: usize) -> usize {
     sample_rate * HANGOVER_MILLISECONDS / 1000
 }
 
+fn retain_hangover_samples(remaining: &mut usize, available: usize) -> usize {
+    let retained = (*remaining).min(available);
+    *remaining -= retained;
+    retained
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +108,15 @@ mod tests {
     #[test]
     fn hangover_duration_is_converted_to_samples() {
         assert_eq!(hangover_samples(16_000), 26_400);
+    }
+
+    #[test]
+    fn final_hangover_window_is_partially_retained() {
+        let mut remaining = hangover_samples(16_000);
+        let mut retained = 0;
+        while remaining > 0 {
+            retained += retain_hangover_samples(&mut remaining, 512);
+        }
+        assert_eq!(retained, 26_400);
     }
 }
