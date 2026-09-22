@@ -11,7 +11,7 @@ pub struct DoctorReport {
     pub model_path: String,
     pub helpers_found: Vec<String>,
     pub output_method_available: bool,
-    pub shortcut_portal_checked: bool,
+    pub shortcut_status: Option<crate::ipc::ShortcutStatus>,
     pub shortcut_portal_error: Option<String>,
 }
 
@@ -45,9 +45,10 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
     let helpers_found = crate::output::list_available_backends();
     let output_method_available = config.output.method == crate::config::OutputMethod::None
         || crate::output::type_backend_available(&config.output.typing_backend);
-    let daemon_activation_error = daemon_activation_error().await;
-    let shortcut_portal_checked = daemon_activation_error.is_some();
-    let shortcut_portal_error = daemon_activation_error.flatten();
+    let daemon_shortcut_health = daemon_shortcut_health().await;
+    let (shortcut_status, shortcut_portal_error) = daemon_shortcut_health
+        .map(|(status, error)| (Some(status), error))
+        .unwrap_or((None, None));
 
     Ok(DoctorReport {
         compositor,
@@ -58,26 +59,28 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         model_path: model_path.to_string_lossy().to_string(),
         helpers_found,
         output_method_available,
-        shortcut_portal_checked,
+        shortcut_status,
         shortcut_portal_error,
     })
 }
 
-async fn daemon_activation_error() -> Option<Option<String>> {
+async fn daemon_shortcut_health() -> Option<(crate::ipc::ShortcutStatus, Option<String>)> {
     let socket_path = crate::daemon::socket_path().ok()?;
     if !socket_path.exists() {
         return None;
     }
     tokio::time::timeout(
         std::time::Duration::from_millis(500),
-        daemon_activation_error_at(&socket_path),
+        daemon_shortcut_health_at(&socket_path),
     )
     .await
     .ok()
     .flatten()
 }
 
-async fn daemon_activation_error_at(socket_path: &std::path::Path) -> Option<Option<String>> {
+async fn daemon_shortcut_health_at(
+    socket_path: &std::path::Path,
+) -> Option<(crate::ipc::ShortcutStatus, Option<String>)> {
     let stream = tokio::net::UnixStream::connect(socket_path).await.ok()?;
     let (reader, mut writer) = stream.into_split();
     let frame = crate::ipc::encode_frame(&crate::ipc::Request::Status).ok()?;
@@ -87,8 +90,10 @@ async fn daemon_activation_error_at(socket_path: &std::path::Path) -> Option<Opt
     reader.read_line(&mut line).await.ok()?;
     match crate::ipc::decode_frame::<crate::ipc::Response>(&line).ok()? {
         crate::ipc::Response::Status {
-            activation_error, ..
-        } => Some(activation_error),
+            shortcut_status,
+            activation_error,
+            ..
+        } => Some((shortcut_status, activation_error)),
         _ => None,
     }
 }
@@ -156,6 +161,7 @@ mod tests {
                 state: "idle".to_string(),
                 activation_mode: "hold".to_string(),
                 operation_error: Some("output failed".to_string()),
+                shortcut_status: crate::ipc::ShortcutStatus::Failed,
                 activation_error: Some("activation listener failed".to_string()),
             };
             writer
@@ -165,8 +171,11 @@ mod tests {
         });
 
         assert_eq!(
-            daemon_activation_error_at(&socket_path).await,
-            Some(Some("activation listener failed".to_string()))
+            daemon_shortcut_health_at(&socket_path).await,
+            Some((
+                crate::ipc::ShortcutStatus::Failed,
+                Some("activation listener failed".to_string())
+            ))
         );
         server.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();

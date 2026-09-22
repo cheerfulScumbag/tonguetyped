@@ -389,6 +389,7 @@ struct CoordinatorStateInner {
     physical_press: Option<PhysicalPress>,
     last_error: Option<String>,
     runtime_error: Option<String>,
+    shortcut_status: crate::ipc::ShortcutStatus,
     worker_active: bool,
 }
 
@@ -432,6 +433,7 @@ impl Coordinator {
                 physical_press: None,
                 last_error: None,
                 runtime_error: None,
+                shortcut_status: crate::ipc::ShortcutStatus::Initializing,
                 worker_active: false,
             })),
             output_lock: Arc::new(Mutex::new(())),
@@ -790,27 +792,31 @@ impl Coordinator {
     }
 
     pub fn set_runtime_error(&self, error: String) {
-        self.state.lock().unwrap().runtime_error = Some(error);
+        let mut inner = self.state.lock().unwrap();
+        inner.shortcut_status = crate::ipc::ShortcutStatus::Failed;
+        inner.runtime_error = Some(error);
+    }
+
+    pub fn set_runtime_ready(&self) {
+        let mut inner = self.state.lock().unwrap();
+        inner.shortcut_status = crate::ipc::ShortcutStatus::Available;
+        inner.runtime_error = None;
     }
 
     fn worker_finished(&self, generation: u64, transcription_attempted: bool) {
-        let config = {
-            let mut inner = self.state.lock().unwrap();
-            inner.worker_active = false;
-            if inner.generation != generation && inner.state == State::Idle {
-                inner.signal_tx = None;
-            }
-            (inner.state == State::Idle).then(|| inner.config.clone())
-        };
-        if let Some(config) = config {
+        let mut inner = self.state.lock().unwrap();
+        if inner.generation != generation && inner.state == State::Idle {
+            inner.signal_tx = None;
+        }
+        if inner.state == State::Idle {
             if let Err(error) = self
                 .runtime
-                .apply_idle_unload_policy(&config, transcription_attempted)
+                .apply_idle_unload_policy(&inner.config, transcription_attempted)
             {
-                self.state.lock().unwrap().last_error =
-                    Some(format!("failed to apply model unload policy: {error}"));
+                inner.last_error = Some(format!("failed to apply model unload policy: {error}"));
             }
         }
+        inner.worker_active = false;
     }
 }
 
@@ -917,6 +923,7 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         .to_string(),
         activation_mode: inner.config.activation.mode.to_string(),
         operation_error: inner.last_error.clone(),
+        shortcut_status: inner.shortcut_status.clone(),
         activation_error: inner.runtime_error.clone(),
     }
 }
@@ -933,6 +940,7 @@ pub enum CoordinatorResponse {
         state: String,
         activation_mode: String,
         operation_error: Option<String>,
+        shortcut_status: crate::ipc::ShortcutStatus,
         activation_error: Option<String>,
     },
 }

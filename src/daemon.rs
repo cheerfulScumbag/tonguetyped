@@ -32,14 +32,26 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
 
     let coordinator = Arc::new(Coordinator::new(config)?);
     let listener = UnixListener::bind(&sock_path)?;
-    let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let activation = coordinator.clone();
     let activation_status = coordinator.clone();
     let keybind = activation.activation_keybind();
     tokio::spawn(async move {
-        if let Err(error) = crate::activation::listen(activation, keybind, ready_tx).await {
-            tracing::error!("activation listener failed: {error}");
-            activation_status.set_runtime_error(format!("activation listener failed: {error}"));
+        let listener = tokio::spawn(crate::activation::listen(activation, keybind, ready_tx));
+        match ready_rx.await {
+            Ok(Ok(())) => activation_status.set_runtime_ready(),
+            Ok(Err(error)) => activation_status.set_runtime_error(error),
+            Err(_) => {}
+        }
+        match listener.await {
+            Ok(Err(error)) => {
+                tracing::error!("activation listener failed: {error}");
+                activation_status.set_runtime_error(format!("activation listener failed: {error}"));
+            }
+            Ok(Ok(())) => activation_status
+                .set_runtime_error("activation listener stopped unexpectedly".to_string()),
+            Err(error) => activation_status
+                .set_runtime_error(format!("activation listener task failed: {error}")),
         }
     });
 
@@ -207,11 +219,13 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             state,
             activation_mode,
             operation_error,
+            shortcut_status,
             activation_error,
         } => Response::Status {
             state,
             activation_mode,
             operation_error,
+            shortcut_status,
             activation_error,
         },
     }

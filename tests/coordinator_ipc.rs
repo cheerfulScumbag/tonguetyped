@@ -24,6 +24,9 @@ struct TestRuntime {
     outputs: Mutex<Vec<String>>,
     idle_unload_suspensions: AtomicUsize,
     idle_policy_applications: Mutex<Vec<(String, bool)>>,
+    block_idle_policy: AtomicBool,
+    idle_policy_started: AtomicBool,
+    idle_policy_gate: (Mutex<bool>, Condvar),
 }
 
 impl TestRuntime {
@@ -40,6 +43,11 @@ impl TestRuntime {
     fn release_microphone_error(&self) {
         *self.microphone_error_gate.0.lock().unwrap() = true;
         self.microphone_error_gate.1.notify_all();
+    }
+
+    fn release_idle_policy(&self) {
+        *self.idle_policy_gate.0.lock().unwrap() = true;
+        self.idle_policy_gate.1.notify_all();
     }
 }
 
@@ -113,12 +121,54 @@ impl CoordinatorRuntime for TestRuntime {
         config: &Config,
         transcription_attempted: bool,
     ) -> anyhow::Result<()> {
+        if self.block_idle_policy.swap(false, Ordering::SeqCst) {
+            self.idle_policy_started.store(true, Ordering::SeqCst);
+            let mut released = self.idle_policy_gate.0.lock().unwrap();
+            while !*released {
+                released = self.idle_policy_gate.1.wait(released).unwrap();
+            }
+        }
         self.idle_policy_applications.lock().unwrap().push((
             config.model.idle_unload.policy.to_string(),
             transcription_attempted,
         ));
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn shortcut_listener_health_is_explicit() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime, 2);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            shortcut_status: tonguetyped::ipc::ShortcutStatus::Initializing,
+            activation_error: None,
+            ..
+        }
+    ));
+
+    coordinator.set_runtime_ready();
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            shortcut_status: tonguetyped::ipc::ShortcutStatus::Available,
+            activation_error: None,
+            ..
+        }
+    ));
+
+    coordinator.set_runtime_error("portal failed".to_string());
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            shortcut_status: tonguetyped::ipc::ShortcutStatus::Failed,
+            activation_error: Some(ref error),
+            ..
+        } if error == "portal failed"
+    ));
 }
 
 #[tokio::test]
@@ -296,6 +346,42 @@ async fn reload_applies_idle_policy_immediately_or_suspends_during_recording() {
     assert_eq!(
         runtime.idle_policy_applications.lock().unwrap().last(),
         Some(&("never".to_string(), false))
+    );
+}
+
+#[tokio::test]
+async fn worker_completion_serializes_idle_policy_with_reload() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_idle_policy.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 2);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Cancel).await,
+        Response::Cancelled
+    ));
+    wait_for_flag(&runtime.idle_policy_started).await;
+
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::Never;
+    let reload_coordinator = coordinator.clone();
+    let reload = tokio::task::spawn_blocking(move || reload_coordinator.reload_config(config));
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let reload_was_blocked = !reload.is_finished();
+
+    runtime.release_idle_policy();
+    reload.await.unwrap().unwrap();
+    assert!(reload_was_blocked);
+    assert_eq!(
+        runtime.idle_policy_applications.lock().unwrap().as_slice(),
+        &[
+            ("after_idle".to_string(), false),
+            ("never".to_string(), false),
+        ]
     );
 }
 

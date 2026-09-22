@@ -117,12 +117,11 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!(
                     "shortcut portal: {}",
-                    if !report.shortcut_portal_checked {
-                        "not tested (run `tonguetyped shortcut-test`)"
-                    } else if report.shortcut_portal_error.is_some() {
-                        "unavailable"
-                    } else {
-                        "available"
+                    match report.shortcut_status {
+                        None => "not tested (run `tonguetyped shortcut-test`)",
+                        Some(ipc::ShortcutStatus::Initializing) => "initializing",
+                        Some(ipc::ShortcutStatus::Available) => "available",
+                        Some(ipc::ShortcutStatus::Failed) => "unavailable",
                     }
                 );
                 if let Some(error) = report.shortcut_portal_error {
@@ -180,10 +179,19 @@ async fn send_command(request: ipc::Request) -> anyhow::Result<()> {
             state,
             activation_mode,
             operation_error,
+            shortcut_status,
             activation_error,
         } => {
             println!("state:            {}", state);
             println!("activation mode:  {}", activation_mode);
+            println!(
+                "shortcut status:  {}",
+                match shortcut_status {
+                    ipc::ShortcutStatus::Initializing => "initializing",
+                    ipc::ShortcutStatus::Available => "available",
+                    ipc::ShortcutStatus::Failed => "failed",
+                }
+            );
             if let Some(error) = operation_error {
                 println!("last error:       {}", error);
             }

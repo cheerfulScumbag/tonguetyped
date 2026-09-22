@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutStatus {
+    Initializing,
+    Available,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -24,6 +32,7 @@ pub enum Response {
         state: String,
         activation_mode: String,
         operation_error: Option<String>,
+        shortcut_status: ShortcutStatus,
         activation_error: Option<String>,
     },
     LastResult {
