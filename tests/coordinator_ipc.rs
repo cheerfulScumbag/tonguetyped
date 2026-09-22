@@ -151,14 +151,14 @@ impl CoordinatorRuntime for TestRuntime {
                 released = self.idle_policy_gate.1.wait(released).unwrap();
             }
         }
-        if invocation == 2 {
-            *self.second_idle_policy_started.0.lock().unwrap() = true;
-            self.second_idle_policy_started.1.notify_all();
-        }
         self.idle_policy_applications.lock().unwrap().push((
             config.model.idle_unload.policy.to_string(),
             transcription_attempted,
         ));
+        if invocation == 2 {
+            *self.second_idle_policy_started.0.lock().unwrap() = true;
+            self.second_idle_policy_started.1.notify_all();
+        }
         Ok(())
     }
 }
