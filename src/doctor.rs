@@ -11,6 +11,7 @@ pub struct DoctorReport {
     pub model_path: String,
     pub helpers_found: Vec<String>,
     pub output_method_available: bool,
+    pub shortcut_portal_checked: bool,
     pub shortcut_portal_error: Option<String>,
 }
 
@@ -44,10 +45,9 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
     let helpers_found = crate::output::list_available_backends();
     let output_method_available = config.output.method == crate::config::OutputMethod::None
         || crate::output::type_backend_available(&config.output.typing_backend);
-    let shortcut_portal_error = match daemon_activation_error().await {
-        Some(error) => error,
-        None => crate::activation::portal_error(&config.activation.keybind).await,
-    };
+    let daemon_activation_error = daemon_activation_error().await;
+    let shortcut_portal_checked = daemon_activation_error.is_some();
+    let shortcut_portal_error = daemon_activation_error.flatten();
 
     Ok(DoctorReport {
         compositor,
@@ -58,6 +58,7 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         model_path: model_path.to_string_lossy().to_string(),
         helpers_found,
         output_method_available,
+        shortcut_portal_checked,
         shortcut_portal_error,
     })
 }

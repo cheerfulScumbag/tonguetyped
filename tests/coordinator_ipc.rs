@@ -22,6 +22,8 @@ struct TestRuntime {
     startup_gate: (Mutex<bool>, Condvar),
     microphone_error_gate: (Mutex<bool>, Condvar),
     outputs: Mutex<Vec<String>>,
+    idle_unload_suspensions: AtomicUsize,
+    idle_policy_applications: Mutex<Vec<(String, bool)>>,
 }
 
 impl TestRuntime {
@@ -98,6 +100,23 @@ impl CoordinatorRuntime for TestRuntime {
             anyhow::bail!("simulated output failure");
         }
         self.outputs.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+
+    fn suspend_idle_unload(&self) -> anyhow::Result<()> {
+        self.idle_unload_suspensions.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn apply_idle_unload_policy(
+        &self,
+        config: &Config,
+        transcription_attempted: bool,
+    ) -> anyhow::Result<()> {
+        self.idle_policy_applications.lock().unwrap().push((
+            config.model.idle_unload.policy.to_string(),
+            transcription_attempted,
+        ));
         Ok(())
     }
 }
@@ -218,6 +237,66 @@ async fn wait_for_worker_completion(runtime: &Arc<TestRuntime>, owner_count: usi
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("recording worker did not finish");
+}
+
+#[tokio::test]
+async fn recording_suspends_idle_unload_and_completion_reapplies_policy() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert_eq!(runtime.idle_unload_suspensions.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Cancel).await,
+        Response::Cancelled
+    ));
+    wait_for_worker_completion(&runtime, owner_count).await;
+    assert_eq!(
+        runtime.idle_policy_applications.lock().unwrap().as_slice(),
+        &[("after_idle".to_string(), false)]
+    );
+}
+
+#[tokio::test]
+async fn reload_applies_idle_policy_immediately_or_suspends_during_recording() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
+
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::Never;
+    coordinator.reload_config(config.clone()).unwrap();
+    config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::AfterIdle;
+    coordinator.reload_config(config.clone()).unwrap();
+    assert_eq!(
+        runtime.idle_policy_applications.lock().unwrap().as_slice(),
+        &[
+            ("never".to_string(), false),
+            ("after_idle".to_string(), false),
+        ]
+    );
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::Never;
+    coordinator.reload_config(config).unwrap();
+    assert_eq!(runtime.idle_unload_suspensions.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.idle_policy_applications.lock().unwrap().len(), 2);
+
+    dispatch(&coordinator, Request::Cancel).await;
+    wait_for_worker_completion(&runtime, owner_count).await;
+    assert_eq!(
+        runtime.idle_policy_applications.lock().unwrap().last(),
+        Some(&("never".to_string(), false))
+    );
 }
 
 #[tokio::test]

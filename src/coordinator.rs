@@ -35,6 +35,16 @@ pub trait CoordinatorRuntime: Send + Sync {
     ) -> anyhow::Result<Vec<f32>>;
     fn transcribe(&self, samples: &[f32], config: &Config) -> anyhow::Result<String>;
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
+    fn suspend_idle_unload(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn apply_idle_unload_policy(
+        &self,
+        _config: &Config,
+        _transcription_attempted: bool,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 struct ProductionRuntime {
@@ -48,6 +58,7 @@ struct IdleUnloadTimer {
 
 enum IdleUnloadCommand {
     Schedule(u64, Instant),
+    Cancel(mpsc::Sender<()>),
     #[cfg(test)]
     Expire(mpsc::Sender<()>),
 }
@@ -69,6 +80,10 @@ impl IdleUnloadTimer {
                                 deadline = Some((generation, at));
                                 continue;
                             }
+                            Ok(IdleUnloadCommand::Cancel(done)) => {
+                                let _ = done.send(());
+                                continue;
+                            }
                             #[cfg(test)]
                             Ok(IdleUnloadCommand::Expire(done)) => {
                                 let _ = done.send(());
@@ -80,6 +95,10 @@ impl IdleUnloadTimer {
                     match received {
                         Ok(IdleUnloadCommand::Schedule(generation, at)) => {
                             deadline = Some((generation, at));
+                        }
+                        Ok(IdleUnloadCommand::Cancel(done)) => {
+                            deadline = None;
+                            let _ = done.send(());
                         }
                         #[cfg(test)]
                         Ok(IdleUnloadCommand::Expire(done)) => {
@@ -108,6 +127,16 @@ impl IdleUnloadTimer {
             .map_err(|_| anyhow::anyhow!("idle unload timer stopped"))
     }
 
+    fn cancel(&self) -> anyhow::Result<()> {
+        let (done_tx, done_rx) = mpsc::channel();
+        self.command_tx
+            .send(IdleUnloadCommand::Cancel(done_tx))
+            .map_err(|_| anyhow::anyhow!("idle unload timer stopped"))?;
+        done_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("idle unload timer stopped"))
+    }
+
     #[cfg(test)]
     fn expire(&self) {
         let (done_tx, done_rx) = mpsc::channel();
@@ -126,6 +155,19 @@ impl ProductionRuntime {
             inference,
             idle_unload,
         })
+    }
+
+    fn apply_policy(&self, config: &Config, transcription_attempted: bool) -> anyhow::Result<()> {
+        let idle_unload = self.inference.lock().unwrap().apply_policy(
+            &config.model.idle_unload.policy,
+            config.model.idle_unload.timeout_minutes,
+            transcription_attempted,
+        );
+        if let Some((generation, delay)) = idle_unload {
+            self.idle_unload.schedule(generation, delay)
+        } else {
+            self.idle_unload.cancel()
+        }
     }
 }
 
@@ -163,22 +205,32 @@ impl<E> EngineLifecycle<E> {
         Ok(&mut self.engine.as_mut().unwrap().1)
     }
 
-    fn finish(
+    fn apply_policy(
         &mut self,
         policy: &crate::config::IdleUnloadPolicy,
         timeout_minutes: u64,
+        transcription_attempted: bool,
     ) -> Option<(u64, Duration)> {
+        self.suspend_idle_unload();
         match policy {
             crate::config::IdleUnloadPolicy::Never => None,
             crate::config::IdleUnloadPolicy::AfterTranscription => {
-                self.engine = None;
+                if transcription_attempted {
+                    self.engine = None;
+                }
                 None
             }
-            crate::config::IdleUnloadPolicy::AfterIdle => Some((
-                self.generation,
-                Duration::from_secs(timeout_minutes.saturating_mul(60)),
-            )),
+            crate::config::IdleUnloadPolicy::AfterIdle => self.engine.as_ref().map(|_| {
+                (
+                    self.generation,
+                    Duration::from_secs(timeout_minutes.saturating_mul(60)),
+                )
+            }),
         }
+    }
+
+    fn suspend_idle_unload(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn unload_if_idle(&mut self, generation: u64) {
@@ -253,15 +305,7 @@ impl CoordinatorRuntime for ProductionRuntime {
             engine.load()?;
             Ok(engine)
         })?;
-        let result = engine.transcribe(&samples, &config.transcription.language);
-        let idle_unload = lifecycle.finish(
-            &config.model.idle_unload.policy,
-            config.model.idle_unload.timeout_minutes,
-        );
-        if let Some((generation, delay)) = idle_unload {
-            self.idle_unload.schedule(generation, delay)?;
-        }
-        result
+        engine.transcribe(&samples, &config.transcription.language)
     }
 
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()> {
@@ -271,6 +315,19 @@ impl CoordinatorRuntime for ProductionRuntime {
             &config.output.typing_backend,
             config.output.auto_submit,
         )
+    }
+
+    fn suspend_idle_unload(&self) -> anyhow::Result<()> {
+        self.inference.lock().unwrap().suspend_idle_unload();
+        self.idle_unload.cancel()
+    }
+
+    fn apply_idle_unload_policy(
+        &self,
+        config: &Config,
+        transcription_attempted: bool,
+    ) -> anyhow::Result<()> {
+        self.apply_policy(config, transcription_attempted)
     }
 }
 
@@ -426,7 +483,7 @@ impl Coordinator {
                         if detach_physical_press {
                             detach_physical_press_for_ipc(&mut inner);
                         }
-                        start = Some(reserve_recording(&mut inner, now));
+                        start = Some(reserve_recording(self.runtime.as_ref(), &mut inner, now)?);
                         CoordinatorResponse::RecordingStarted
                     }
                     State::Recording => CoordinatorResponse::Ignored("already recording".into()),
@@ -438,7 +495,7 @@ impl Coordinator {
                         if detach_physical_press {
                             detach_physical_press_for_ipc(&mut inner);
                         }
-                        start = Some(reserve_recording(&mut inner, now));
+                        start = Some(reserve_recording(self.runtime.as_ref(), &mut inner, now)?);
                         CoordinatorResponse::RecordingStarted
                     }
                     State::Recording => stop_recording(&mut inner, now),
@@ -448,7 +505,7 @@ impl Coordinator {
                     if !debounce_elapsed(&inner, now) {
                         CoordinatorResponse::Ignored("debounce".into())
                     } else {
-                        hold_press(&mut inner, now, &mut start)
+                        hold_press(self.runtime.as_ref(), &mut inner, now, &mut start)?
                     }
                 }
                 CoordinatorCommand::HoldRelease => match inner.state {
@@ -484,6 +541,11 @@ impl Coordinator {
     pub fn reload_config(&self, config: Config) -> anyhow::Result<()> {
         self.validate_reload(&config)?;
         let mut inner = self.state.lock().unwrap();
+        if inner.state == State::Idle && !inner.worker_active {
+            self.runtime.apply_idle_unload_policy(&config, false)?;
+        } else {
+            self.runtime.suspend_idle_unload()?;
+        }
         inner.config = config;
         Ok(())
     }
@@ -613,9 +675,10 @@ impl Coordinator {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _completion = WorkerCompletion {
+            let mut completion = WorkerCompletion {
                 coordinator: coordinator.clone(),
                 generation,
+                transcription_attempted: false,
             };
             let duration = Duration::from_secs(config.transcription.max_recording_seconds);
             let samples = match coordinator.runtime.record(
@@ -641,6 +704,7 @@ impl Coordinator {
                 inner.signal_tx = None;
             }
 
+            completion.transcription_attempted = true;
             let transcript = match coordinator.runtime.transcribe(&samples, &config) {
                 Ok(text) => text,
                 Err(error) => {
@@ -729,11 +793,23 @@ impl Coordinator {
         self.state.lock().unwrap().runtime_error = Some(error);
     }
 
-    fn worker_finished(&self, generation: u64) {
-        let mut inner = self.state.lock().unwrap();
-        inner.worker_active = false;
-        if inner.generation != generation && inner.state == State::Idle {
-            inner.signal_tx = None;
+    fn worker_finished(&self, generation: u64, transcription_attempted: bool) {
+        let config = {
+            let mut inner = self.state.lock().unwrap();
+            inner.worker_active = false;
+            if inner.generation != generation && inner.state == State::Idle {
+                inner.signal_tx = None;
+            }
+            (inner.state == State::Idle).then(|| inner.config.clone())
+        };
+        if let Some(config) = config {
+            if let Err(error) = self
+                .runtime
+                .apply_idle_unload_policy(&config, transcription_attempted)
+            {
+                self.state.lock().unwrap().last_error =
+                    Some(format!("failed to apply model unload policy: {error}"));
+            }
         }
     }
 }
@@ -741,17 +817,24 @@ impl Coordinator {
 struct WorkerCompletion {
     coordinator: Coordinator,
     generation: u64,
+    transcription_attempted: bool,
 }
 
 impl Drop for WorkerCompletion {
     fn drop(&mut self) {
-        self.coordinator.worker_finished(self.generation);
+        self.coordinator
+            .worker_finished(self.generation, self.transcription_attempted);
     }
 }
 
 type ReservedRecording = (u64, mpsc::Receiver<RecordingSignal>, Config);
 
-fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> ReservedRecording {
+fn reserve_recording(
+    runtime: &dyn CoordinatorRuntime,
+    inner: &mut CoordinatorStateInner,
+    now: Instant,
+) -> anyhow::Result<ReservedRecording> {
+    runtime.suspend_idle_unload()?;
     let (signal_tx, signal_rx) = mpsc::channel();
     inner.generation += 1;
     inner.state = State::Recording;
@@ -759,7 +842,7 @@ fn reserve_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Reserve
     inner.signal_tx = Some(signal_tx);
     inner.last_error = None;
     inner.worker_active = true;
-    (inner.generation, signal_rx, inner.config.clone())
+    Ok((inner.generation, signal_rx, inner.config.clone()))
 }
 
 fn detach_physical_press_for_ipc(inner: &mut CoordinatorStateInner) {
@@ -769,17 +852,18 @@ fn detach_physical_press_for_ipc(inner: &mut CoordinatorStateInner) {
 }
 
 fn hold_press(
+    runtime: &dyn CoordinatorRuntime,
     inner: &mut CoordinatorStateInner,
     now: Instant,
     start: &mut Option<ReservedRecording>,
-) -> CoordinatorResponse {
+) -> anyhow::Result<CoordinatorResponse> {
     match inner.state {
         State::Idle => {
-            *start = Some(reserve_recording(inner, now));
-            CoordinatorResponse::RecordingStarted
+            *start = Some(reserve_recording(runtime, inner, now)?);
+            Ok(CoordinatorResponse::RecordingStarted)
         }
-        State::Recording => CoordinatorResponse::Ignored("already recording".into()),
-        State::Processing => CoordinatorResponse::Busy,
+        State::Recording => Ok(CoordinatorResponse::Ignored("already recording".into())),
+        State::Processing => Ok(CoordinatorResponse::Busy),
     }
 }
 
@@ -888,7 +972,7 @@ mod tests {
             })
             .unwrap();
         assert!(lifecycle
-            .finish(&crate::config::IdleUnloadPolicy::Never, 15)
+            .apply_policy(&crate::config::IdleUnloadPolicy::Never, 15, true)
             .is_none());
         lifecycle
             .ensure("model", || {
@@ -898,7 +982,11 @@ mod tests {
             .unwrap();
         assert_eq!(loads, 1);
 
-        lifecycle.finish(&crate::config::IdleUnloadPolicy::AfterTranscription, 15);
+        lifecycle.apply_policy(
+            &crate::config::IdleUnloadPolicy::AfterTranscription,
+            15,
+            true,
+        );
         lifecycle
             .ensure("model", || {
                 loads += 1;
@@ -908,7 +996,7 @@ mod tests {
         assert_eq!(loads, 2);
 
         let idle = lifecycle
-            .finish(&crate::config::IdleUnloadPolicy::AfterIdle, 15)
+            .apply_policy(&crate::config::IdleUnloadPolicy::AfterIdle, 15, true)
             .unwrap();
         lifecycle.unload_if_idle(idle.0);
         assert!(!lifecycle.is_loaded());
@@ -921,7 +1009,7 @@ mod tests {
             .ensure("model", || Ok::<_, anyhow::Error>(()))
             .unwrap();
         let stale = lifecycle
-            .finish(&crate::config::IdleUnloadPolicy::AfterIdle, 15)
+            .apply_policy(&crate::config::IdleUnloadPolicy::AfterIdle, 15, true)
             .unwrap();
         lifecycle
             .ensure("model", || Ok::<_, anyhow::Error>(()))
@@ -954,6 +1042,68 @@ mod tests {
         timer
             .schedule(second_generation, Duration::from_secs(60))
             .unwrap();
+        timer.expire();
+        assert!(!lifecycle.lock().unwrap().is_loaded());
+    }
+
+    #[test]
+    fn recording_suspends_idle_unloading_until_recording_finishes() {
+        let lifecycle = Arc::new(Mutex::new(EngineLifecycle::default()));
+        let timer = IdleUnloadTimer::new(Arc::clone(&lifecycle)).unwrap();
+        let scheduled = {
+            let mut lifecycle = lifecycle.lock().unwrap();
+            lifecycle
+                .ensure("model", || Ok::<_, anyhow::Error>(()))
+                .unwrap();
+            lifecycle.apply_policy(&crate::config::IdleUnloadPolicy::AfterIdle, 15, true)
+        }
+        .unwrap();
+        timer.schedule(scheduled.0, scheduled.1).unwrap();
+
+        lifecycle.lock().unwrap().suspend_idle_unload();
+        timer.cancel().unwrap();
+        timer.expire();
+        assert!(lifecycle.lock().unwrap().is_loaded());
+
+        let resumed = lifecycle
+            .lock()
+            .unwrap()
+            .apply_policy(&crate::config::IdleUnloadPolicy::AfterIdle, 15, false)
+            .unwrap();
+        timer.schedule(resumed.0, resumed.1).unwrap();
+        timer.expire();
+        assert!(!lifecycle.lock().unwrap().is_loaded());
+    }
+
+    #[test]
+    fn policy_reload_cancels_or_schedules_idle_unloading() {
+        let lifecycle = Arc::new(Mutex::new(EngineLifecycle::default()));
+        let timer = IdleUnloadTimer::new(Arc::clone(&lifecycle)).unwrap();
+        let scheduled = {
+            let mut lifecycle = lifecycle.lock().unwrap();
+            lifecycle
+                .ensure("model", || Ok::<_, anyhow::Error>(()))
+                .unwrap();
+            lifecycle.apply_policy(&crate::config::IdleUnloadPolicy::AfterIdle, 15, true)
+        }
+        .unwrap();
+        timer.schedule(scheduled.0, scheduled.1).unwrap();
+
+        assert!(lifecycle
+            .lock()
+            .unwrap()
+            .apply_policy(&crate::config::IdleUnloadPolicy::Never, 15, false)
+            .is_none());
+        timer.cancel().unwrap();
+        timer.expire();
+        assert!(lifecycle.lock().unwrap().is_loaded());
+
+        let rescheduled = lifecycle
+            .lock()
+            .unwrap()
+            .apply_policy(&crate::config::IdleUnloadPolicy::AfterIdle, 15, false)
+            .unwrap();
+        timer.schedule(rescheduled.0, rescheduled.1).unwrap();
         timer.expire();
         assert!(!lifecycle.lock().unwrap().is_loaded());
     }

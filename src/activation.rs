@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 const SHORTCUT_ID: &str = "activation";
 
-pub async fn portal_error(keybind: &str) -> Option<String> {
+pub async fn test_shortcut_binding(keybind: &str) -> Option<String> {
     async {
         let portal = GlobalShortcuts::new().await?;
         let session = portal.create_session().await?;

@@ -46,7 +46,8 @@ Set `output.method = "type"` in the generated config to type transcripts into
 the focused application. To test typing explicitly, focus a disposable text
 field and run `cargo run -- doctor --test-type`. The regular `doctor` command
 checks the compositor, microphone, model, and typing backends without injecting
-text.
+text or requesting shortcut authorization. Run `cargo run -- shortcut-test`
+explicitly to validate desktop shortcut authorization and binding.
 
 ## Commands
 
@@ -61,6 +62,7 @@ tonguetyped status       Show daemon state and activation mode
 tonguetyped reload       Validate and reload the config
 tonguetyped last-result  Print the latest transcription
 tonguetyped doctor       Check runtime dependencies
+tonguetyped shortcut-test  Interactively test shortcut authorization and binding
 ```
 
 The daemon listens on `$XDG_RUNTIME_DIR/tonguetyped/control.sock` and refuses to

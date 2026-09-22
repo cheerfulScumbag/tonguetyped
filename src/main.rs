@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use tokio::io::AsyncWriteExt;
-use tonguetyped::{config, daemon, doctor, ipc};
+use tonguetyped::{activation, config, daemon, doctor, ipc};
 
 #[derive(Parser)]
 #[command(name = "tonguetyped", version, about = "Linux dictation application")]
@@ -33,6 +33,8 @@ enum Commands {
         #[arg(long)]
         test_type: bool,
     },
+    /// Interactively validate desktop shortcut authorization and binding
+    ShortcutTest,
 }
 
 #[tokio::main]
@@ -115,15 +117,26 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!(
                     "shortcut portal: {}",
-                    report
-                        .shortcut_portal_error
-                        .as_deref()
-                        .map_or("available", |_| "unavailable")
+                    if !report.shortcut_portal_checked {
+                        "not tested (run `tonguetyped shortcut-test`)"
+                    } else if report.shortcut_portal_error.is_some() {
+                        "unavailable"
+                    } else {
+                        "available"
+                    }
                 );
                 if let Some(error) = report.shortcut_portal_error {
                     println!("shortcut error:  {error}");
                 }
             }
+        }
+        Commands::ShortcutTest => {
+            let config = config::Config::load()?;
+            if let Some(error) = activation::test_shortcut_binding(&config.activation.keybind).await
+            {
+                anyhow::bail!("shortcut binding test failed: {error}");
+            }
+            println!("shortcut binding available");
         }
         Commands::Reload => send_command(ipc::Request::ReloadConfig).await?,
         Commands::LastResult => send_command(ipc::Request::GetLastResult).await?,

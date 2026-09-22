@@ -98,7 +98,7 @@ fn ipc_starts_when_shortcut_portal_is_unavailable() {
 }
 
 #[test]
-fn doctor_reports_unavailable_shortcut_portal() {
+fn doctor_without_daemon_defers_shortcut_binding_test() {
     let root = std::env::temp_dir().join(format!("tt-doctor-{}", std::process::id()));
     let config_home = root.join("config");
     let data_home = root.join("data");
@@ -118,9 +118,21 @@ fn doctor_reports_unavailable_shortcut_portal() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout)
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("shortcut portal: not tested"));
+    assert!(!stdout.contains("shortcut portal: unavailable"));
+
+    let shortcut_test = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
+        .arg("shortcut-test")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .output()
+        .unwrap();
+    assert!(!shortcut_test.status.success());
+    assert!(String::from_utf8(shortcut_test.stderr)
         .unwrap()
-        .contains("shortcut portal: unavailable"));
+        .contains("shortcut binding test failed"));
 
     std::fs::remove_dir_all(root).unwrap();
 }
