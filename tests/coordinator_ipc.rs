@@ -25,7 +25,9 @@ struct TestRuntime {
     idle_unload_suspensions: AtomicUsize,
     idle_policy_applications: Mutex<Vec<(String, bool)>>,
     block_idle_policy: AtomicBool,
-    idle_policy_started: AtomicBool,
+    idle_policy_invocations: AtomicUsize,
+    idle_policy_started: (Mutex<bool>, Condvar),
+    second_idle_policy_started: (Mutex<bool>, Condvar),
     idle_policy_gate: (Mutex<bool>, Condvar),
 }
 
@@ -48,6 +50,25 @@ impl TestRuntime {
     fn release_idle_policy(&self) {
         *self.idle_policy_gate.0.lock().unwrap() = true;
         self.idle_policy_gate.1.notify_all();
+    }
+
+    fn wait_for_idle_policy_start(&self) {
+        let started = self.idle_policy_started.0.lock().unwrap();
+        let (started, timeout) = self
+            .idle_policy_started
+            .1
+            .wait_timeout_while(started, Duration::from_secs(1), |started| !*started)
+            .unwrap();
+        assert!(!timeout.timed_out() && *started, "idle policy did not start");
+    }
+
+    fn wait_for_second_idle_policy_start(&self) {
+        let started = self.second_idle_policy_started.0.lock().unwrap();
+        let (_started, _timeout) = self
+            .second_idle_policy_started
+            .1
+            .wait_timeout_while(started, Duration::from_secs(1), |started| !*started)
+            .unwrap();
     }
 }
 
@@ -121,12 +142,18 @@ impl CoordinatorRuntime for TestRuntime {
         config: &Config,
         transcription_attempted: bool,
     ) -> anyhow::Result<()> {
+        let invocation = self.idle_policy_invocations.fetch_add(1, Ordering::SeqCst) + 1;
         if self.block_idle_policy.swap(false, Ordering::SeqCst) {
-            self.idle_policy_started.store(true, Ordering::SeqCst);
+            *self.idle_policy_started.0.lock().unwrap() = true;
+            self.idle_policy_started.1.notify_all();
             let mut released = self.idle_policy_gate.0.lock().unwrap();
             while !*released {
                 released = self.idle_policy_gate.1.wait(released).unwrap();
             }
+        }
+        if invocation == 2 {
+            *self.second_idle_policy_started.0.lock().unwrap() = true;
+            self.second_idle_policy_started.1.notify_all();
         }
         self.idle_policy_applications.lock().unwrap().push((
             config.model.idle_unload.policy.to_string(),
@@ -363,14 +390,14 @@ async fn worker_completion_serializes_idle_policy_with_reload() {
         dispatch(&coordinator, Request::Cancel).await,
         Response::Cancelled
     ));
-    wait_for_flag(&runtime.idle_policy_started).await;
+    runtime.wait_for_idle_policy_start();
 
     let mut config = Config::default();
     config.history.enabled = false;
     config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::Never;
     let release_runtime = runtime.clone();
     let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(25));
+        release_runtime.wait_for_second_idle_policy_start();
         release_runtime.release_idle_policy();
     });
     coordinator.reload_config(config).unwrap();
