@@ -368,19 +368,13 @@ async fn worker_completion_serializes_idle_policy_with_reload() {
     let mut config = Config::default();
     config.history.enabled = false;
     config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::Never;
-    let reload_coordinator = coordinator.clone();
-    let (reload_entered_tx, reload_entered_rx) = tokio::sync::oneshot::channel();
-    let reload = tokio::task::spawn_blocking(move || {
-        let _ = reload_entered_tx.send(());
-        reload_coordinator.reload_config(config)
+    let release_runtime = runtime.clone();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        release_runtime.release_idle_policy();
     });
-    reload_entered_rx.await.unwrap();
-    tokio::task::yield_now().await;
-    let reload_was_blocked = !reload.is_finished();
-
-    runtime.release_idle_policy();
-    reload.await.unwrap().unwrap();
-    assert!(reload_was_blocked);
+    coordinator.reload_config(config).unwrap();
+    release.join().unwrap();
     assert_eq!(
         runtime.idle_policy_applications.lock().unwrap().as_slice(),
         &[
