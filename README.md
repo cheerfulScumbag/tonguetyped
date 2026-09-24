@@ -21,9 +21,23 @@ For direct typing, install at least one supported backend: `wtype`, an X11
 environment supported by `enigo`, or `dotool`. Automatic backend selection tries
 them in that order. TongueTyped never uses the clipboard as a typing fallback.
 
+## Installation
+
+Install the Nix package into your user profile:
+
+```sh
+nix profile add .
+```
+
+The package installs the binary and a `TongueTyped` desktop entry. Launch
+TongueTyped from your desktop's application menu so the Global Shortcuts portal
+can identify it. KDE displays an authorization dialog for the default `Super+O`
+shortcut on first launch.
+
 ## First run
 
-Start the daemon from a graphical desktop session:
+For development outside the installed package, start the daemon from a graphical
+desktop session:
 
 ```sh
 cargo run -- daemon

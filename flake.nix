@@ -60,12 +60,20 @@
 
         buildInputs = with pkgs; [
           alsa-lib
+          onnxruntime
           xdotool
           openssl
         ];
 
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         CMAKE_POLICY_VERSION_MINIMUM = "3.5";
+        ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+        ORT_PREFER_DYNAMIC_LINK = "1";
+
+        postInstall = ''
+          install -Dm644 data/tonguetyped.desktop \
+            $out/share/applications/tonguetyped.desktop
+        '';
       };
     });
 }
