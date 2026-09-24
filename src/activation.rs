@@ -1,0 +1,196 @@
+use crate::coordinator::Coordinator;
+use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
+use futures_util::StreamExt;
+use std::sync::Arc;
+
+const SHORTCUT_ID: &str = "activation";
+
+pub async fn test_shortcut_binding(keybind: &str) -> Option<String> {
+    async {
+        let portal = GlobalShortcuts::new().await?;
+        let session = portal.create_session().await?;
+        let trigger = portal_trigger(keybind)?;
+        let shortcut = NewShortcut::new(SHORTCUT_ID, "Start or stop dictation")
+            .preferred_trigger(Some(trigger.as_str()));
+        let response = portal
+            .bind_shortcuts(&session, &[shortcut], None)
+            .await?
+            .response()?;
+        if !response
+            .shortcuts()
+            .iter()
+            .any(|shortcut| shortcut.id() == SHORTCUT_ID)
+        {
+            anyhow::bail!("global shortcuts portal did not bind activation key");
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await
+    .err()
+    .map(|error| error.to_string())
+}
+
+pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
+    let mut parts: Vec<&str> = keybind.split('+').map(str::trim).collect();
+    let key = parts
+        .pop()
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("activation.keybind must contain modifiers and a key"))?;
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        anyhow::bail!("activation.keybind must contain modifiers and a key");
+    }
+
+    let mut modifiers = Vec::new();
+    for modifier in parts {
+        let modifier = match modifier.to_ascii_lowercase().as_str() {
+            "super" => "LOGO",
+            "ctrl" => "CTRL",
+            "alt" => "ALT",
+            "shift" => "SHIFT",
+            _ => anyhow::bail!("unsupported activation modifier: {modifier}"),
+        };
+        if modifiers.contains(&modifier) {
+            anyhow::bail!("duplicate activation modifier: {modifier}");
+        }
+        modifiers.push(modifier);
+    }
+    Ok(format!(
+        "{}+{}",
+        modifiers.join("+"),
+        key.to_ascii_lowercase()
+    ))
+}
+
+pub async fn listen(
+    coordinator: Arc<Coordinator>,
+    keybind: String,
+    ready: tokio::sync::oneshot::Sender<Result<(), String>>,
+) -> anyhow::Result<()> {
+    let portal = match GlobalShortcuts::new().await {
+        Ok(portal) => portal,
+        Err(error) => {
+            let message = format!("global shortcuts portal unavailable: {error}");
+            let _ = ready.send(Err(message.clone()));
+            anyhow::bail!(message);
+        }
+    };
+    let session = portal.create_session().await?;
+    let trigger = portal_trigger(&keybind)?;
+    let shortcut = NewShortcut::new(SHORTCUT_ID, "Start or stop dictation")
+        .preferred_trigger(Some(trigger.as_str()));
+    let response = portal
+        .bind_shortcuts(&session, &[shortcut], None)
+        .await?
+        .response()?;
+    if !response
+        .shortcuts()
+        .iter()
+        .any(|shortcut| shortcut.id() == SHORTCUT_ID)
+    {
+        let message = "global shortcuts portal did not bind activation key".to_string();
+        let _ = ready.send(Err(message.clone()));
+        anyhow::bail!(message);
+    }
+
+    let mut activated = portal.receive_activated().await?;
+    let mut deactivated = portal.receive_deactivated().await?;
+    let _ = ready.send(Ok(()));
+    let mut event_order = EventOrder::default();
+    loop {
+        let event = tokio::select! {
+            event = activated.next() => event.map(|event| (event.timestamp(), event.shortcut_id() == SHORTCUT_ID, true)),
+            event = deactivated.next() => event.map(|event| (event.timestamp(), event.shortcut_id() == SHORTCUT_ID, false)),
+        };
+        let Some(event) = event else {
+            anyhow::bail!("global shortcuts event stream closed");
+        };
+        let (timestamp, is_activation, pressed) = event;
+        if is_activation {
+            for pressed in event_order.push(timestamp, pressed) {
+                if let Err(error) = coordinator.handle_activation(pressed).await {
+                    tracing::error!("activation command failed: {error}");
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct EventOrder {
+    press_timestamp: Option<std::time::Duration>,
+    pending_release: Option<std::time::Duration>,
+}
+
+impl EventOrder {
+    fn push(&mut self, timestamp: std::time::Duration, pressed: bool) -> Vec<bool> {
+        if pressed {
+            self.press_timestamp = Some(timestamp);
+            let mut events = vec![true];
+            if self
+                .pending_release
+                .take()
+                .is_some_and(|release| timestamp <= release)
+            {
+                self.press_timestamp = None;
+                events.push(false);
+            }
+            events
+        } else if let Some(press_timestamp) = self.press_timestamp {
+            if timestamp < press_timestamp {
+                Vec::new()
+            } else {
+                self.press_timestamp = None;
+                vec![false]
+            }
+        } else {
+            self.pending_release = Some(timestamp);
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_configured_keybind_for_portal() {
+        assert_eq!(portal_trigger("Super+O").unwrap(), "LOGO+o");
+        assert_eq!(
+            portal_trigger("Ctrl+Shift+Space").unwrap(),
+            "CTRL+SHIFT+space"
+        );
+        assert!(portal_trigger("Super+Super+O").is_err());
+        assert!(portal_trigger("Hyper+O").is_err());
+        assert!(portal_trigger("Meta+O").is_err());
+        assert!(portal_trigger("Control+O").is_err());
+    }
+
+    #[test]
+    fn orders_release_that_arrives_before_earlier_press() {
+        let mut order = EventOrder::default();
+        assert!(order
+            .push(std::time::Duration::from_millis(20), false)
+            .is_empty());
+        assert_eq!(
+            order.push(std::time::Duration::from_millis(10), true),
+            [true, false]
+        );
+    }
+
+    #[test]
+    fn ignores_late_delivery_of_release_before_active_press() {
+        let mut order = EventOrder::default();
+        assert_eq!(
+            order.push(std::time::Duration::from_millis(20), true),
+            [true]
+        );
+        assert!(order
+            .push(std::time::Duration::from_millis(10), false)
+            .is_empty());
+        assert_eq!(
+            order.push(std::time::Duration::from_millis(30), false),
+            [false]
+        );
+    }
+}
