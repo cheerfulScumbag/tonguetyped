@@ -102,6 +102,39 @@ the compositor, microphone, model, and typing backends without injecting text
 or requesting shortcut authorization. Run `cargo run -- shortcut-test`
 explicitly to validate desktop shortcut authorization and binding.
 
+## Desktop feedback
+
+Visual and sound feedback are disabled by default. Enable either one in
+`config.toml` without changing the terminal workflow:
+
+```toml
+[overlay]
+enabled = true
+backend = "auto"
+
+[audio]
+feedback_sounds = true
+feedback_volume = 0.7
+feedback_device = "default"
+```
+
+The visual feedback identifies listening, transcription, completion,
+cancellation, and failure without taking keyboard focus. The `auto` backend
+uses Plasma's native OSD on KDE and falls back to a transient freedesktop
+notification. Set `backend` to `plasma` or `notification` to choose one; the
+Plasma choice still falls back to a notification if its D-Bus service is not
+available. Plasma and the notification daemon control placement and monitor
+selection, so the existing `overlay.position` and `overlay.monitor` settings do
+not override desktop accessibility or multi-monitor policy.
+
+Sound feedback uses the desktop sound theme through `canberra-gtk-play` and
+accepts a volume from `0.0` through `1.0`. A non-default `feedback_device` is
+passed as `PULSE_SINK`, which works with PulseAudio and PipeWire's PulseAudio
+compatibility service. Missing desktop helpers disable only the unavailable
+sound channel; a missing desktop notification service disables visual feedback.
+Recording and terminal commands continue to work. TongueTyped does not add
+animation, inject text, or move focus when it reports state.
+
 ## Commands
 
 The CLI provides these commands:

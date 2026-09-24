@@ -308,6 +308,8 @@ impl std::fmt::Display for RecordingExpiryPolicy {
 pub struct OverlayConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
+    #[serde(default)]
+    pub backend: OverlayBackend,
     #[serde(default = "default_overlay_position")]
     pub position: String,
     #[serde(default = "default_overlay_monitor")]
@@ -318,10 +320,20 @@ impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            backend: OverlayBackend::Auto,
             position: default_overlay_position(),
             monitor: default_overlay_monitor(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayBackend {
+    #[default]
+    Auto,
+    Plasma,
+    Notification,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -502,17 +514,16 @@ impl Config {
         ) {
             anyhow::bail!("unsupported typing backend: {}", self.output.typing_backend);
         }
-        if self.audio.feedback_sounds {
-            anyhow::bail!("audio.feedback_sounds is not supported in Stage 1");
+        if !self.audio.feedback_volume.is_finite()
+            || !(0.0..=1.0).contains(&self.audio.feedback_volume)
+        {
+            anyhow::bail!("audio.feedback_volume must be between 0 and 1");
         }
         if self.audio.mute_playback.enabled {
             anyhow::bail!("audio.mute_playback.enabled is not supported in Stage 1");
         }
         if self.history.save_recordings {
             anyhow::bail!("history.save_recordings is not supported in Stage 1");
-        }
-        if self.overlay.enabled {
-            anyhow::bail!("overlay.enabled is not supported in Stage 1");
         }
         Ok(())
     }
@@ -584,19 +595,11 @@ mod tests {
     #[test]
     fn rejects_enabled_later_stage_features() {
         let mut config = Config::default();
-        config.audio.feedback_sounds = true;
-        assert!(config.validate().is_err());
-
-        let mut config = Config::default();
         config.audio.mute_playback.enabled = true;
         assert!(config.validate().is_err());
 
         let mut config = Config::default();
         config.history.save_recordings = true;
-        assert!(config.validate().is_err());
-
-        let mut config = Config::default();
-        config.overlay.enabled = true;
         assert!(config.validate().is_err());
 
         let mut config = Config::default();
@@ -634,5 +637,23 @@ mod tests {
         assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
         assert_eq!(fs::read_to_string(&temporary).unwrap(), "another writer");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn feedback_settings_are_validated_without_enabling_them_by_default() {
+        let mut config = Config::default();
+        assert!(!config.overlay.enabled);
+        assert!(!config.audio.feedback_sounds);
+
+        config.overlay.enabled = true;
+        config.overlay.backend = OverlayBackend::Plasma;
+        config.audio.feedback_sounds = true;
+        config.audio.feedback_volume = 1.0;
+        config.validate().unwrap();
+
+        config.audio.feedback_volume = f64::NAN;
+        assert!(config.validate().is_err());
+        config.audio.feedback_volume = 1.01;
+        assert!(config.validate().is_err());
     }
 }

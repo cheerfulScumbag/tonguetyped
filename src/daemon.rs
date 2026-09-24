@@ -252,7 +252,20 @@ mod tests {
         let first = acquire_instance_lock_at(&lock_path, &socket_path).unwrap();
         assert!(acquire_instance_lock_at(&lock_path, &socket_path).is_err());
         drop(first);
-        assert!(acquire_instance_lock_at(&lock_path, &socket_path).is_ok());
+
+        // A concurrently forked test process can retain the descriptor until exec
+        // applies CLOEXEC, so assert eventual rather than instantaneous release.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let second = loop {
+            match acquire_instance_lock_at(&lock_path, &socket_path) {
+                Ok(lock) => break lock,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("instance lock was not released: {error}"),
+            }
+        };
+        drop(second);
 
         std::fs::remove_dir_all(root).unwrap();
     }
