@@ -9,8 +9,8 @@ locally with whisper.cpp, and can type the result into the focused application.
 TongueTyped requires Linux and an ALSA-compatible input device. Desktop shortcut
 activation also requires an XDG Global Shortcuts portal; terminal IPC commands
 remain available without one. Building from source requires Rust, CMake,
-libclang, OpenSSL, pkg-config, and ALSA development files. The Nix flake provides
-these build dependencies:
+libclang, OpenSSL, pkg-config, ALSA development files, and libxdo development
+files. The Nix flake provides these build dependencies:
 
 ```sh
 nix develop

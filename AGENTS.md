@@ -13,8 +13,8 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 ## Build
 
-Uses Cargo with system deps (alsa, openssl, cmake, libclang). On NixOS, run build
-commands through `nix develop -c`.
+See README.md for system dependencies. On NixOS, run build commands through
+`nix develop -c`.
 
 Format: `cargo fmt --check`  |  Lint: `cargo clippy -- -D warnings`  |  Test: `cargo test`
 
