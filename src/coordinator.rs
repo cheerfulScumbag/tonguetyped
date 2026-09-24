@@ -543,11 +543,11 @@ impl Coordinator {
     pub fn reload_config(&self, config: Config) -> anyhow::Result<()> {
         self.validate_reload(&config)?;
         let mut inner = self.state.lock().unwrap();
-        if inner.state == State::Idle && !inner.worker_active {
-            self.runtime.apply_idle_unload_policy(&config, false)?;
-        } else {
-            self.runtime.suspend_idle_unload()?;
+        if inner.worker_active {
+            inner.config = config;
+            return Ok(());
         }
+        self.runtime.apply_idle_unload_policy(&config, false)?;
         inner.config = config;
         Ok(())
     }

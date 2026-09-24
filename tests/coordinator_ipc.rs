@@ -22,6 +22,7 @@ struct TestRuntime {
     startup_gate: (Mutex<bool>, Condvar),
     microphone_error_gate: (Mutex<bool>, Condvar),
     outputs: Mutex<Vec<String>>,
+    inference_lock: Mutex<()>,
     idle_unload_suspensions: AtomicUsize,
     idle_policy_applications: Mutex<Vec<(String, bool)>>,
     block_idle_policy: AtomicBool,
@@ -111,6 +112,7 @@ impl CoordinatorRuntime for TestRuntime {
     }
 
     fn transcribe(&self, _samples: &[f32], _config: &Config) -> anyhow::Result<String> {
+        let _inference = self.inference_lock.lock().unwrap();
         self.transcription_started.store(true, Ordering::SeqCst);
         if self.block_transcription.load(Ordering::SeqCst) {
             let mut released = self.transcription_gate.0.lock().unwrap();
@@ -136,6 +138,7 @@ impl CoordinatorRuntime for TestRuntime {
     }
 
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
+        let _inference = self.inference_lock.lock().unwrap();
         self.idle_unload_suspensions.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -145,6 +148,7 @@ impl CoordinatorRuntime for TestRuntime {
         config: &Config,
         transcription_attempted: bool,
     ) -> anyhow::Result<()> {
+        let _inference = self.inference_lock.lock().unwrap();
         let invocation = self.idle_policy_invocations.fetch_add(1, Ordering::SeqCst) + 1;
         if self.block_idle_policy.swap(false, Ordering::SeqCst) {
             *self.idle_policy_started.0.lock().unwrap() = true;
@@ -343,7 +347,7 @@ async fn recording_suspends_idle_unload_and_completion_reapplies_policy() {
 }
 
 #[tokio::test]
-async fn reload_applies_idle_policy_immediately_or_suspends_during_recording() {
+async fn reload_applies_idle_policy_immediately_or_defers_while_worker_is_active() {
     let runtime = Arc::new(TestRuntime::default());
     let coordinator = coordinator(runtime.clone(), 2);
     let owner_count = Arc::strong_count(&runtime);
@@ -368,7 +372,7 @@ async fn reload_applies_idle_policy_immediately_or_suspends_during_recording() {
     ));
     config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::Never;
     coordinator.reload_config(config).unwrap();
-    assert_eq!(runtime.idle_unload_suspensions.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.idle_unload_suspensions.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.idle_policy_applications.lock().unwrap().len(), 2);
 
     dispatch(&coordinator, Request::Cancel).await;
@@ -376,6 +380,59 @@ async fn reload_applies_idle_policy_immediately_or_suspends_during_recording() {
     assert_eq!(
         runtime.idle_policy_applications.lock().unwrap().last(),
         Some(&("never".to_string(), false))
+    );
+}
+
+#[tokio::test]
+async fn reload_status_and_cancel_remain_responsive_during_inference() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
+
+    dispatch(&coordinator, Request::Start).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    dispatch(&coordinator, Request::Stop).await;
+    wait_for_flag(&runtime.transcription_started).await;
+
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.model.idle_unload.policy = tonguetyped::config::IdleUnloadPolicy::Never;
+    let reload_coordinator = coordinator.clone();
+    let reload = tokio::task::spawn_blocking(move || reload_coordinator.reload_config(config));
+    let reload = match tokio::time::timeout(Duration::from_millis(200), reload).await {
+        Ok(result) => result,
+        Err(_) => {
+            runtime.release_transcription();
+            panic!("reload waited for inference");
+        }
+    };
+    reload.unwrap().unwrap();
+
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            dispatch(&coordinator, Request::Status)
+        )
+        .await
+        .expect("status waited for inference"),
+        Response::Status { ref state, .. } if state == "processing"
+    ));
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            dispatch(&coordinator, Request::Cancel)
+        )
+        .await
+        .expect("cancel waited for inference"),
+        Response::Cancelled
+    ));
+
+    runtime.release_transcription();
+    wait_for_worker_completion(&runtime, owner_count).await;
+    assert_eq!(
+        runtime.idle_policy_applications.lock().unwrap().last(),
+        Some(&("never".to_string(), true))
     );
 }
 
