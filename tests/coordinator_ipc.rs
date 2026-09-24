@@ -76,6 +76,14 @@ impl TestRuntime {
     }
 }
 
+struct TranscriptionReleaseGuard(Arc<TestRuntime>);
+
+impl Drop for TranscriptionReleaseGuard {
+    fn drop(&mut self) {
+        self.0.release_transcription();
+    }
+}
+
 impl CoordinatorRuntime for TestRuntime {
     fn record(
         &self,
@@ -388,6 +396,7 @@ async fn reload_status_and_cancel_remain_responsive_during_inference() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.block_transcription.store(true, Ordering::SeqCst);
     let coordinator = coordinator(runtime.clone(), 2);
+    let _transcription_release = TranscriptionReleaseGuard(runtime.clone());
     let owner_count = Arc::strong_count(&runtime);
 
     dispatch(&coordinator, Request::Start).await;
