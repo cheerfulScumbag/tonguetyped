@@ -65,17 +65,18 @@ explicitly to validate desktop shortcut authorization and binding.
 
 ## Commands
 
-With the daemon running, use:
+The CLI provides these commands:
 
 ```text
-tonguetyped start        Start recording
-tonguetyped stop         Stop and transcribe the recording
-tonguetyped toggle       Start or stop recording
-tonguetyped cancel       Cancel recording or discard in-flight processing
-tonguetyped status       Show daemon state, activation mode, and shortcut health
-tonguetyped reload       Validate and reload the config
-tonguetyped last-result  Print the latest transcription
-tonguetyped doctor       Check runtime dependencies
+tonguetyped daemon         Start the daemon
+tonguetyped start          Start recording
+tonguetyped stop           Stop and transcribe the recording
+tonguetyped toggle         Start or stop recording
+tonguetyped cancel         Cancel recording or discard in-flight processing
+tonguetyped status         Show daemon state, activation mode, and shortcut health
+tonguetyped reload         Validate and reload the config
+tonguetyped last-result    Print the latest transcription
+tonguetyped doctor         Check runtime dependencies
 tonguetyped shortcut-test  Interactively test shortcut authorization and binding
 ```
 
