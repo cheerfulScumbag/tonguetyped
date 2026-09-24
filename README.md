@@ -36,6 +36,16 @@ shortcut on first launch.
 
 ## First run
 
+Configure the microphone, model, shortcut, typing output, and autostart behavior:
+
+```sh
+tonguetyped setup
+```
+
+The setup flow discovers microphones and typing backends before presenting choices.
+It validates the complete configuration before replacing the existing file. Enter
+`q` at any prompt to leave the current configuration unchanged.
+
 For development outside the installed package, start the daemon from a graphical
 desktop session:
 
@@ -69,6 +79,7 @@ The CLI provides these commands:
 
 ```text
 tonguetyped daemon         Start the daemon
+tonguetyped setup          Configure TongueTyped interactively
 tonguetyped start          Start recording
 tonguetyped stop           Stop and transcribe the recording
 tonguetyped toggle         Start or stop recording

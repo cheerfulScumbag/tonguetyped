@@ -6,6 +6,10 @@ use tokio::io::AsyncWriteExt;
 pub struct ModelCatalog;
 
 impl ModelCatalog {
+    pub fn model_names() -> &'static [&'static str] {
+        &["whisper-small-q5_1"]
+    }
+
     pub fn model_file_name(model_name: &str) -> anyhow::Result<&'static str> {
         match model_name {
             "whisper-small-q5_1" => Ok("ggml-small-q5_1.bin"),
