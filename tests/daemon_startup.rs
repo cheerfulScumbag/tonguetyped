@@ -102,8 +102,10 @@ fn doctor_without_daemon_defers_shortcut_binding_test() {
     let root = std::env::temp_dir().join(format!("tt-doctor-{}", std::process::id()));
     let config_home = root.join("config");
     let data_home = root.join("data");
+    let runtime_dir = root.join("runtime");
     std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
     std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
+    std::fs::create_dir_all(&runtime_dir).unwrap();
     std::fs::write(
         config_home.join("tonguetyped/config.toml"),
         "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
@@ -114,6 +116,7 @@ fn doctor_without_daemon_defers_shortcut_binding_test() {
         .arg("doctor")
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
         .output()
         .unwrap();
@@ -126,6 +129,7 @@ fn doctor_without_daemon_defers_shortcut_binding_test() {
         .arg("shortcut-test")
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
         .output()
         .unwrap();
