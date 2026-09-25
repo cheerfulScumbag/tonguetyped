@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use tokio::io::AsyncWriteExt;
-use tonguetyped::{activation, config, daemon, doctor, ipc};
+use tonguetyped::{activation, config, daemon, doctor, ipc, setup};
 
 #[derive(Parser)]
 #[command(name = "tonguetyped", version, about = "Linux dictation application")]
@@ -11,6 +11,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Configure TongueTyped interactively
+    Setup,
     /// Start the daemon process
     Daemon,
     /// Start a new recording
@@ -49,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Setup => setup::run()?,
         Commands::Daemon => {
             let config = config::Config::load()?;
             daemon::run_daemon(config).await?;
