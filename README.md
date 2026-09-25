@@ -43,8 +43,10 @@ tonguetyped setup
 ```
 
 The setup flow discovers microphones and typing backends before presenting choices.
-It validates the complete configuration before replacing the existing file. Enter
-`q` at any prompt to leave the current configuration unchanged.
+It validates the complete configuration before replacing
+`$XDG_CONFIG_HOME/tonguetyped/config.toml`. Enabling autostart installs
+`$XDG_CONFIG_HOME/autostart/tonguetyped.desktop`; disabling it removes that entry.
+Enter `q` at any prompt to leave the configuration and autostart entry unchanged.
 
 For development outside the installed package, start the daemon from a graphical
 desktop session:
@@ -53,11 +55,11 @@ desktop session:
 cargo run -- daemon
 ```
 
-The first run creates `$XDG_CONFIG_HOME/tonguetyped/config.toml` and downloads
-the selected Whisper model to `$XDG_DATA_HOME/tonguetyped/models`. If the
-corresponding XDG variables are unset, the standard user config and data
-directories are used. The desktop portal may ask you to approve the configured
-shortcut, which defaults to `Super+O` in hold mode.
+Starting the daemon downloads the selected Whisper model to
+`$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG variables
+are unset, the standard user config and data directories are used. The desktop
+portal may ask you to approve the configured shortcut, which defaults to
+`Super+O` in hold mode.
 
 The default output method is `none`, so transcription does not type or copy
 anything. Retrieve the latest result with:
