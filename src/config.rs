@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -456,9 +460,7 @@ impl Config {
         self.validate()?;
         let path = Self::config_path()?;
         let content = toml::to_string_pretty(self)?;
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, &content)?;
-        fs::rename(&tmp_path, &path)?;
+        atomic_write(&path, content.as_bytes())?;
         Ok(())
     }
 
@@ -512,12 +514,45 @@ impl Config {
         if self.overlay.enabled {
             anyhow::bail!("overlay.enabled is not supported in Stage 1");
         }
-        if self.startup.autostart {
-            anyhow::bail!("startup.autostart is not supported in Stage 1");
-        }
-
         Ok(())
     }
+}
+
+pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("configuration path has no file name"))?;
+    let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_file_name(format!(
+        ".{file_name}.{}.{sequence}.tmp",
+        std::process::id()
+    ));
+    atomic_write_at(path, &temporary, content)
+}
+
+fn atomic_write_at(path: &Path, temporary: &Path, content: &[u8]) -> anyhow::Result<()> {
+    let mut created = false;
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(temporary)?;
+        created = true;
+        file.write_all(content)?;
+        file.sync_all()?;
+        fs::rename(temporary, path)?;
+        created = false;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if created {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -566,7 +601,7 @@ mod tests {
 
         let mut config = Config::default();
         config.startup.autostart = true;
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -580,5 +615,24 @@ mod tests {
         let mut config = Config::default();
         config.model.idle_unload.timeout_minutes = u64::MAX;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn atomic_write_failure_preserves_destination_and_foreign_temporary_file() {
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-config-atomic-{}-{}",
+            std::process::id(),
+            TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("config.toml");
+        let temporary = root.join("occupied.tmp");
+        fs::write(&destination, "original").unwrap();
+        fs::write(&temporary, "another writer").unwrap();
+
+        assert!(atomic_write_at(&destination, &temporary, b"replacement").is_err());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
+        assert_eq!(fs::read_to_string(&temporary).unwrap(), "another writer");
+        fs::remove_dir_all(root).unwrap();
     }
 }

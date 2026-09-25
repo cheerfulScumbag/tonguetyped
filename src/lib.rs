@@ -9,4 +9,5 @@ pub mod inference;
 pub mod ipc;
 pub mod model;
 pub mod output;
+pub mod setup;
 pub mod vad;
