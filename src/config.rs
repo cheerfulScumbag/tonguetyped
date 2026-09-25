@@ -518,7 +518,7 @@ impl Config {
     }
 }
 
-fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())

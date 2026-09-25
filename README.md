@@ -66,11 +66,11 @@ anything. Retrieve the latest result with:
 cargo run -- last-result
 ```
 
-Set `output.method = "type"` in the generated config to type transcripts into
-the focused application. To test typing explicitly, focus a disposable text
-field and run `cargo run -- doctor --test-type`. The regular `doctor` command
-checks the compositor, microphone, model, and typing backends without injecting
-text or requesting shortcut authorization. Run `cargo run -- shortcut-test`
+Run `tonguetyped setup` and choose `Type into the focused application` to type
+transcripts directly. To test typing explicitly, focus a disposable text field
+and run `cargo run -- doctor --test-type`. The regular `doctor` command checks
+the compositor, microphone, model, and typing backends without injecting text
+or requesting shortcut authorization. Run `cargo run -- shortcut-test`
 explicitly to validate desktop shortcut authorization and binding.
 
 ## Commands

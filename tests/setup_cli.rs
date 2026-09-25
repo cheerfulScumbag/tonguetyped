@@ -77,6 +77,21 @@ fn setup_writes_a_complete_configuration_without_color() {
     );
     assert_eq!(config.output.typing_backend, "wtype");
     assert!(config.startup.autostart);
+    assert_eq!(
+        std::fs::read_to_string(root.join("autostart/tonguetyped.desktop")).unwrap(),
+        include_str!("../data/tonguetyped.desktop")
+    );
+
+    let output = run_setup(&root, "\n\n\n\n\n\n1\n\n", Some(&bin));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert!(!config.startup.autostart);
+    assert!(!root.join("autostart/tonguetyped.desktop").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

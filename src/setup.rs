@@ -1,5 +1,9 @@
 use crate::config::{ActivationMode, Config, OutputMethod};
+use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+
+const AUTOSTART_DESKTOP_ENTRY: &[u8] = include_bytes!("../data/tonguetyped.desktop");
 
 #[derive(Debug)]
 struct Capabilities {
@@ -252,13 +256,71 @@ fn configure(
         return Ok(SetupOutcome::Cancelled);
     }
 
-    config.save()?;
+    save_configuration(&config)?;
     ui.success(output, "Configuration saved.")?;
     writeln!(
         output,
         "Run `tonguetyped doctor` to check the installation."
     )?;
     Ok(SetupOutcome::Saved)
+}
+
+fn save_configuration(config: &Config) -> anyhow::Result<()> {
+    let path = autostart_path()?;
+    let previous = match fs::read(&path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    set_autostart(&path, config.startup.autostart)?;
+    if let Err(error) = config.save() {
+        if let Err(rollback_error) = restore_autostart(&path, previous.as_deref()) {
+            anyhow::bail!(
+                "failed to save configuration: {error}; failed to restore autostart entry: {rollback_error}"
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn autostart_path() -> anyhow::Result<PathBuf> {
+    let config_path = Config::config_path()?;
+    let config_root = config_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("configuration path has no XDG config directory"))?;
+    Ok(config_root.join("autostart/tonguetyped.desktop"))
+}
+
+fn set_autostart(path: &Path, enabled: bool) -> anyhow::Result<()> {
+    if enabled {
+        let directory = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("autostart path has no parent directory"))?;
+        fs::create_dir_all(directory)?;
+        crate::config::atomic_write(path, AUTOSTART_DESKTOP_ENTRY)
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn restore_autostart(path: &Path, previous: Option<&[u8]>) -> anyhow::Result<()> {
+    match previous {
+        Some(content) => {
+            let directory = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("autostart path has no parent directory"))?;
+            fs::create_dir_all(directory)?;
+            crate::config::atomic_write(path, content)
+        }
+        None => set_autostart(path, false),
+    }
 }
 
 fn choose(
