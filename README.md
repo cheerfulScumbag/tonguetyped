@@ -101,3 +101,38 @@ it does not stop a recording automatically.
 When history is enabled, TongueTyped stores transcript text in
 `$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Disable
 `history.enabled` to keep only the current daemon's latest result in memory.
+
+## Transcription benchmark
+
+Measure model loading and inference separately with a 16 kHz mono WAV file:
+
+```sh
+cargo run --release --example transcribe_benchmark -- \
+  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
+  recording.wav en
+```
+
+Omit the language argument to include automatic language detection. The output
+includes audio duration, model-load time, transcription time, real-time factor,
+CPU thread count, and transcript text. Compare builds with the same model, WAV,
+language, release profile, and otherwise idle machine. CPU model, core count,
+temperature, power policy, and competing load affect absolute timing.
+
+The original 8-second representative microphone sample improved from about
+35.8 seconds to 16.5 seconds, with identical transcript text. A recovery run on
+an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used the `small-q5_1`
+model and fixed English. Its 8.597-second synthetic speech WAV was generated
+with FFmpeg's `flite` source:
+
+```sh
+ffmpeg -f lavfi \
+  -i "flite=text='Today I am testing local speech recognition. The microphone records my voice and the computer converts each sentence into written text.'" \
+  -ar 16000 -ac 1 recording.wav
+```
+
+The baseline took 31.825 seconds and the 8-thread build took 13.081 seconds.
+Both runs produced this exact transcript:
+
+```text
+Today I am testing local speech recognition, the microphone records my voice and the computer converts each sentence into written text.
+```
