@@ -8,7 +8,11 @@ const DESKTOP_FILE_NAME: &str = "tonguetyped.desktop";
 
 pub fn update(enabled: bool) -> anyhow::Result<()> {
     let _lock = lock()?;
-    let mut config = Config::reload()?;
+    let mut config = match Config::reload() {
+        Ok(config) => config,
+        Err(_) if !enabled => return set_enabled_at(&path()?, false),
+        Err(error) => return Err(error),
+    };
     config.startup.autostart = enabled;
     save_configuration_locked(&config)
 }
