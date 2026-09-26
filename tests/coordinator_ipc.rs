@@ -4,6 +4,7 @@ use std::time::Duration;
 use tonguetyped::config::Config;
 use tonguetyped::coordinator::{Coordinator, CoordinatorRuntime, RecordingSignal};
 use tonguetyped::daemon::dispatch;
+use tonguetyped::feedback::{Feedback, FeedbackEvent};
 use tonguetyped::ipc::{Request, Response};
 
 #[derive(Default)]
@@ -81,6 +82,17 @@ struct TranscriptionReleaseGuard(Arc<TestRuntime>);
 impl Drop for TranscriptionReleaseGuard {
     fn drop(&mut self) {
         self.0.release_transcription();
+    }
+}
+
+#[derive(Default)]
+struct RecordingFeedback {
+    events: Mutex<Vec<FeedbackEvent>>,
+}
+
+impl Feedback for RecordingFeedback {
+    fn send(&self, event: FeedbackEvent, _config: &Config) {
+        self.events.lock().unwrap().push(event);
     }
 }
 
@@ -297,6 +309,92 @@ fn coordinator(runtime: Arc<TestRuntime>, max_seconds: u64) -> Arc<Coordinator> 
     config.history.enabled = false;
     config.transcription.max_recording_seconds = max_seconds;
     Arc::new(Coordinator::with_runtime(config, runtime).unwrap())
+}
+
+fn coordinator_with_feedback(
+    runtime: Arc<TestRuntime>,
+    feedback: Arc<RecordingFeedback>,
+) -> Arc<Coordinator> {
+    let mut config = Config::default();
+    config.history.enabled = false;
+    Arc::new(Coordinator::with_runtime_and_feedback(config, runtime, feedback).unwrap())
+}
+
+#[tokio::test]
+async fn feedback_tracks_successful_state_transitions_once() {
+    let runtime = Arc::new(TestRuntime::default());
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime, feedback.clone());
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![
+            FeedbackEvent::Recording,
+            FeedbackEvent::Processing,
+            FeedbackEvent::Success,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn feedback_distinguishes_cancellation_from_worker_failure() {
+    let runtime = Arc::new(TestRuntime::default());
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime.clone(), feedback.clone());
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Cancel).await,
+        Response::Cancelled
+    ));
+    wait_for_worker_completion(&runtime, 2).await;
+
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![FeedbackEvent::Recording, FeedbackEvent::Cancelled]
+    );
+}
+
+#[tokio::test]
+async fn feedback_reports_transcription_failure_after_processing() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.transcription_error.store(true, Ordering::SeqCst);
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime, feedback.clone());
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![
+            FeedbackEvent::Recording,
+            FeedbackEvent::Processing,
+            FeedbackEvent::Error,
+        ]
+    );
 }
 
 async fn wait_for_state(coordinator: &Arc<Coordinator>, expected: &str) {

@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::feedback::{DesktopFeedback, Feedback, FeedbackEvent, NoFeedback};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -405,16 +406,29 @@ pub struct Coordinator {
     output_lock: Arc<Mutex<()>>,
     last_result: Arc<Mutex<Option<(String, u64)>>>,
     runtime: Arc<dyn CoordinatorRuntime>,
+    feedback: Arc<dyn Feedback>,
 }
 
 impl Coordinator {
     pub fn new(config: Config) -> anyhow::Result<Self> {
-        Self::with_runtime(config, Arc::new(ProductionRuntime::new()?))
+        Self::with_runtime_and_feedback(
+            config,
+            Arc::new(ProductionRuntime::new()?),
+            Arc::new(DesktopFeedback),
+        )
     }
 
     pub fn with_runtime(
         config: Config,
         runtime: Arc<dyn CoordinatorRuntime>,
+    ) -> anyhow::Result<Self> {
+        Self::with_runtime_and_feedback(config, runtime, Arc::new(NoFeedback))
+    }
+
+    pub fn with_runtime_and_feedback(
+        config: Config,
+        runtime: Arc<dyn CoordinatorRuntime>,
+        feedback: Arc<dyn Feedback>,
     ) -> anyhow::Result<Self> {
         let last_result = if config.history.enabled {
             crate::history::HistoryStore::new(&crate::history::history_db_path()?)?
@@ -439,6 +453,7 @@ impl Coordinator {
             output_lock: Arc::new(Mutex::new(())),
             last_result: Arc::new(Mutex::new(last_result)),
             runtime,
+            feedback,
         })
     }
 
@@ -491,7 +506,7 @@ impl Coordinator {
                     State::Recording => CoordinatorResponse::Ignored("already recording".into()),
                     State::Processing => CoordinatorResponse::Busy,
                 },
-                CoordinatorCommand::Stop => stop_recording(&mut inner, now),
+                CoordinatorCommand::Stop => stop_recording(self.feedback.as_ref(), &mut inner, now),
                 CoordinatorCommand::Toggle => match inner.state {
                     State::Idle => {
                         if detach_physical_press {
@@ -500,7 +515,7 @@ impl Coordinator {
                         start = Some(reserve_recording(self.runtime.as_ref(), &mut inner, now)?);
                         CoordinatorResponse::RecordingStarted
                     }
-                    State::Recording => stop_recording(&mut inner, now),
+                    State::Recording => stop_recording(self.feedback.as_ref(), &mut inner, now),
                     State::Processing => CoordinatorResponse::Busy,
                 },
                 CoordinatorCommand::HoldPress => {
@@ -536,6 +551,7 @@ impl Coordinator {
                     "recording cancelled during startup".into(),
                 ));
             }
+            self.feedback.send(FeedbackEvent::Recording, &inner.config);
         }
         Ok(response)
     }
@@ -570,7 +586,7 @@ impl Coordinator {
                         return Ok(CoordinatorResponse::Ignored("auto-repeat defense".into()));
                     }
                     inner.pending_release = None;
-                    complete_activation_release(&mut inner, generation);
+                    complete_activation_release(self.feedback.as_ref(), &mut inner, generation);
                 }
                 if matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
                     return Ok(CoordinatorResponse::Ignored(
@@ -650,6 +666,7 @@ impl Coordinator {
                     inner.physical_press = Some(PhysicalPress::Detached);
                 }
                 inner.last_action = Some(Instant::now());
+                self.feedback.send(FeedbackEvent::Cancelled, &inner.config);
                 CoordinatorResponse::Cancelled
             }
         }
@@ -663,7 +680,7 @@ impl Coordinator {
             if matches!(inner.pending_release, Some((token, pending_at)) if token == generation && pending_at == released_at)
             {
                 inner.pending_release = None;
-                complete_activation_release(&mut inner, generation);
+                complete_activation_release(coordinator.feedback.as_ref(), &mut inner, generation);
             }
         });
     }
@@ -702,7 +719,12 @@ impl Coordinator {
                 if inner.generation != generation {
                     return;
                 }
-                inner.state = State::Processing;
+                if inner.state == State::Recording {
+                    inner.state = State::Processing;
+                    coordinator
+                        .feedback
+                        .send(FeedbackEvent::Processing, &inner.config);
+                }
                 inner.signal_tx = None;
             }
 
@@ -771,6 +793,7 @@ impl Coordinator {
         if inner.generation == generation {
             inner.state = State::Idle;
             inner.signal_tx = None;
+            self.feedback.send(FeedbackEvent::Success, &inner.config);
         }
     }
 
@@ -780,6 +803,7 @@ impl Coordinator {
             inner.state = State::Idle;
             inner.signal_tx = None;
             inner.last_error = Some(error);
+            self.feedback.send(FeedbackEvent::Error, &inner.config);
         }
     }
 
@@ -873,7 +897,11 @@ fn hold_press(
     }
 }
 
-fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> CoordinatorResponse {
+fn stop_recording(
+    feedback: &dyn Feedback,
+    inner: &mut CoordinatorStateInner,
+    now: Instant,
+) -> CoordinatorResponse {
     match inner.state {
         State::Recording => {
             if let Some(sender) = inner.signal_tx.take() {
@@ -881,6 +909,7 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
             }
             inner.state = State::Processing;
             inner.last_action = Some(now);
+            feedback.send(FeedbackEvent::Processing, &inner.config);
             CoordinatorResponse::RecordingStopped
         }
         State::Processing => CoordinatorResponse::Busy,
@@ -888,7 +917,11 @@ fn stop_recording(inner: &mut CoordinatorStateInner, now: Instant) -> Coordinato
     }
 }
 
-fn complete_activation_release(inner: &mut CoordinatorStateInner, generation: u64) {
+fn complete_activation_release(
+    feedback: &dyn Feedback,
+    inner: &mut CoordinatorStateInner,
+    generation: u64,
+) {
     if matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
         inner.physical_press = None;
         return;
@@ -901,7 +934,7 @@ fn complete_activation_release(inner: &mut CoordinatorStateInner, generation: u6
             if inner.state == State::Recording =>
         {
             inner.physical_press = None;
-            stop_recording(inner, Instant::now());
+            stop_recording(feedback, inner, Instant::now());
         }
         _ => inner.physical_press = None,
     }

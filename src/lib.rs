@@ -5,6 +5,7 @@ pub mod config;
 pub mod coordinator;
 pub mod daemon;
 pub mod doctor;
+pub mod feedback;
 pub mod history;
 pub mod inference;
 pub mod ipc;
