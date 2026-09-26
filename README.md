@@ -30,12 +30,13 @@ nix profile add .
 tonguetyped autostart enable
 ```
 
-The package installs the binary and the `tonguetyped.desktop` application entry.
+The package installs the binary and the
+`io.github.cheerfulScumbag.tonguetyped.desktop` application entry.
 The second command installs that same entry in your user autostart directory, so
-KDE starts TongueTyped when you next sign in. Launch TongueTyped from your
-desktop's application menu once after installation so the Global Shortcuts
-portal can identify it. KDE displays an authorization dialog for the default
-`Super+O` shortcut on first launch.
+KDE starts TongueTyped when you next sign in. Sign out and back in after the
+first installation so the desktop portal discovers the Nix profile application
+entry. KDE displays an authorization dialog for the default `Super+O` shortcut
+when TongueTyped starts.
 
 Upgrade the profile package without changing the autostart setting:
 

@@ -1,12 +1,24 @@
 use crate::coordinator::Coordinator;
+use anyhow::Context;
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
 use std::sync::Arc;
 
 const SHORTCUT_ID: &str = "activation";
+const APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped";
+
+async fn register_host_app() -> anyhow::Result<()> {
+    ashpd::register_host_app(APPLICATION_ID.try_into()?)
+        .await
+        .context(
+            "desktop application identity is unavailable; sign out and back in after installing TongueTyped",
+        )?;
+    Ok(())
+}
 
 pub async fn test_shortcut_binding(keybind: &str) -> Option<String> {
     async {
+        register_host_app().await?;
         let portal = GlobalShortcuts::new().await?;
         let session = portal.create_session().await?;
         let trigger = portal_trigger(keybind)?;
@@ -66,6 +78,11 @@ pub async fn listen(
     keybind: String,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> anyhow::Result<()> {
+    if let Err(error) = register_host_app().await {
+        let message = format!("failed to register desktop application identity: {error}");
+        let _ = ready.send(Err(message.clone()));
+        anyhow::bail!(message);
+    }
     let portal = match GlobalShortcuts::new().await {
         Ok(portal) => portal,
         Err(error) => {
