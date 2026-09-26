@@ -131,10 +131,10 @@ ffmpeg -f lavfi \
 ```
 
 Release builds of baseline commit `a91a123` took 31.570 and 31.607 seconds.
-The final 8-thread build, using the default load parameters except for disabled
-flash attention, took 12.868 and 12.820 seconds. The default GPU setting was
-unchanged; whisper.cpp reported that no GPU was available and used its CPU
-backend. All four runs produced this exact transcript:
+The final 8-thread build, using the same default load parameters, took 18.834
+and 19.312 seconds. Whisper.cpp reported that flash attention was enabled, no
+GPU was available, and the CPU backend was used. All four runs produced this
+exact transcript:
 
 ```text
 Today I am testing local speech recognition, the microphone records my voice and the computer converts each sentence into written text.
