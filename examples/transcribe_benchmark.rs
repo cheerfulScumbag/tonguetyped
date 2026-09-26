@@ -8,17 +8,13 @@ fn main() -> anyhow::Result<()> {
     let model_path = args
         .next()
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("usage: transcribe_benchmark MODEL WAV [LANGUAGE]"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: transcribe_benchmark MODEL WAV"))?;
     let wav_path = args
         .next()
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("usage: transcribe_benchmark MODEL WAV [LANGUAGE]"))?;
-    let language = args
-        .next()
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "auto".to_string());
+        .ok_or_else(|| anyhow::anyhow!("usage: transcribe_benchmark MODEL WAV"))?;
     if args.next().is_some() {
-        anyhow::bail!("usage: transcribe_benchmark MODEL WAV [LANGUAGE]");
+        anyhow::bail!("usage: transcribe_benchmark MODEL WAV");
     }
 
     let samples = transcribe_rs::audio::read_wav_samples(&wav_path)?;
@@ -30,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     let load_time = started.elapsed();
 
     let started = Instant::now();
-    let transcript = engine.transcribe(&samples, &language)?;
+    let transcript = engine.transcribe(&samples, "en")?;
     let transcription_time = started.elapsed();
 
     println!("audio_seconds={audio_seconds:.3}");

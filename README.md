@@ -109,20 +109,18 @@ Measure model loading and inference separately with a 16 kHz mono WAV file:
 ```sh
 cargo run --release --example transcribe_benchmark -- \
   "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
-  recording.wav en
+  recording.wav
 ```
 
-Omit the language argument to include automatic language detection. The output
-includes audio duration, model-load time, transcription time, real-time factor,
-CPU thread count, and transcript text. Compare builds with the same model, WAV,
-language, release profile, and otherwise idle machine. CPU model, core count,
-temperature, power policy, and competing load affect absolute timing.
+The benchmark uses fixed English. Its output includes audio duration, model-load
+time, transcription time, real-time factor, CPU thread count, and transcript
+text. Compare builds with the same model, WAV, release profile, and otherwise
+idle machine. CPU model, core count, temperature, power policy, and competing
+load affect absolute timing.
 
-The original 8-second representative microphone sample improved from about
-35.8 seconds to 16.5 seconds, with identical transcript text. A recovery run on
-an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used the `small-q5_1`
-model and fixed English. Its 8.597-second synthetic speech WAV was generated
-with FFmpeg's `flite` source:
+A recovery run on an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used
+the `small-q5_1` model. Its 8.597-second synthetic speech WAV was generated with
+FFmpeg's `flite` source:
 
 ```sh
 ffmpeg -f lavfi \
