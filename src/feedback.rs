@@ -160,7 +160,7 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
         ),
         FeedbackEvent::Processing => (
             "view-refresh-symbolic",
-            "button-pressed",
+            "dialog-information",
             "Transcribing",
             "low",
         ),

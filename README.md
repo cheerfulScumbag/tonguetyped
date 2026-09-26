@@ -126,12 +126,14 @@ placement and monitor selection, so the existing `overlay.position` and
 multi-monitor policy.
 
 Sound feedback uses the desktop sound theme through `canberra-gtk-play` and
-accepts a volume from `0.0` through `1.0`. A non-default `feedback_device` is
-passed as `PULSE_SINK`, which works with PulseAudio and PipeWire's PulseAudio
-compatibility service. Missing desktop helpers disable only the unavailable
-sound channel; a missing desktop notification service disables visual feedback.
-Recording and terminal commands continue to work. TongueTyped does not add
-animation, inject text, or move focus when it reports state.
+accepts a volume from `0.0` through `1.0`. The Nix package includes this helper;
+source and development builds require it on `PATH`. A non-default
+`feedback_device` is passed as `PULSE_SINK`, which works with PulseAudio and
+PipeWire's PulseAudio compatibility service. A missing sound helper disables
+only sound feedback. Visual feedback is unavailable only when neither Plasma's
+OSD nor a desktop notification service can be reached. Recording and terminal
+commands continue to work. TongueTyped does not add animation, inject text, or
+move focus when it reports state.
 
 ## Commands
 
