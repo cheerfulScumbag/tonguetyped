@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod audio;
+pub mod autostart;
 pub mod config;
 pub mod coordinator;
 pub mod daemon;

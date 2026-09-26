@@ -27,12 +27,39 @@ Install the Nix package into your user profile:
 
 ```sh
 nix profile add .
+tonguetyped autostart enable
 ```
 
-The package installs the binary and a `TongueTyped` desktop entry. Launch
-TongueTyped from your desktop's application menu so the Global Shortcuts portal
-can identify it. KDE displays an authorization dialog for the default `Super+O`
-shortcut on first launch.
+The package installs the binary and the `tonguetyped.desktop` application entry.
+The second command installs that same entry in your user autostart directory, so
+KDE starts TongueTyped when you next sign in. Launch TongueTyped from your
+desktop's application menu once after installation so the Global Shortcuts
+portal can identify it. KDE displays an authorization dialog for the default
+`Super+O` shortcut on first launch.
+
+Upgrade the profile package without changing the autostart setting:
+
+```sh
+nix profile upgrade tonguetyped
+```
+
+Autostart can be disabled and re-enabled without removing the package:
+
+```sh
+tonguetyped autostart disable
+tonguetyped autostart enable
+```
+
+Disable autostart before uninstalling so KDE does not retain a stale entry:
+
+```sh
+tonguetyped autostart disable
+nix profile remove tonguetyped
+```
+
+Uninstalling leaves configuration, downloaded models, and transcription history
+in the XDG config and data directories. Remove those directories separately only
+if their contents are no longer needed.
 
 ## First run
 
@@ -91,6 +118,7 @@ tonguetyped reload         Validate and reload the config
 tonguetyped last-result    Print the latest transcription
 tonguetyped doctor         Check runtime dependencies
 tonguetyped shortcut-test  Interactively test shortcut authorization and binding
+tonguetyped autostart      Enable or disable desktop-session autostart
 ```
 
 The daemon listens on `$XDG_RUNTIME_DIR/tonguetyped/control.sock` and refuses to

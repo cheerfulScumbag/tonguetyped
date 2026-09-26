@@ -13,7 +13,7 @@
     rust-overlay,
     flake-utils,
   }:
-    flake-utils.lib.eachDefaultSystem (system: let
+    flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux"] (system: let
       overlays = [(import rust-overlay)];
       pkgs = import nixpkgs {
         inherit system overlays;
@@ -54,6 +54,7 @@
 
         nativeBuildInputs = with pkgs; [
           cmake
+          desktop-file-utils
           libclang
           pkg-config
         ];
@@ -73,6 +74,14 @@
         postInstall = ''
           install -Dm644 data/tonguetyped.desktop \
             $out/share/applications/tonguetyped.desktop
+        '';
+
+        doInstallCheck = true;
+        installCheckPhase = ''
+          runHook preInstallCheck
+          test -x $out/bin/tonguetyped
+          desktop-file-validate $out/share/applications/tonguetyped.desktop
+          runHook postInstallCheck
         '';
       };
     });

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use tokio::io::AsyncWriteExt;
-use tonguetyped::{activation, config, daemon, doctor, ipc, setup};
+use tonguetyped::{activation, autostart, config, daemon, doctor, ipc, setup};
 
 #[derive(Parser)]
 #[command(name = "tonguetyped", version, about = "Linux dictation application")]
@@ -37,6 +37,19 @@ enum Commands {
     },
     /// Interactively validate desktop shortcut authorization and binding
     ShortcutTest,
+    /// Manage desktop-session autostart
+    Autostart {
+        #[command(subcommand)]
+        command: AutostartCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AutostartCommand {
+    /// Start TongueTyped automatically when the desktop session starts
+    Enable,
+    /// Stop starting TongueTyped automatically
+    Disable,
 }
 
 #[tokio::main]
@@ -140,6 +153,16 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("shortcut binding available");
         }
+        Commands::Autostart { command } => match command {
+            AutostartCommand::Enable => {
+                autostart::update(true)?;
+                println!("autostart enabled");
+            }
+            AutostartCommand::Disable => {
+                autostart::update(false)?;
+                println!("autostart disabled");
+            }
+        },
         Commands::Reload => send_command(ipc::Request::ReloadConfig).await?,
         Commands::LastResult => send_command(ipc::Request::GetLastResult).await?,
     }
