@@ -130,8 +130,11 @@ ffmpeg -f lavfi \
   -ar 16000 -ac 1 recording.wav
 ```
 
-The baseline took 31.825 seconds and the 8-thread build took 13.081 seconds.
-Both runs produced this exact transcript:
+Release builds of baseline commit `a91a123` took 31.570 and 31.607 seconds.
+The final 8-thread build, using the default load parameters except for disabled
+flash attention, took 12.868 and 12.820 seconds. The default GPU setting was
+unchanged; whisper.cpp reported that no GPU was available and used its CPU
+backend. All four runs produced this exact transcript:
 
 ```text
 Today I am testing local speech recognition, the microphone records my voice and the computer converts each sentence into written text.

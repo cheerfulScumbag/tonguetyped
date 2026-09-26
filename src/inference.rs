@@ -1,6 +1,6 @@
 use anyhow::Context;
 use std::path::PathBuf;
-use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams};
+use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams, WhisperLoadParams};
 
 pub struct InferenceEngine {
     engine: Option<WhisperEngine>,
@@ -24,8 +24,14 @@ impl InferenceEngine {
             anyhow::bail!("model file not found: {}", self.model_path.display());
         }
 
-        let engine =
-            WhisperEngine::load(&self.model_path).context("failed to create WhisperEngine")?;
+        let engine = WhisperEngine::load_with_params(
+            &self.model_path,
+            WhisperLoadParams {
+                flash_attn: false,
+                ..Default::default()
+            },
+        )
+        .context("failed to create WhisperEngine")?;
 
         self.engine = Some(engine);
         Ok(())
