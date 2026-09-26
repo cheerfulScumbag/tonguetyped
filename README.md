@@ -110,7 +110,6 @@ Visual and sound feedback are disabled by default. Enable either one in
 ```toml
 [overlay]
 enabled = true
-backend = "auto"
 
 [audio]
 feedback_sounds = true
@@ -119,13 +118,12 @@ feedback_device = "default"
 ```
 
 The visual feedback identifies listening, transcription, completion,
-cancellation, and failure without taking keyboard focus. The `auto` backend
-uses Plasma's native OSD on KDE and falls back to a transient freedesktop
-notification. Set `backend` to `plasma` or `notification` to choose one; the
-Plasma choice still falls back to a notification if its D-Bus service is not
-available. Plasma and the notification daemon control placement and monitor
-selection, so the existing `overlay.position` and `overlay.monitor` settings do
-not override desktop accessibility or multi-monitor policy.
+cancellation, and failure without taking keyboard focus. On KDE it uses
+Plasma's native OSD and falls back to a transient freedesktop notification if
+the OSD service is unavailable. Plasma and the notification daemon control
+placement and monitor selection, so the existing `overlay.position` and
+`overlay.monitor` settings do not override desktop accessibility or
+multi-monitor policy.
 
 Sound feedback uses the desktop sound theme through `canberra-gtk-play` and
 accepts a volume from `0.0` through `1.0`. A non-default `feedback_device` is

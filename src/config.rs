@@ -308,8 +308,6 @@ impl std::fmt::Display for RecordingExpiryPolicy {
 pub struct OverlayConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
-    #[serde(default)]
-    pub backend: OverlayBackend,
     #[serde(default = "default_overlay_position")]
     pub position: String,
     #[serde(default = "default_overlay_monitor")]
@@ -320,20 +318,10 @@ impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            backend: OverlayBackend::Auto,
             position: default_overlay_position(),
             monitor: default_overlay_monitor(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum OverlayBackend {
-    #[default]
-    Auto,
-    Plasma,
-    Notification,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -646,10 +634,14 @@ mod tests {
         assert!(!config.audio.feedback_sounds);
 
         config.overlay.enabled = true;
-        config.overlay.backend = OverlayBackend::Plasma;
         config.audio.feedback_sounds = true;
         config.audio.feedback_volume = 1.0;
         config.validate().unwrap();
+
+        assert!(toml::from_str::<Config>(
+            "[overlay]\nenabled = true\nbackend = \"notification\"\n"
+        )
+        .is_err());
 
         config.audio.feedback_volume = f64::NAN;
         assert!(config.validate().is_err());

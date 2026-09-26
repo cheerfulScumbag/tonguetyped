@@ -1,4 +1,4 @@
-use crate::config::{Config, OverlayBackend};
+use crate::config::Config;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
@@ -27,7 +27,7 @@ impl Feedback for DesktopFeedback {
 
         std::thread::spawn(move || {
             if overlay.enabled {
-                show_visual(event, &overlay.backend);
+                show_visual(event);
             }
             if audio.feedback_sounds {
                 play_sound(event, audio.feedback_volume, &audio.feedback_device);
@@ -42,15 +42,11 @@ impl Feedback for NoFeedback {
     fn send(&self, _event: FeedbackEvent, _config: &Config) {}
 }
 
-fn show_visual(event: FeedbackEvent, backend: &OverlayBackend) {
-    let use_plasma = match backend {
-        OverlayBackend::Auto => std::env::var("XDG_CURRENT_DESKTOP")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .contains("kde"),
-        OverlayBackend::Plasma => true,
-        OverlayBackend::Notification => false,
-    };
+fn show_visual(event: FeedbackEvent) {
+    let use_plasma = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("kde");
 
     if use_plasma && run_plasma_osd(event) {
         return;
@@ -178,7 +174,7 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
         FeedbackEvent::Error => (
             "dialog-error-symbolic",
             "dialog-error",
-            "Transcription failed",
+            "Operation failed",
             "critical",
         ),
     }
@@ -213,6 +209,7 @@ mod tests {
                 .iter()
                 .all(|other| other.1 != style.1 && other.2 != style.2));
         }
+        assert_eq!(event_style(FeedbackEvent::Error).2, "Operation failed");
         assert_eq!(event_style(FeedbackEvent::Error).3, "critical");
     }
 }
