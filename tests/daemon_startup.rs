@@ -57,6 +57,19 @@ fn ipc_starts_when_shortcut_portal_is_unavailable() {
     }
     assert!(socket.exists(), "daemon did not open its control socket");
 
+    let second = Command::new(binary)
+        .arg("daemon")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(String::from_utf8(second.stderr)
+        .unwrap()
+        .contains("daemon is already running"));
+
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let status = Command::new(binary)
