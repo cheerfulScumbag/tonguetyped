@@ -113,10 +113,9 @@ cargo run --release --example transcribe_benchmark -- \
 ```
 
 The benchmark uses fixed English. Its output includes audio duration, model-load
-time, transcription time, real-time factor, CPU thread count, and transcript
-text. Compare builds with the same model, WAV, release profile, and otherwise
-idle machine. CPU model, core count, temperature, power policy, and competing
-load affect absolute timing.
+time, transcription time, real-time factor, and transcript text. Compare builds
+with the same model, WAV, release profile, and otherwise idle machine. CPU model,
+core count, temperature, power policy, and competing load affect absolute timing.
 
 A recovery run on an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used
 the `small-q5_1` model. Its 8.597-second synthetic speech WAV was generated with
@@ -128,11 +127,31 @@ ffmpeg -f lavfi \
   -ar 16000 -ac 1 recording.wav
 ```
 
-Release builds of baseline commit `a91a123` took 31.570 and 31.607 seconds.
-The final 8-thread build, using the same default load parameters, took 18.834
-and 19.312 seconds. Whisper.cpp reported that flash attention was enabled, no
-GPU was available, and the CPU backend was used. All four runs produced this
-exact transcript:
+The baseline predates the benchmark example. Run it with the final benchmark
+source so both builds use the same input, language, timing boundaries, and
+default model-loading behavior:
+
+```sh
+baseline_dir="$(mktemp -d)"
+git archive a91a1236d26f15f972e7e30089cbb4acbf5f578f | \
+  tar -x -C "$baseline_dir"
+mkdir "$baseline_dir/examples"
+cp examples/transcribe_benchmark.rs "$baseline_dir/examples/"
+cargo run --release --manifest-path "$baseline_dir/Cargo.toml" \
+  --example transcribe_benchmark -- \
+  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
+  "$(pwd)/recording.wav"
+rm -rf "$baseline_dir"
+
+cargo run --release --example transcribe_benchmark -- \
+  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
+  recording.wav
+```
+
+The release build of baseline commit `a91a123` took 30.917 seconds. The final
+8-thread build, using the same default load parameters, took 19.512 seconds.
+Whisper.cpp reported that flash attention was enabled, no GPU was available,
+and the CPU backend was used. Both runs produced this exact transcript:
 
 ```text
 Today I am testing local speech recognition, the microphone records my voice and the computer converts each sentence into written text.

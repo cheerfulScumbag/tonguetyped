@@ -39,7 +39,6 @@ fn main() -> anyhow::Result<()> {
         "realtime_factor={:.3}",
         transcription_time.as_secs_f64() / audio_seconds
     );
-    println!("cpu_threads={}", InferenceEngine::cpu_threads());
     println!("transcript={transcript}");
     Ok(())
 }
