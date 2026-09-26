@@ -56,6 +56,7 @@
           cmake
           desktop-file-utils
           libclang
+          makeWrapper
           pkg-config
         ];
 
@@ -74,6 +75,11 @@
         postInstall = ''
           install -Dm644 data/tonguetyped.desktop \
             $out/share/applications/tonguetyped.desktop
+        '';
+
+        postFixup = ''
+          wrapProgram $out/bin/tonguetyped \
+            --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libcanberra-gtk3]}
         '';
 
         doInstallCheck = true;
