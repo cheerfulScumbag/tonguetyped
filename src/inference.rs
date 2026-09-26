@@ -1,6 +1,6 @@
 use anyhow::Context;
 use std::path::PathBuf;
-use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams, WhisperLoadParams};
+use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams};
 
 pub struct InferenceEngine {
     engine: Option<WhisperEngine>,
@@ -24,15 +24,8 @@ impl InferenceEngine {
             anyhow::bail!("model file not found: {}", self.model_path.display());
         }
 
-        let engine = WhisperEngine::load_with_params(
-            &self.model_path,
-            WhisperLoadParams {
-                use_gpu: false,
-                flash_attn: false,
-                ..Default::default()
-            },
-        )
-        .context("failed to create WhisperEngine")?;
+        let engine =
+            WhisperEngine::load(&self.model_path).context("failed to create WhisperEngine")?;
 
         self.engine = Some(engine);
         Ok(())
@@ -58,7 +51,7 @@ impl InferenceEngine {
     }
 
     pub fn cpu_threads() -> i32 {
-        cpu_thread_count(num_cpus::get_physical())
+        cpu_thread_count(num_cpus::get_physical(), num_cpus::get())
     }
 
     pub fn models_dir() -> anyhow::Result<PathBuf> {
@@ -68,8 +61,8 @@ impl InferenceEngine {
     }
 }
 
-fn cpu_thread_count(physical_cores: usize) -> i32 {
-    i32::try_from(physical_cores.max(1)).unwrap_or(i32::MAX)
+fn cpu_thread_count(physical_cores: usize, logical_cpus: usize) -> i32 {
+    physical_cores.min(logical_cpus) as i32
 }
 
 #[cfg(test)]
@@ -83,9 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn cpu_thread_count_is_positive_and_bounded() {
-        assert_eq!(cpu_thread_count(0), 1);
-        assert_eq!(cpu_thread_count(8), 8);
-        assert_eq!(cpu_thread_count(usize::MAX), i32::MAX);
+    fn cpu_thread_count_does_not_exceed_available_logical_cpus() {
+        assert_eq!(cpu_thread_count(8, 16), 8);
+        assert_eq!(cpu_thread_count(8, 4), 4);
     }
 }
