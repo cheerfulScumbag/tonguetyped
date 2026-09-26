@@ -19,6 +19,7 @@ transcribe-rs = { version = "=0.3.11", features = ["whisper-cpp"] }
 vad-rs = { git = "https://github.com/cjpais/vad-rs", rev = "2a412ed858695b9251f3f5a1a20d95b59fa7c498" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 indicatif = "0.17"
+num_cpus = "1"
 reqwest = { version = "0.12", features = ["stream"] }
 directories = "5"
 anyhow = "1"
