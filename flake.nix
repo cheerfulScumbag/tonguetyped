@@ -74,7 +74,7 @@
 
         postInstall = ''
           install -Dm644 data/tonguetyped.desktop \
-            $out/share/applications/tonguetyped.desktop
+            $out/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
         '';
 
         postFixup = ''
@@ -86,7 +86,7 @@
         installCheckPhase = ''
           runHook preInstallCheck
           test -x $out/bin/tonguetyped
-          desktop-file-validate $out/share/applications/tonguetyped.desktop
+          desktop-file-validate $out/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
           runHook postInstallCheck
         '';
       };

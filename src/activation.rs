@@ -1,12 +1,60 @@
 use crate::coordinator::Coordinator;
+use anyhow::Context;
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
+use std::path::Path;
 use std::sync::Arc;
 
 const SHORTCUT_ID: &str = "activation";
+const INSTALLED_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped";
+const DEVELOPMENT_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped.Devel";
+const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
+    include_str!("../data/tonguetyped.desktop"),
+    "NoDisplay=true\n"
+);
+
+fn application_id() -> anyhow::Result<&'static str> {
+    if !cfg!(debug_assertions) {
+        return Ok(INSTALLED_APPLICATION_ID);
+    }
+
+    let data_dir = directories::BaseDirs::new()
+        .context("could not determine the user data directory")?
+        .data_dir()
+        .to_owned();
+    install_development_desktop_entry(&data_dir)?;
+    Ok(DEVELOPMENT_APPLICATION_ID)
+}
+
+fn install_development_desktop_entry(data_dir: &Path) -> anyhow::Result<()> {
+    let applications_dir = data_dir.join("applications");
+    std::fs::create_dir_all(&applications_dir).with_context(|| {
+        format!(
+            "could not create desktop application directory {}",
+            applications_dir.display()
+        )
+    })?;
+    let path = applications_dir.join(format!("{DEVELOPMENT_APPLICATION_ID}.desktop"));
+    std::fs::write(&path, DEVELOPMENT_DESKTOP_ENTRY).with_context(|| {
+        format!(
+            "could not write development desktop entry {}",
+            path.display()
+        )
+    })
+}
+
+async fn register_host_app() -> anyhow::Result<()> {
+    ashpd::register_host_app(application_id()?.try_into()?)
+        .await
+        .context(
+            "desktop application identity is unavailable; sign out and back in after installing TongueTyped",
+        )?;
+    Ok(())
+}
 
 pub async fn test_shortcut_binding(keybind: &str) -> Option<String> {
     async {
+        register_host_app().await?;
         let portal = GlobalShortcuts::new().await?;
         let session = portal.create_session().await?;
         let trigger = portal_trigger(keybind)?;
@@ -66,6 +114,11 @@ pub async fn listen(
     keybind: String,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> anyhow::Result<()> {
+    if let Err(error) = register_host_app().await {
+        let message = format!("failed to register desktop application identity: {error}");
+        let _ = ready.send(Err(message.clone()));
+        anyhow::bail!(message);
+    }
     let portal = match GlobalShortcuts::new().await {
         Ok(portal) => portal,
         Err(error) => {
@@ -152,6 +205,25 @@ impl EventOrder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installs_discoverable_development_application_identity() {
+        let data_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("activation-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        install_development_desktop_entry(&data_dir).unwrap();
+
+        let entry = data_dir
+            .join("applications")
+            .join(format!("{DEVELOPMENT_APPLICATION_ID}.desktop"));
+        assert_eq!(
+            std::fs::read_to_string(entry).unwrap(),
+            DEVELOPMENT_DESKTOP_ENTRY
+        );
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
 
     #[test]
     fn normalizes_configured_keybind_for_portal() {

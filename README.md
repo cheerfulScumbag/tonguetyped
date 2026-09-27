@@ -30,12 +30,13 @@ nix profile add .
 tonguetyped autostart enable
 ```
 
-The package installs the binary and the `tonguetyped.desktop` application entry.
+The package installs the binary and the
+`io.github.cheerfulScumbag.tonguetyped.desktop` application entry.
 The second command installs that same entry in your user autostart directory, so
-KDE starts TongueTyped when you next sign in. Launch TongueTyped from your
-desktop's application menu once after installation so the Global Shortcuts
-portal can identify it. KDE displays an authorization dialog for the default
-`Super+O` shortcut on first launch.
+KDE starts TongueTyped when you next sign in. Sign out and back in after the
+first installation so the desktop portal discovers the Nix profile application
+entry. KDE displays an authorization dialog for the default `Super+O` shortcut
+when TongueTyped starts.
 
 Upgrade the profile package without changing the autostart setting:
 
@@ -82,10 +83,13 @@ desktop session:
 cargo run -- daemon
 ```
 
-Starting the daemon downloads the selected Whisper model to
-`$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG variables
-are unset, the standard user config and data directories are used. The desktop
-portal may ask you to approve the configured shortcut, which defaults to
+Debug builds install or update the hidden
+`$XDG_DATA_HOME/applications/io.github.cheerfulScumbag.tonguetyped.Devel.desktop`
+entry before requesting shortcut authorization so the desktop portal can
+identify the source build. Starting the daemon downloads the selected Whisper
+model to `$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG
+variables are unset, the standard user config and data directories are used. The
+desktop portal may ask you to approve the configured shortcut, which defaults to
 `Super+O` in hold mode.
 
 The default output method is `none`, so transcription does not type or copy
