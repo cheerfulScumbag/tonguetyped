@@ -83,10 +83,13 @@ desktop session:
 cargo run -- daemon
 ```
 
-Starting the daemon downloads the selected Whisper model to
-`$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG variables
-are unset, the standard user config and data directories are used. The desktop
-portal may ask you to approve the configured shortcut, which defaults to
+Debug builds install or update the hidden
+`$XDG_DATA_HOME/applications/io.github.cheerfulScumbag.tonguetyped.Devel.desktop`
+entry before requesting shortcut authorization so the desktop portal can
+identify the source build. Starting the daemon downloads the selected Whisper
+model to `$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG
+variables are unset, the standard user config and data directories are used. The
+desktop portal may ask you to approve the configured shortcut, which defaults to
 `Super+O` in hold mode.
 
 The default output method is `none`, so transcription does not type or copy

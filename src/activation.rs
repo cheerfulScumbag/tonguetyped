@@ -35,8 +35,12 @@ fn install_development_desktop_entry(data_dir: &Path) -> anyhow::Result<()> {
         )
     })?;
     let path = applications_dir.join(format!("{DEVELOPMENT_APPLICATION_ID}.desktop"));
-    std::fs::write(&path, DEVELOPMENT_DESKTOP_ENTRY)
-        .with_context(|| format!("could not write development desktop entry {}", path.display()))
+    std::fs::write(&path, DEVELOPMENT_DESKTOP_ENTRY).with_context(|| {
+        format!(
+            "could not write development desktop entry {}",
+            path.display()
+        )
+    })
 }
 
 async fn register_host_app() -> anyhow::Result<()> {
