@@ -424,7 +424,7 @@ fn wait_for_recording_end(
         if let Ok(message) = error_rx.try_recv() {
             break (
                 Err(anyhow::anyhow!("microphone stream failed: {}", message)),
-                None,
+                Some(clock.now()),
             );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1221,6 +1221,39 @@ mod tests {
             result.0.unwrap_err().to_string(),
             "microphone stream failed: device disconnected"
         );
+    }
+
+    #[test]
+    fn microphone_error_boundary_precedes_audio_finalization() {
+        #[derive(Default)]
+        struct TestClock(Mutex<Duration>);
+
+        impl Clock for TestClock {
+            fn now(&self) -> Duration {
+                *self.0.lock().unwrap()
+            }
+        }
+
+        let (_signal_tx, signal_rx) = mpsc::channel();
+        let (error_tx, error_rx) = mpsc::channel();
+        let clock = TestClock::default();
+        *clock.0.lock().unwrap() = Duration::from_millis(5);
+        error_tx.send("device disconnected".to_string()).unwrap();
+
+        let result = wait_for_recording_end(
+            &signal_rx,
+            &error_rx,
+            Instant::now() + Duration::from_secs(1),
+            &clock,
+            || *clock.0.lock().unwrap() += Duration::from_millis(7),
+        );
+
+        assert_eq!(
+            result.0.unwrap_err().to_string(),
+            "microphone stream failed: device disconnected"
+        );
+        assert_eq!(result.1, Some(Duration::from_millis(5)));
+        assert_eq!(clock.now(), Duration::from_millis(12));
     }
 
     #[test]
