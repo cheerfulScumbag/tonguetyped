@@ -195,14 +195,17 @@ ffmpeg -f lavfi \
   -ar 16000 -ac 1 recording.wav
 ```
 
-The baseline has an earlier version of the benchmark example. Run each revision's
-example with the same input, language, timing boundaries, and default
-model-loading behavior:
+The repository includes a benchmark source compatible with baseline commit
+`a91a123`. Copy it into an archive of that revision, then run both examples with
+the same input, language, timing boundaries, and default model-loading behavior:
 
 ```sh
 baseline_dir="$(mktemp -d)"
 git archive a91a1236d26f15f972e7e30089cbb4acbf5f578f | \
   tar -x -C "$baseline_dir"
+mkdir "$baseline_dir/examples"
+cp examples/transcribe_benchmark_baseline.rs \
+  "$baseline_dir/examples/transcribe_benchmark.rs"
 cargo run --release --manifest-path "$baseline_dir/Cargo.toml" \
   --example transcribe_benchmark -- \
   "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
