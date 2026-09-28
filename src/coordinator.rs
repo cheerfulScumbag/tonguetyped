@@ -36,7 +36,8 @@ pub trait CoordinatorRuntime: Send + Sync {
         max_duration: Duration,
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
-    ) -> anyhow::Result<Vec<f32>>;
+        clock: Arc<dyn Clock>,
+    ) -> anyhow::Result<RecordedAudio>;
     fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt;
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
@@ -49,6 +50,11 @@ pub trait CoordinatorRuntime: Send + Sync {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+pub struct RecordedAudio {
+    pub samples: Vec<f32>,
+    pub automatic_stop_at: Option<Duration>,
 }
 
 #[derive(Debug, Default)]
@@ -275,7 +281,8 @@ impl CoordinatorRuntime for ProductionRuntime {
         max_duration: Duration,
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
-    ) -> anyhow::Result<Vec<f32>> {
+        clock: Arc<dyn Clock>,
+    ) -> anyhow::Result<RecordedAudio> {
         let (error_tx, error_rx) = mpsc::channel();
         let error_callback = Arc::new(move |message: String| {
             let _ = error_tx.send(message);
@@ -307,8 +314,14 @@ impl CoordinatorRuntime for ProductionRuntime {
             }
         };
         let _ = started.send(Ok(()));
-        wait_for_recording_end(&signal_rx, &error_rx, deadline, || recorder.stop())?;
-        recorder.take_buffer()
+        let automatic_stop_at =
+            wait_for_recording_end(&signal_rx, &error_rx, deadline, clock.as_ref(), || {
+                recorder.stop()
+            })?;
+        Ok(RecordedAudio {
+            samples: recorder.take_buffer()?,
+            automatic_stop_at,
+        })
     }
 
     fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt {
@@ -394,21 +407,22 @@ fn wait_for_recording_end(
     signal_rx: &mpsc::Receiver<RecordingSignal>,
     error_rx: &mpsc::Receiver<String>,
     deadline: Instant,
+    clock: &dyn Clock,
     stop: impl FnOnce(),
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Duration>> {
     let result = loop {
         if let Ok(message) = error_rx.try_recv() {
             break Err(anyhow::anyhow!("microphone stream failed: {}", message));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            break Ok(());
+            break Ok(Some(clock.now()));
         }
         match signal_rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
-            Ok(RecordingSignal::Stop) => break Ok(()),
+            Ok(RecordingSignal::Stop) => break Ok(None),
             Ok(RecordingSignal::Cancel) => break Err(anyhow::anyhow!("recording cancelled")),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(None),
         }
     };
 
@@ -807,15 +821,21 @@ impl Coordinator {
                 duration,
                 signal_rx,
                 started_tx,
+                Arc::clone(&coordinator.clock),
             );
             {
                 let mut timing = timing.lock().unwrap();
+                if let Ok(recording) = &recording {
+                    if let Some(stop_at) = recording.automatic_stop_at {
+                        timing.mark_stop_received_at(stop_at);
+                    }
+                }
                 timing.mark_stop_received();
                 let duration = timing.elapsed_since_stop();
                 timing.set_phase(Phase::AudioFinalization, duration);
             }
             let samples = match recording {
-                Ok(samples) => samples,
+                Ok(recording) => recording.samples,
                 Err(error) => {
                     tracing::error!("recording failed: {}", error);
                     coordinator.settle_error(
@@ -1173,6 +1193,7 @@ mod tests {
             &signal_rx,
             &error_rx,
             Instant::now() + Duration::from_secs(1),
+            &MonotonicClock::new(),
             || error_tx.send("device disconnected".to_string()).unwrap(),
         );
 
@@ -1180,6 +1201,32 @@ mod tests {
             result.unwrap_err().to_string(),
             "microphone stream failed: device disconnected"
         );
+    }
+
+    #[test]
+    fn automatic_stop_boundary_precedes_audio_finalization() {
+        #[derive(Default)]
+        struct TestClock(Mutex<Duration>);
+
+        impl Clock for TestClock {
+            fn now(&self) -> Duration {
+                *self.0.lock().unwrap()
+            }
+        }
+
+        let (_signal_tx, signal_rx) = mpsc::channel();
+        let (_error_tx, error_rx) = mpsc::channel();
+        let clock = TestClock::default();
+        *clock.0.lock().unwrap() = Duration::from_millis(5);
+
+        let automatic_stop_at =
+            wait_for_recording_end(&signal_rx, &error_rx, Instant::now(), &clock, || {
+                *clock.0.lock().unwrap() += Duration::from_millis(7)
+            })
+            .unwrap();
+
+        assert_eq!(automatic_stop_at, Some(Duration::from_millis(5)));
+        assert_eq!(clock.now(), Duration::from_millis(12));
     }
 
     #[test]

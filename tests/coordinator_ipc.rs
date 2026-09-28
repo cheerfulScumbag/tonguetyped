@@ -3,12 +3,13 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use tonguetyped::config::Config;
 use tonguetyped::coordinator::{
-    Coordinator, CoordinatorRuntime, RecordingSignal, TranscriptionAttempt, TranscriptionTimings,
+    Coordinator, CoordinatorRuntime, RecordedAudio, RecordingSignal, TranscriptionAttempt,
+    TranscriptionTimings,
 };
 use tonguetyped::daemon::dispatch;
 use tonguetyped::feedback::{Feedback, FeedbackEvent};
 use tonguetyped::ipc::{Request, Response};
-use tonguetyped::latency::{LatencyRecord, LatencySink, MonotonicClock};
+use tonguetyped::latency::{Clock, LatencyRecord, LatencySink, MonotonicClock};
 
 #[derive(Default)]
 struct TestRuntime {
@@ -22,6 +23,7 @@ struct TestRuntime {
     empty_transcript: AtomicBool,
     transcription_error: AtomicBool,
     output_error: AtomicBool,
+    recording_finalization_ms: AtomicUsize,
     transcription_gate: (Mutex<bool>, Condvar),
     startup_gate: (Mutex<bool>, Condvar),
     microphone_error_gate: (Mutex<bool>, Condvar),
@@ -117,7 +119,8 @@ impl CoordinatorRuntime for TestRuntime {
         max_duration: Duration,
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
-    ) -> anyhow::Result<Vec<f32>> {
+        clock: Arc<dyn Clock>,
+    ) -> anyhow::Result<RecordedAudio> {
         self.recordings.fetch_add(1, Ordering::SeqCst);
         self.startup_started.store(true, Ordering::SeqCst);
         if self.block_startup.load(Ordering::SeqCst) {
@@ -134,15 +137,23 @@ impl CoordinatorRuntime for TestRuntime {
             }
             anyhow::bail!("simulated microphone disconnect");
         }
-        match signal_rx.recv_timeout(max_duration) {
-            Ok(RecordingSignal::Stop) => Ok(vec![0.1; 512]),
+        let (samples, automatic_stop_at) = match signal_rx.recv_timeout(max_duration) {
+            Ok(RecordingSignal::Stop) => (vec![0.1; 512], None),
             Ok(RecordingSignal::Cancel) => anyhow::bail!("cancelled"),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.timed_out.store(true, Ordering::SeqCst);
-                Ok(vec![0.1; 512])
+                let automatic_stop_at = clock.now();
+                std::thread::sleep(Duration::from_millis(
+                    self.recording_finalization_ms.load(Ordering::SeqCst) as u64,
+                ));
+                (vec![0.1; 512], Some(automatic_stop_at))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Vec::new()),
-        }
+            Err(mpsc::RecvTimeoutError::Disconnected) => (Vec::new(), None),
+        };
+        Ok(RecordedAudio {
+            samples,
+            automatic_stop_at,
+        })
     }
 
     fn transcribe(&self, _samples: &[f32], _config: &Config) -> TranscriptionAttempt {
@@ -400,6 +411,39 @@ async fn latency_records_terminal_outcomes_once() {
     let records = latency.records.lock().unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].outcome, "cancelled");
+}
+
+#[tokio::test]
+async fn automatic_stop_includes_audio_finalization_in_latency() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime
+        .recording_finalization_ms
+        .store(20, Ordering::SeqCst);
+    let latency = Arc::new(RecordingLatencySink::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.transcription.max_recording_seconds = 0;
+    let coordinator = Arc::new(
+        Coordinator::with_runtime_feedback_and_latency(
+            config,
+            runtime,
+            Arc::new(tonguetyped::feedback::NoFeedback),
+            Arc::new(MonotonicClock::new()),
+            latency.clone(),
+        )
+        .unwrap(),
+    );
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    let records = latency.records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].audio_finalization_ms >= 20.0);
+    assert!(records[0].total_stop_to_idle_ms >= records[0].audio_finalization_ms);
 }
 
 #[tokio::test]
