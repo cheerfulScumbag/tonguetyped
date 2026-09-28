@@ -95,6 +95,7 @@ pub struct LatencyOperation {
     operation_id: String,
     model_id: String,
     stop_received: Option<Duration>,
+    audio_finalization_started: Option<Duration>,
     audio_finalization: Duration,
     vad: Duration,
     model_load: Duration,
@@ -113,6 +114,7 @@ impl LatencyOperation {
             operation_id: format!("{}-{sequence}", std::process::id()),
             model_id,
             stop_received: None,
+            audio_finalization_started: None,
             audio_finalization: Duration::ZERO,
             vad: Duration::ZERO,
             model_load: Duration::ZERO,
@@ -132,6 +134,17 @@ impl LatencyOperation {
         self.stop_received = Some(
             self.stop_received
                 .map_or(received, |current| current.min(received)),
+        );
+    }
+
+    pub fn mark_audio_finalization_started(&mut self) {
+        self.mark_audio_finalization_started_at(self.clock.now());
+    }
+
+    pub fn mark_audio_finalization_started_at(&mut self, started: Duration) {
+        self.audio_finalization_started = Some(
+            self.audio_finalization_started
+                .map_or(started, |current| current.min(started)),
         );
     }
 
@@ -160,6 +173,12 @@ impl LatencyOperation {
 
     pub fn elapsed_since_stop(&self) -> Duration {
         self.stop_received
+            .map(|started| self.clock.now().saturating_sub(started))
+            .unwrap_or_default()
+    }
+
+    pub fn elapsed_audio_finalization(&self) -> Duration {
+        self.audio_finalization_started
             .map(|started| self.clock.now().saturating_sub(started))
             .unwrap_or_default()
     }

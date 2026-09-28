@@ -3,6 +3,7 @@ use crate::feedback::{DesktopFeedback, Feedback, FeedbackEvent, NoFeedback};
 use crate::latency::{
     Clock, LatencyOperation, LatencySink, MonotonicClock, Phase, TracingLatencySink,
 };
+use std::borrow::Cow;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -342,7 +343,7 @@ impl CoordinatorRuntime for ProductionRuntime {
             }) {
                 Ok(samples) => {
                     timings.vad = vad_started.elapsed();
-                    samples
+                    Cow::Owned(samples)
                 }
                 Err(error) => {
                     timings.vad = vad_started.elapsed();
@@ -353,7 +354,7 @@ impl CoordinatorRuntime for ProductionRuntime {
                 }
             }
         } else {
-            samples.to_vec()
+            Cow::Borrowed(samples)
         };
         if samples.is_empty() {
             return TranscriptionAttempt {
@@ -844,9 +845,11 @@ impl Coordinator {
                 let mut timing = timing.lock().unwrap();
                 if let Some(stop_at) = recording.automatic_stop_at {
                     timing.mark_stop_received_at(stop_at);
+                    timing.mark_audio_finalization_started_at(stop_at);
                 }
                 timing.mark_stop_received();
-                let duration = timing.elapsed_since_stop();
+                timing.mark_audio_finalization_started();
+                let duration = timing.elapsed_audio_finalization();
                 timing.set_phase(Phase::AudioFinalization, duration);
             }
             let samples = match recording.result {
@@ -1114,7 +1117,9 @@ fn stop_recording(
     match inner.state {
         State::Recording => {
             if let Some(timing) = &inner.active_timing {
-                timing.lock().unwrap().mark_stop_received();
+                let mut timing = timing.lock().unwrap();
+                timing.mark_stop_received();
+                timing.mark_audio_finalization_started();
             }
             if let Some(sender) = inner.signal_tx.take() {
                 let _ = sender.send(RecordingSignal::Stop);

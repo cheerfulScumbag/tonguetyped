@@ -175,22 +175,21 @@ impl CoordinatorRuntime for TestRuntime {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.timed_out.store(true, Ordering::SeqCst);
-                let automatic_stop_at = clock.now();
-                self.recording_finalization_started
-                    .store(true, Ordering::SeqCst);
-                if self.block_recording_finalization.load(Ordering::SeqCst) {
-                    let mut released = self.recording_finalization_gate.0.lock().unwrap();
-                    while !*released {
-                        released = self.recording_finalization_gate.1.wait(released).unwrap();
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(
-                    self.recording_finalization_ms.load(Ordering::SeqCst) as u64,
-                ));
-                Some(automatic_stop_at)
+                Some(clock.now())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => None,
         };
+        self.recording_finalization_started
+            .store(true, Ordering::SeqCst);
+        if self.block_recording_finalization.load(Ordering::SeqCst) {
+            let mut released = self.recording_finalization_gate.0.lock().unwrap();
+            while !*released {
+                released = self.recording_finalization_gate.1.wait(released).unwrap();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(
+            self.recording_finalization_ms.load(Ordering::SeqCst) as u64,
+        ));
         let result = if self
             .fail_recording_after_finalization
             .load(Ordering::SeqCst)
@@ -576,6 +575,46 @@ async fn automatic_stop_error_preserves_finalization_latency() {
     assert_eq!(records[0].outcome, "recording_error");
     assert_eq!(records[0].audio_finalization_ms, 25.0);
     assert_eq!(records[0].total_stop_to_idle_ms, 25.0);
+}
+
+#[tokio::test]
+async fn hold_release_delay_is_excluded_from_audio_finalization() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime
+        .block_recording_finalization
+        .store(true, Ordering::SeqCst);
+    let clock = Arc::new(TestClock::default());
+    let latency = Arc::new(RecordingLatencySink::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    let coordinator = Arc::new(
+        Coordinator::with_runtime_feedback_and_latency(
+            config,
+            runtime.clone(),
+            Arc::new(tonguetyped::feedback::NoFeedback),
+            clock.clone(),
+            latency.clone(),
+        )
+        .unwrap(),
+    );
+
+    assert!(matches!(
+        coordinator.handle_activation(true).await.unwrap(),
+        tonguetyped::coordinator::CoordinatorResponse::RecordingStarted
+    ));
+    clock.advance(Duration::from_millis(10));
+    coordinator.handle_activation(false).await.unwrap();
+    clock.advance(Duration::from_millis(50));
+    wait_for_flag(&runtime.recording_finalization_started).await;
+    clock.advance(Duration::from_millis(20));
+    runtime.release_recording_finalization();
+    wait_for_state(&coordinator, "idle").await;
+
+    let records = latency.records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].stop_received_monotonic_ms, 10.0);
+    assert_eq!(records[0].audio_finalization_ms, 20.0);
+    assert_eq!(records[0].total_stop_to_idle_ms, 70.0);
 }
 
 #[tokio::test]
