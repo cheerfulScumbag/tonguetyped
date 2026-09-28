@@ -37,7 +37,7 @@ pub trait CoordinatorRuntime: Send + Sync {
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
         clock: Arc<dyn Clock>,
-    ) -> anyhow::Result<RecordedAudio>;
+    ) -> RecordingAttempt;
     fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt;
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
@@ -52,8 +52,8 @@ pub trait CoordinatorRuntime: Send + Sync {
     }
 }
 
-pub struct RecordedAudio {
-    pub samples: Vec<f32>,
+pub struct RecordingAttempt {
+    pub result: anyhow::Result<Vec<f32>>,
     pub automatic_stop_at: Option<Duration>,
 }
 
@@ -282,7 +282,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
         clock: Arc<dyn Clock>,
-    ) -> anyhow::Result<RecordedAudio> {
+    ) -> RecordingAttempt {
         let (error_tx, error_rx) = mpsc::channel();
         let error_callback = Arc::new(move |message: String| {
             let _ = error_tx.send(message);
@@ -297,31 +297,40 @@ impl CoordinatorRuntime for ProductionRuntime {
             Err(error) => {
                 let message = error.to_string();
                 let _ = started.send(Err(message.clone()));
-                anyhow::bail!(message);
+                return RecordingAttempt {
+                    result: Err(anyhow::anyhow!(message)),
+                    automatic_stop_at: None,
+                };
             }
         };
         if let Err(error) = recorder.start() {
             let message = error.to_string();
             let _ = started.send(Err(message.clone()));
-            anyhow::bail!(message);
+            return RecordingAttempt {
+                result: Err(anyhow::anyhow!(message)),
+                automatic_stop_at: None,
+            };
         }
         let deadline = match Instant::now().checked_add(max_duration) {
             Some(deadline) => deadline,
             None => {
                 let message = "max recording duration is too large".to_string();
                 let _ = started.send(Err(message.clone()));
-                anyhow::bail!(message);
+                return RecordingAttempt {
+                    result: Err(anyhow::anyhow!(message)),
+                    automatic_stop_at: None,
+                };
             }
         };
         let _ = started.send(Ok(()));
-        let automatic_stop_at =
+        let (recording_result, automatic_stop_at) =
             wait_for_recording_end(&signal_rx, &error_rx, deadline, clock.as_ref(), || {
                 recorder.stop()
-            })?;
-        Ok(RecordedAudio {
-            samples: recorder.take_buffer()?,
+            });
+        RecordingAttempt {
+            result: recording_result.and_then(|()| recorder.take_buffer()),
             automatic_stop_at,
-        })
+        }
     }
 
     fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt {
@@ -409,26 +418,34 @@ fn wait_for_recording_end(
     deadline: Instant,
     clock: &dyn Clock,
     stop: impl FnOnce(),
-) -> anyhow::Result<Option<Duration>> {
+) -> (anyhow::Result<()>, Option<Duration>) {
     let result = loop {
         if let Ok(message) = error_rx.try_recv() {
-            break Err(anyhow::anyhow!("microphone stream failed: {}", message));
+            break (
+                Err(anyhow::anyhow!("microphone stream failed: {}", message)),
+                None,
+            );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            break Ok(Some(clock.now()));
+            break (Ok(()), Some(clock.now()));
         }
         match signal_rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
-            Ok(RecordingSignal::Stop) => break Ok(None),
-            Ok(RecordingSignal::Cancel) => break Err(anyhow::anyhow!("recording cancelled")),
+            Ok(RecordingSignal::Stop) => break (Ok(()), None),
+            Ok(RecordingSignal::Cancel) => {
+                break (Err(anyhow::anyhow!("recording cancelled")), None)
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break (Ok(()), None),
         }
     };
 
     stop();
     if let Ok(message) = error_rx.try_recv() {
-        anyhow::bail!("microphone stream failed: {}", message);
+        return (
+            Err(anyhow::anyhow!("microphone stream failed: {}", message)),
+            result.1,
+        );
     }
     result
 }
@@ -825,17 +842,15 @@ impl Coordinator {
             );
             {
                 let mut timing = timing.lock().unwrap();
-                if let Ok(recording) = &recording {
-                    if let Some(stop_at) = recording.automatic_stop_at {
-                        timing.mark_stop_received_at(stop_at);
-                    }
+                if let Some(stop_at) = recording.automatic_stop_at {
+                    timing.mark_stop_received_at(stop_at);
                 }
                 timing.mark_stop_received();
                 let duration = timing.elapsed_since_stop();
                 timing.set_phase(Phase::AudioFinalization, duration);
             }
-            let samples = match recording {
-                Ok(recording) => recording.samples,
+            let samples = match recording.result {
+                Ok(samples) => samples,
                 Err(error) => {
                     tracing::error!("recording failed: {}", error);
                     coordinator.settle_error(
@@ -1198,7 +1213,7 @@ mod tests {
         );
 
         assert_eq!(
-            result.unwrap_err().to_string(),
+            result.0.unwrap_err().to_string(),
             "microphone stream failed: device disconnected"
         );
     }
@@ -1222,10 +1237,10 @@ mod tests {
         let automatic_stop_at =
             wait_for_recording_end(&signal_rx, &error_rx, Instant::now(), &clock, || {
                 *clock.0.lock().unwrap() += Duration::from_millis(7)
-            })
-            .unwrap();
+            });
 
-        assert_eq!(automatic_stop_at, Some(Duration::from_millis(5)));
+        assert!(automatic_stop_at.0.is_ok());
+        assert_eq!(automatic_stop_at.1, Some(Duration::from_millis(5)));
         assert_eq!(clock.now(), Duration::from_millis(12));
     }
 

@@ -129,7 +129,10 @@ impl LatencyOperation {
     }
 
     pub fn mark_stop_received_at(&mut self, received: Duration) {
-        self.stop_received.get_or_insert(received);
+        self.stop_received = Some(
+            self.stop_received
+                .map_or(received, |current| current.min(received)),
+        );
     }
 
     pub fn phase_started(&self) -> Duration {

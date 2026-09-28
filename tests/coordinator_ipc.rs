@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use tonguetyped::config::Config;
 use tonguetyped::coordinator::{
-    Coordinator, CoordinatorRuntime, RecordedAudio, RecordingSignal, TranscriptionAttempt,
+    Coordinator, CoordinatorRuntime, RecordingAttempt, RecordingSignal, TranscriptionAttempt,
     TranscriptionTimings,
 };
 use tonguetyped::daemon::dispatch;
@@ -24,6 +24,10 @@ struct TestRuntime {
     transcription_error: AtomicBool,
     output_error: AtomicBool,
     recording_finalization_ms: AtomicUsize,
+    block_recording_finalization: AtomicBool,
+    recording_finalization_started: AtomicBool,
+    recording_finalization_gate: (Mutex<bool>, Condvar),
+    fail_recording_after_finalization: AtomicBool,
     transcription_gate: (Mutex<bool>, Condvar),
     startup_gate: (Mutex<bool>, Condvar),
     microphone_error_gate: (Mutex<bool>, Condvar),
@@ -52,6 +56,11 @@ impl TestRuntime {
     fn release_microphone_error(&self) {
         *self.microphone_error_gate.0.lock().unwrap() = true;
         self.microphone_error_gate.1.notify_all();
+    }
+
+    fn release_recording_finalization(&self) {
+        *self.recording_finalization_gate.0.lock().unwrap() = true;
+        self.recording_finalization_gate.1.notify_all();
     }
 
     fn release_idle_policy(&self) {
@@ -106,6 +115,22 @@ impl LatencySink for RecordingLatencySink {
     }
 }
 
+#[derive(Default)]
+struct TestClock(AtomicU64);
+
+impl TestClock {
+    fn advance(&self, duration: Duration) {
+        self.0
+            .fetch_add(duration.as_millis().try_into().unwrap(), Ordering::SeqCst);
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> Duration {
+        Duration::from_millis(self.0.load(Ordering::SeqCst))
+    }
+}
+
 impl Feedback for RecordingFeedback {
     fn send(&self, event: FeedbackEvent, _config: &Config) {
         self.events.lock().unwrap().push(event);
@@ -120,7 +145,7 @@ impl CoordinatorRuntime for TestRuntime {
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
         clock: Arc<dyn Clock>,
-    ) -> anyhow::Result<RecordedAudio> {
+    ) -> RecordingAttempt {
         self.recordings.fetch_add(1, Ordering::SeqCst);
         self.startup_started.store(true, Ordering::SeqCst);
         if self.block_startup.load(Ordering::SeqCst) {
@@ -135,25 +160,49 @@ impl CoordinatorRuntime for TestRuntime {
             while !*failed {
                 failed = self.microphone_error_gate.1.wait(failed).unwrap();
             }
-            anyhow::bail!("simulated microphone disconnect");
+            return RecordingAttempt {
+                result: Err(anyhow::anyhow!("simulated microphone disconnect")),
+                automatic_stop_at: None,
+            };
         }
-        let (samples, automatic_stop_at) = match signal_rx.recv_timeout(max_duration) {
-            Ok(RecordingSignal::Stop) => (vec![0.1; 512], None),
-            Ok(RecordingSignal::Cancel) => anyhow::bail!("cancelled"),
+        let automatic_stop_at = match signal_rx.recv_timeout(max_duration) {
+            Ok(RecordingSignal::Stop) => None,
+            Ok(RecordingSignal::Cancel) => {
+                return RecordingAttempt {
+                    result: Err(anyhow::anyhow!("cancelled")),
+                    automatic_stop_at: None,
+                };
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.timed_out.store(true, Ordering::SeqCst);
                 let automatic_stop_at = clock.now();
+                self.recording_finalization_started
+                    .store(true, Ordering::SeqCst);
+                if self.block_recording_finalization.load(Ordering::SeqCst) {
+                    let mut released = self.recording_finalization_gate.0.lock().unwrap();
+                    while !*released {
+                        released = self.recording_finalization_gate.1.wait(released).unwrap();
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(
                     self.recording_finalization_ms.load(Ordering::SeqCst) as u64,
                 ));
-                (vec![0.1; 512], Some(automatic_stop_at))
+                Some(automatic_stop_at)
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => (Vec::new(), None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => None,
         };
-        Ok(RecordedAudio {
-            samples,
+        let result = if self
+            .fail_recording_after_finalization
+            .load(Ordering::SeqCst)
+        {
+            Err(anyhow::anyhow!("simulated finalization failure"))
+        } else {
+            Ok(vec![0.1; 512])
+        };
+        RecordingAttempt {
+            result,
             automatic_stop_at,
-        })
+        }
     }
 
     fn transcribe(&self, _samples: &[f32], _config: &Config) -> TranscriptionAttempt {
@@ -444,6 +493,89 @@ async fn automatic_stop_includes_audio_finalization_in_latency() {
     assert_eq!(records.len(), 1);
     assert!(records[0].audio_finalization_ms >= 20.0);
     assert!(records[0].total_stop_to_idle_ms >= records[0].audio_finalization_ms);
+}
+
+#[tokio::test]
+async fn automatic_stop_boundary_wins_race_with_late_stop() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime
+        .block_recording_finalization
+        .store(true, Ordering::SeqCst);
+    let clock = Arc::new(TestClock::default());
+    let latency = Arc::new(RecordingLatencySink::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.transcription.max_recording_seconds = 0;
+    let coordinator = Arc::new(
+        Coordinator::with_runtime_feedback_and_latency(
+            config,
+            runtime.clone(),
+            Arc::new(tonguetyped::feedback::NoFeedback),
+            clock.clone(),
+            latency.clone(),
+        )
+        .unwrap(),
+    );
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    wait_for_flag(&runtime.recording_finalization_started).await;
+    clock.advance(Duration::from_millis(10));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    clock.advance(Duration::from_millis(20));
+    runtime.release_recording_finalization();
+    wait_for_state(&coordinator, "idle").await;
+
+    let records = latency.records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].audio_finalization_ms, 30.0);
+    assert_eq!(records[0].total_stop_to_idle_ms, 30.0);
+}
+
+#[tokio::test]
+async fn automatic_stop_error_preserves_finalization_latency() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime
+        .block_recording_finalization
+        .store(true, Ordering::SeqCst);
+    runtime
+        .fail_recording_after_finalization
+        .store(true, Ordering::SeqCst);
+    let clock = Arc::new(TestClock::default());
+    let latency = Arc::new(RecordingLatencySink::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.transcription.max_recording_seconds = 0;
+    let coordinator = Arc::new(
+        Coordinator::with_runtime_feedback_and_latency(
+            config,
+            runtime.clone(),
+            Arc::new(tonguetyped::feedback::NoFeedback),
+            clock.clone(),
+            latency.clone(),
+        )
+        .unwrap(),
+    );
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    wait_for_flag(&runtime.recording_finalization_started).await;
+    clock.advance(Duration::from_millis(25));
+    runtime.release_recording_finalization();
+    wait_for_state(&coordinator, "idle").await;
+
+    let records = latency.records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, "recording_error");
+    assert_eq!(records[0].audio_finalization_ms, 25.0);
+    assert_eq!(records[0].total_stop_to_idle_ms, 25.0);
 }
 
 #[tokio::test]
