@@ -169,18 +169,21 @@ When history is enabled, TongueTyped stores transcript text in
 
 ## Transcription benchmark
 
-Measure model loading and inference separately with a 16 kHz mono WAV file:
+Measure cold model loading and repeated warm inference with a 16 kHz mono WAV
+file:
 
 ```sh
 cargo run --release --example transcribe_benchmark -- \
   "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
-  recording.wav
+  recording.wav --runs 5
 ```
 
-The benchmark uses fixed English. Its output includes audio duration, model-load
-time, transcription time, real-time factor, and transcript text. Compare builds
-with the same model, WAV, release profile, and otherwise idle machine. CPU model,
-core count, temperature, power policy, and competing load affect absolute timing.
+Pass `--vad-model PATH` to include production VAD before each inference run. The
+benchmark writes one JSON record containing raw runs, median, p95, model and
+audio SHA-256 hashes, host CPU, thread count, backend, device, and a competing
+load warning. It does not print transcript text. Compare builds with the same
+model, WAV, release profile, and otherwise idle machine. Do not use a result as
+a release threshold when `competing_load_warning` is non-null.
 
 A recovery run on an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used
 the `small-q5_1` model. Its 8.597-second synthetic speech WAV was generated with

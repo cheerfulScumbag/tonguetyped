@@ -9,6 +9,7 @@ pub mod feedback;
 pub mod history;
 pub mod inference;
 pub mod ipc;
+pub mod latency;
 pub mod model;
 pub mod output;
 pub mod setup;

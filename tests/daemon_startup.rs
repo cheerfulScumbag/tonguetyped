@@ -182,6 +182,9 @@ fn doctor_distinguishes_invalid_model_from_missing_model() {
     assert!(output.status.success());
     assert!(stdout.contains("model:          invalid"));
     assert!(stdout.contains("model error:"));
+    assert!(stdout.contains("model id:       whisper-small-q5_1"));
+    assert!(stdout.contains("backend:        whisper.cpp/cpu"));
+    assert!(stdout.contains("device:         CPU"));
 
     std::fs::remove_dir_all(root).unwrap();
 }

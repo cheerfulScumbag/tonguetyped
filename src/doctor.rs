@@ -9,6 +9,9 @@ pub struct DoctorReport {
     pub model_ready: bool,
     pub model_error: Option<String>,
     pub model_path: String,
+    pub model_id: String,
+    pub inference_backend: String,
+    pub inference_device: String,
     pub helpers_found: Vec<String>,
     pub output_method_available: bool,
     pub shortcut_status: Option<crate::ipc::ShortcutStatus>,
@@ -50,6 +53,8 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         .map(|(status, error)| (Some(status), error))
         .unwrap_or((None, None));
 
+    let backend = crate::inference::backend_info();
+
     Ok(DoctorReport {
         compositor,
         audio_available,
@@ -57,6 +62,9 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         model_ready,
         model_error,
         model_path: model_path.to_string_lossy().to_string(),
+        model_id: config.model.selected.clone(),
+        inference_backend: backend.backend,
+        inference_device: backend.device,
         helpers_found,
         output_method_available,
         shortcut_status,

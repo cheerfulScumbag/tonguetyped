@@ -52,6 +52,24 @@ impl VadDetector {
     }
 }
 
+pub fn filter_audio(samples: &[f32], model_path: &std::path::Path) -> anyhow::Result<Vec<f32>> {
+    let mut detector = VadDetector::new(model_path.to_string_lossy().as_ref(), 16_000)?;
+    detector.reset();
+    let mut speech = Vec::new();
+    for chunk in samples.chunks(512) {
+        let mut padded = [0.0; 512];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        if let Some(segment) = detector.process_window(&padded, chunk.len())? {
+            speech.extend(segment);
+        }
+    }
+    if let Some(segment) = detector.finish() {
+        speech.extend(segment);
+    }
+    detector.reset();
+    Ok(speech)
+}
+
 impl SpeechGate {
     fn new(sample_rate: usize) -> Self {
         Self {

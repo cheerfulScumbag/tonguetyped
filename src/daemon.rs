@@ -30,6 +30,14 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     let _lock = acquire_instance_lock(&sock_path)?;
     prepare_dependencies(&config).await?;
 
+    let backend = crate::inference::backend_info();
+    tracing::info!(
+        model_id = %config.model.selected,
+        inference_backend = %backend.backend,
+        inference_device = %backend.device,
+        "inference configuration"
+    );
+
     let coordinator = Arc::new(Coordinator::new(config)?);
     let listener = UnixListener::bind(&sock_path)?;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

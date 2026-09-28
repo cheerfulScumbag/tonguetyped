@@ -1,5 +1,8 @@
 use crate::config::Config;
 use crate::feedback::{DesktopFeedback, Feedback, FeedbackEvent, NoFeedback};
+use crate::latency::{
+    Clock, LatencyOperation, LatencySink, MonotonicClock, Phase, TracingLatencySink,
+};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,7 +37,7 @@ pub trait CoordinatorRuntime: Send + Sync {
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) -> anyhow::Result<Vec<f32>>;
-    fn transcribe(&self, samples: &[f32], config: &Config) -> anyhow::Result<String>;
+    fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt;
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
         Ok(())
@@ -46,6 +49,19 @@ pub trait CoordinatorRuntime: Send + Sync {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+pub struct TranscriptionTimings {
+    pub vad: Duration,
+    pub model_load: Duration,
+    pub inference: Duration,
+    pub cold_model_load: bool,
+}
+
+pub struct TranscriptionAttempt {
+    pub result: anyhow::Result<String>,
+    pub timings: TranscriptionTimings,
 }
 
 struct ProductionRuntime {
@@ -187,6 +203,12 @@ impl<E> Default for EngineLifecycle<E> {
 }
 
 impl<E> EngineLifecycle<E> {
+    fn has_model(&self, model: &str) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|(loaded_model, _)| loaded_model == model)
+    }
+
     fn ensure(
         &mut self,
         model: &str,
@@ -289,24 +311,60 @@ impl CoordinatorRuntime for ProductionRuntime {
         recorder.take_buffer()
     }
 
-    fn transcribe(&self, samples: &[f32], config: &Config) -> anyhow::Result<String> {
+    fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt {
+        let mut timings = TranscriptionTimings::default();
         let samples = if config.transcription.vad_enabled {
-            apply_vad(samples)?
+            let vad_started = Instant::now();
+            match crate::inference::InferenceEngine::models_dir().and_then(|directory| {
+                crate::vad::filter_audio(samples, &directory.join("silero_vad_v4.onnx"))
+            }) {
+                Ok(samples) => {
+                    timings.vad = vad_started.elapsed();
+                    samples
+                }
+                Err(error) => {
+                    timings.vad = vad_started.elapsed();
+                    return TranscriptionAttempt {
+                        result: Err(error),
+                        timings,
+                    };
+                }
+            }
         } else {
             samples.to_vec()
         };
         if samples.is_empty() {
-            return Ok(String::new());
+            return TranscriptionAttempt {
+                result: Ok(String::new()),
+                timings,
+            };
         }
         let mut lifecycle = self.inference.lock().unwrap();
-        let engine = lifecycle.ensure(&config.model.selected, || {
+        timings.cold_model_load = !lifecycle.has_model(&config.model.selected);
+        let load_started = Instant::now();
+        let engine = match lifecycle.ensure(&config.model.selected, || {
             let mut engine = crate::inference::InferenceEngine::new(
                 crate::model::ModelCatalog::model_path(&config.model.selected)?,
             );
             engine.load()?;
             Ok(engine)
-        })?;
-        engine.transcribe(&samples, &config.transcription.language)
+        }) {
+            Ok(engine) => engine,
+            Err(error) => {
+                timings.model_load = load_started.elapsed();
+                return TranscriptionAttempt {
+                    result: Err(error),
+                    timings,
+                };
+            }
+        };
+        if timings.cold_model_load {
+            timings.model_load = load_started.elapsed();
+        }
+        let inference_started = Instant::now();
+        let result = engine.transcribe(&samples, &config.transcription.language);
+        timings.inference = inference_started.elapsed();
+        TranscriptionAttempt { result, timings }
     }
 
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<()> {
@@ -361,30 +419,11 @@ fn wait_for_recording_end(
     result
 }
 
-fn apply_vad(samples: &[f32]) -> anyhow::Result<Vec<f32>> {
-    let model_path = crate::inference::InferenceEngine::models_dir()?.join("silero_vad_v4.onnx");
-    let mut detector = crate::vad::VadDetector::new(model_path.to_string_lossy().as_ref(), 16_000)?;
-    detector.reset();
-    let mut speech = Vec::new();
-    for chunk in samples.chunks(512) {
-        let mut padded = [0.0; 512];
-        padded[..chunk.len()].copy_from_slice(chunk);
-        if let Some(segment) = detector.process_window(&padded, chunk.len())? {
-            speech.extend(segment);
-        }
-    }
-    if let Some(segment) = detector.finish() {
-        speech.extend(segment);
-    }
-    detector.reset();
-    Ok(speech)
-}
-
 struct CoordinatorStateInner {
     state: State,
     config: Config,
     last_action: Option<Instant>,
-    pending_release: Option<(u64, Instant)>,
+    pending_release: Option<(u64, Instant, Duration)>,
     generation: u64,
     signal_tx: Option<mpsc::Sender<RecordingSignal>>,
     physical_press: Option<PhysicalPress>,
@@ -392,6 +431,7 @@ struct CoordinatorStateInner {
     runtime_error: Option<String>,
     shortcut_status: crate::ipc::ShortcutStatus,
     worker_active: bool,
+    active_timing: Option<Arc<Mutex<LatencyOperation>>>,
 }
 
 #[derive(Clone)]
@@ -407,6 +447,8 @@ pub struct Coordinator {
     last_result: Arc<Mutex<Option<(String, u64)>>>,
     runtime: Arc<dyn CoordinatorRuntime>,
     feedback: Arc<dyn Feedback>,
+    clock: Arc<dyn Clock>,
+    latency_sink: Arc<dyn LatencySink>,
 }
 
 impl Coordinator {
@@ -430,6 +472,22 @@ impl Coordinator {
         runtime: Arc<dyn CoordinatorRuntime>,
         feedback: Arc<dyn Feedback>,
     ) -> anyhow::Result<Self> {
+        Self::with_runtime_feedback_and_latency(
+            config,
+            runtime,
+            feedback,
+            Arc::new(MonotonicClock::new()),
+            Arc::new(TracingLatencySink),
+        )
+    }
+
+    pub fn with_runtime_feedback_and_latency(
+        config: Config,
+        runtime: Arc<dyn CoordinatorRuntime>,
+        feedback: Arc<dyn Feedback>,
+        clock: Arc<dyn Clock>,
+        latency_sink: Arc<dyn LatencySink>,
+    ) -> anyhow::Result<Self> {
         let last_result = if config.history.enabled {
             crate::history::HistoryStore::new(&crate::history::history_db_path()?)?
                 .get_last_result()?
@@ -449,11 +507,14 @@ impl Coordinator {
                 runtime_error: None,
                 shortcut_status: crate::ipc::ShortcutStatus::Initializing,
                 worker_active: false,
+                active_timing: None,
             })),
             output_lock: Arc::new(Mutex::new(())),
             last_result: Arc::new(Mutex::new(last_result)),
             runtime,
             feedback,
+            clock,
+            latency_sink,
         })
     }
 
@@ -500,7 +561,12 @@ impl Coordinator {
                         if detach_physical_press {
                             detach_physical_press_for_ipc(&mut inner);
                         }
-                        start = Some(reserve_recording(self.runtime.as_ref(), &mut inner, now)?);
+                        start = Some(reserve_recording(
+                            self.runtime.as_ref(),
+                            &mut inner,
+                            now,
+                            Arc::clone(&self.clock),
+                        )?);
                         CoordinatorResponse::RecordingStarted
                     }
                     State::Recording => CoordinatorResponse::Ignored("already recording".into()),
@@ -512,7 +578,12 @@ impl Coordinator {
                         if detach_physical_press {
                             detach_physical_press_for_ipc(&mut inner);
                         }
-                        start = Some(reserve_recording(self.runtime.as_ref(), &mut inner, now)?);
+                        start = Some(reserve_recording(
+                            self.runtime.as_ref(),
+                            &mut inner,
+                            now,
+                            Arc::clone(&self.clock),
+                        )?);
                         CoordinatorResponse::RecordingStarted
                     }
                     State::Recording => stop_recording(self.feedback.as_ref(), &mut inner, now),
@@ -522,7 +593,13 @@ impl Coordinator {
                     if !debounce_elapsed(&inner, now) {
                         CoordinatorResponse::Ignored("debounce".into())
                     } else {
-                        hold_press(self.runtime.as_ref(), &mut inner, now, &mut start)?
+                        hold_press(
+                            self.runtime.as_ref(),
+                            &mut inner,
+                            now,
+                            &mut start,
+                            Arc::clone(&self.clock),
+                        )?
                     }
                 }
                 CoordinatorCommand::HoldRelease => match inner.state {
@@ -538,8 +615,8 @@ impl Coordinator {
             }
         };
 
-        if let Some((generation, signal_rx, config)) = start {
-            let started = self.spawn_worker(generation, signal_rx, config);
+        if let Some((generation, signal_rx, config, timing)) = start {
+            let started = self.spawn_worker(generation, signal_rx, config, timing);
             match started.await {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => return Err(anyhow::anyhow!(message)),
@@ -580,13 +657,18 @@ impl Coordinator {
         let (mode, release, new_press) = {
             let mut inner = self.state.lock().unwrap();
             if pressed {
-                if let Some((generation, released_at)) = inner.pending_release {
+                if let Some((generation, released_at, timing_at)) = inner.pending_release {
                     if Instant::now().duration_since(released_at) < Duration::from_millis(50) {
                         inner.pending_release = None;
                         return Ok(CoordinatorResponse::Ignored("auto-repeat defense".into()));
                     }
                     inner.pending_release = None;
-                    complete_activation_release(self.feedback.as_ref(), &mut inner, generation);
+                    complete_activation_release(
+                        self.feedback.as_ref(),
+                        &mut inner,
+                        generation,
+                        timing_at,
+                    );
                 }
                 if matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
                     return Ok(CoordinatorResponse::Ignored(
@@ -606,16 +688,17 @@ impl Coordinator {
                     return Ok(CoordinatorResponse::Ok);
                 };
                 let released_at = Instant::now();
+                let timing_at = self.clock.now();
                 let generation = inner.generation;
-                inner.pending_release = Some((generation, released_at));
+                inner.pending_release = Some((generation, released_at, timing_at));
                 let mode = match physical_press {
                     PhysicalPress::Active(mode) => mode,
                     PhysicalPress::Detached => {
-                        self.schedule_activation_release(generation, released_at);
+                        self.schedule_activation_release(generation, released_at, timing_at);
                         return Ok(CoordinatorResponse::Ok);
                     }
                 };
-                (mode, Some((generation, released_at)), false)
+                (mode, Some((generation, released_at, timing_at)), false)
             }
         };
         let response = match (&mode, pressed) {
@@ -633,8 +716,8 @@ impl Coordinator {
             }
             (crate::config::ActivationMode::Toggle, false) => Ok(CoordinatorResponse::Ok),
         }?;
-        if let Some((generation, released_at)) = release {
-            self.schedule_activation_release(generation, released_at);
+        if let Some((generation, released_at, timing_at)) = release {
+            self.schedule_activation_release(generation, released_at, timing_at);
         }
         if new_press
             && matches!(mode, crate::config::ActivationMode::Hold)
@@ -657,6 +740,9 @@ impl Coordinator {
         match inner.state {
             State::Idle => CoordinatorResponse::Ignored("idle".into()),
             State::Recording | State::Processing => {
+                if let Some(timing) = &inner.active_timing {
+                    timing.lock().unwrap().mark_stop_received();
+                }
                 inner.generation += 1;
                 if let Some(sender) = inner.signal_tx.take() {
                     let _ = sender.send(RecordingSignal::Cancel);
@@ -667,20 +753,35 @@ impl Coordinator {
                 }
                 inner.last_action = Some(Instant::now());
                 self.feedback.send(FeedbackEvent::Cancelled, &inner.config);
+                let timing = inner.active_timing.take();
+                drop(inner);
+                if let Some(timing) = timing {
+                    self.emit_timing(&timing, "cancelled");
+                }
                 CoordinatorResponse::Cancelled
             }
         }
     }
 
-    fn schedule_activation_release(&self, generation: u64, released_at: Instant) {
+    fn schedule_activation_release(
+        &self,
+        generation: u64,
+        released_at: Instant,
+        timing_at: Duration,
+    ) {
         let coordinator = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let mut inner = coordinator.state.lock().unwrap();
-            if matches!(inner.pending_release, Some((token, pending_at)) if token == generation && pending_at == released_at)
+            if matches!(inner.pending_release, Some((token, pending_at, _)) if token == generation && pending_at == released_at)
             {
                 inner.pending_release = None;
-                complete_activation_release(coordinator.feedback.as_ref(), &mut inner, generation);
+                complete_activation_release(
+                    coordinator.feedback.as_ref(),
+                    &mut inner,
+                    generation,
+                    timing_at,
+                );
             }
         });
     }
@@ -690,6 +791,7 @@ impl Coordinator {
         generation: u64,
         signal_rx: mpsc::Receiver<RecordingSignal>,
         config: Config,
+        timing: Arc<Mutex<LatencyOperation>>,
     ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let coordinator = self.clone();
@@ -700,16 +802,28 @@ impl Coordinator {
                 transcription_attempted: false,
             };
             let duration = Duration::from_secs(config.transcription.max_recording_seconds);
-            let samples = match coordinator.runtime.record(
+            let recording = coordinator.runtime.record(
                 &config.audio.microphone,
                 duration,
                 signal_rx,
                 started_tx,
-            ) {
+            );
+            {
+                let mut timing = timing.lock().unwrap();
+                timing.mark_stop_received();
+                let duration = timing.elapsed_since_stop();
+                timing.set_phase(Phase::AudioFinalization, duration);
+            }
+            let samples = match recording {
                 Ok(samples) => samples,
                 Err(error) => {
                     tracing::error!("recording failed: {}", error);
-                    coordinator.settle_error(generation, error.to_string());
+                    coordinator.settle_error(
+                        generation,
+                        error.to_string(),
+                        &timing,
+                        "recording_error",
+                    );
                     return;
                 }
             };
@@ -729,17 +843,30 @@ impl Coordinator {
             }
 
             completion.transcription_attempted = true;
-            let transcript = match coordinator.runtime.transcribe(&samples, &config) {
+            let attempt = coordinator.runtime.transcribe(&samples, &config);
+            {
+                let mut timing = timing.lock().unwrap();
+                timing.set_phase(Phase::Vad, attempt.timings.vad);
+                timing.set_phase(Phase::ModelLoad, attempt.timings.model_load);
+                timing.set_phase(Phase::Inference, attempt.timings.inference);
+                timing.set_cold_model_load(attempt.timings.cold_model_load);
+            }
+            let transcript = match attempt.result {
                 Ok(text) => text,
                 Err(error) => {
                     tracing::error!("transcription failed: {}", error);
-                    coordinator.settle_error(generation, format!("transcription failed: {error}"));
+                    coordinator.settle_error(
+                        generation,
+                        format!("transcription failed: {error}"),
+                        &timing,
+                        "transcription_error",
+                    );
                     return;
                 }
             };
             let trimmed = transcript.trim().to_string();
             if trimmed.is_empty() {
-                coordinator.settle(generation);
+                coordinator.settle(generation, &timing, "empty");
                 return;
             }
             let _output_guard = coordinator.output_lock.lock().unwrap();
@@ -752,6 +879,7 @@ impl Coordinator {
                 .unwrap_or_default()
                 .as_secs();
             *coordinator.last_result.lock().unwrap() = Some((trimmed.clone(), timestamp));
+            let output_started = timing.lock().unwrap().phase_started();
             let output_error = if config.transcription.trailing_space {
                 coordinator
                     .runtime
@@ -761,10 +889,16 @@ impl Coordinator {
             }
             .err()
             .map(|error| format!("output failed: {error}"));
+            timing
+                .lock()
+                .unwrap()
+                .finish_phase(Phase::Output, output_started);
             if let Some(error) = &output_error {
                 tracing::error!("{error}");
             }
+            let mut history_failed = false;
             if config.history.enabled {
+                let history_started = timing.lock().unwrap().phase_started();
                 match crate::history::history_db_path()
                     .and_then(|path| crate::history::HistoryStore::new(&path))
                 {
@@ -774,36 +908,64 @@ impl Coordinator {
                             .and_then(|_| store.prune(config.history.max_entries))
                         {
                             tracing::error!("history update failed: {}", error);
+                            history_failed = true;
                         }
                     }
-                    Err(error) => tracing::error!("history unavailable: {}", error),
+                    Err(error) => {
+                        tracing::error!("history unavailable: {}", error);
+                        history_failed = true;
+                    }
                 }
+                timing
+                    .lock()
+                    .unwrap()
+                    .finish_phase(Phase::History, history_started);
             }
             if let Some(error) = output_error {
-                coordinator.settle_error(generation, error);
+                coordinator.settle_error(generation, error, &timing, "output_error");
+            } else if history_failed {
+                coordinator.settle(generation, &timing, "history_error");
             } else {
-                coordinator.settle(generation);
+                coordinator.settle(generation, &timing, "success");
             }
         });
         started_rx
     }
 
-    fn settle(&self, generation: u64) {
+    fn settle(&self, generation: u64, timing: &Arc<Mutex<LatencyOperation>>, outcome: &str) {
         let mut inner = self.state.lock().unwrap();
         if inner.generation == generation {
             inner.state = State::Idle;
             inner.signal_tx = None;
+            inner.active_timing = None;
             self.feedback.send(FeedbackEvent::Success, &inner.config);
+            drop(inner);
+            self.emit_timing(timing, outcome);
         }
     }
 
-    fn settle_error(&self, generation: u64, error: String) {
+    fn settle_error(
+        &self,
+        generation: u64,
+        error: String,
+        timing: &Arc<Mutex<LatencyOperation>>,
+        outcome: &str,
+    ) {
         let mut inner = self.state.lock().unwrap();
         if inner.generation == generation {
             inner.state = State::Idle;
             inner.signal_tx = None;
+            inner.active_timing = None;
             inner.last_error = Some(error);
             self.feedback.send(FeedbackEvent::Error, &inner.config);
+            drop(inner);
+            self.emit_timing(timing, outcome);
+        }
+    }
+
+    fn emit_timing(&self, timing: &Arc<Mutex<LatencyOperation>>, outcome: &str) {
+        if let Some(record) = timing.lock().unwrap().finish(outcome) {
+            self.latency_sink.emit(record);
         }
     }
 
@@ -857,12 +1019,18 @@ impl Drop for WorkerCompletion {
     }
 }
 
-type ReservedRecording = (u64, mpsc::Receiver<RecordingSignal>, Config);
+type ReservedRecording = (
+    u64,
+    mpsc::Receiver<RecordingSignal>,
+    Config,
+    Arc<Mutex<LatencyOperation>>,
+);
 
 fn reserve_recording(
     runtime: &dyn CoordinatorRuntime,
     inner: &mut CoordinatorStateInner,
     now: Instant,
+    clock: Arc<dyn Clock>,
 ) -> anyhow::Result<ReservedRecording> {
     runtime.suspend_idle_unload()?;
     let (signal_tx, signal_rx) = mpsc::channel();
@@ -872,7 +1040,12 @@ fn reserve_recording(
     inner.signal_tx = Some(signal_tx);
     inner.last_error = None;
     inner.worker_active = true;
-    Ok((inner.generation, signal_rx, inner.config.clone()))
+    let timing = Arc::new(Mutex::new(LatencyOperation::new(
+        inner.config.model.selected.clone(),
+        clock,
+    )));
+    inner.active_timing = Some(Arc::clone(&timing));
+    Ok((inner.generation, signal_rx, inner.config.clone(), timing))
 }
 
 fn detach_physical_press_for_ipc(inner: &mut CoordinatorStateInner) {
@@ -886,10 +1059,11 @@ fn hold_press(
     inner: &mut CoordinatorStateInner,
     now: Instant,
     start: &mut Option<ReservedRecording>,
+    clock: Arc<dyn Clock>,
 ) -> anyhow::Result<CoordinatorResponse> {
     match inner.state {
         State::Idle => {
-            *start = Some(reserve_recording(runtime, inner, now)?);
+            *start = Some(reserve_recording(runtime, inner, now, clock)?);
             Ok(CoordinatorResponse::RecordingStarted)
         }
         State::Recording => Ok(CoordinatorResponse::Ignored("already recording".into())),
@@ -904,6 +1078,9 @@ fn stop_recording(
 ) -> CoordinatorResponse {
     match inner.state {
         State::Recording => {
+            if let Some(timing) = &inner.active_timing {
+                timing.lock().unwrap().mark_stop_received();
+            }
             if let Some(sender) = inner.signal_tx.take() {
                 let _ = sender.send(RecordingSignal::Stop);
             }
@@ -921,6 +1098,7 @@ fn complete_activation_release(
     feedback: &dyn Feedback,
     inner: &mut CoordinatorStateInner,
     generation: u64,
+    timing_at: Duration,
 ) {
     if matches!(inner.physical_press, Some(PhysicalPress::Detached)) {
         inner.physical_press = None;
@@ -934,6 +1112,9 @@ fn complete_activation_release(
             if inner.state == State::Recording =>
         {
             inner.physical_press = None;
+            if let Some(timing) = &inner.active_timing {
+                timing.lock().unwrap().mark_stop_received_at(timing_at);
+            }
             stop_recording(feedback, inner, Instant::now());
         }
         _ => inner.physical_press = None,

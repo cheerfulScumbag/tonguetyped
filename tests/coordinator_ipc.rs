@@ -2,10 +2,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use tonguetyped::config::Config;
-use tonguetyped::coordinator::{Coordinator, CoordinatorRuntime, RecordingSignal};
+use tonguetyped::coordinator::{
+    Coordinator, CoordinatorRuntime, RecordingSignal, TranscriptionAttempt, TranscriptionTimings,
+};
 use tonguetyped::daemon::dispatch;
 use tonguetyped::feedback::{Feedback, FeedbackEvent};
 use tonguetyped::ipc::{Request, Response};
+use tonguetyped::latency::{LatencyRecord, LatencySink, MonotonicClock};
 
 #[derive(Default)]
 struct TestRuntime {
@@ -90,6 +93,17 @@ struct RecordingFeedback {
     events: Mutex<Vec<FeedbackEvent>>,
 }
 
+#[derive(Default)]
+struct RecordingLatencySink {
+    records: Mutex<Vec<LatencyRecord>>,
+}
+
+impl LatencySink for RecordingLatencySink {
+    fn emit(&self, record: LatencyRecord) {
+        self.records.lock().unwrap().push(record);
+    }
+}
+
 impl Feedback for RecordingFeedback {
     fn send(&self, event: FeedbackEvent, _config: &Config) {
         self.events.lock().unwrap().push(event);
@@ -131,7 +145,7 @@ impl CoordinatorRuntime for TestRuntime {
         }
     }
 
-    fn transcribe(&self, _samples: &[f32], _config: &Config) -> anyhow::Result<String> {
+    fn transcribe(&self, _samples: &[f32], _config: &Config) -> TranscriptionAttempt {
         let _inference = self.inference_lock.lock().unwrap();
         self.transcription_started.store(true, Ordering::SeqCst);
         if self.block_transcription.load(Ordering::SeqCst) {
@@ -140,12 +154,16 @@ impl CoordinatorRuntime for TestRuntime {
                 released = self.transcription_gate.1.wait(released).unwrap();
             }
         }
-        if self.empty_transcript.load(Ordering::SeqCst) {
+        let result = if self.empty_transcript.load(Ordering::SeqCst) {
             Ok("   ".to_string())
         } else if self.transcription_error.load(Ordering::SeqCst) {
-            anyhow::bail!("simulated transcription failure")
+            Err(anyhow::anyhow!("simulated transcription failure"))
         } else {
             Ok("test transcript".to_string())
+        };
+        TranscriptionAttempt {
+            result,
+            timings: TranscriptionTimings::default(),
         }
     }
 
@@ -318,6 +336,70 @@ fn coordinator_with_feedback(
     let mut config = Config::default();
     config.history.enabled = false;
     Arc::new(Coordinator::with_runtime_and_feedback(config, runtime, feedback).unwrap())
+}
+
+fn coordinator_with_latency(
+    runtime: Arc<TestRuntime>,
+    latency: Arc<RecordingLatencySink>,
+) -> Arc<Coordinator> {
+    let mut config = Config::default();
+    config.history.enabled = false;
+    Arc::new(
+        Coordinator::with_runtime_feedback_and_latency(
+            config,
+            runtime,
+            Arc::new(tonguetyped::feedback::NoFeedback),
+            Arc::new(MonotonicClock::new()),
+            latency,
+        )
+        .unwrap(),
+    )
+}
+
+async fn stop_and_wait(coordinator: &Arc<Coordinator>) {
+    dispatch(coordinator, Request::Start).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    dispatch(coordinator, Request::Stop).await;
+    wait_for_state(coordinator, "idle").await;
+}
+
+#[tokio::test]
+async fn latency_records_terminal_outcomes_once() {
+    for (outcome, configure) in [
+        ("success", None),
+        ("empty", Some("empty")),
+        ("transcription_error", Some("transcription_error")),
+        ("output_error", Some("output_error")),
+    ] {
+        let runtime = Arc::new(TestRuntime::default());
+        match configure {
+            Some("empty") => runtime.empty_transcript.store(true, Ordering::SeqCst),
+            Some("transcription_error") => {
+                runtime.transcription_error.store(true, Ordering::SeqCst)
+            }
+            Some("output_error") => runtime.output_error.store(true, Ordering::SeqCst),
+            _ => {}
+        }
+        let latency = Arc::new(RecordingLatencySink::default());
+        let coordinator = coordinator_with_latency(runtime, latency.clone());
+        stop_and_wait(&coordinator).await;
+
+        let records = latency.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, outcome);
+    }
+
+    let runtime = Arc::new(TestRuntime::default());
+    let latency = Arc::new(RecordingLatencySink::default());
+    let coordinator = coordinator_with_latency(runtime.clone(), latency.clone());
+    let owner_count = Arc::strong_count(&runtime);
+    dispatch(&coordinator, Request::Start).await;
+    dispatch(&coordinator, Request::Cancel).await;
+    wait_for_worker_completion(&runtime, owner_count).await;
+
+    let records = latency.records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, "cancelled");
 }
 
 #[tokio::test]
