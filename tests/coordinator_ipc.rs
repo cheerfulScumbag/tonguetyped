@@ -474,19 +474,19 @@ async fn automatic_stop_includes_audio_finalization_in_latency() {
     let coordinator = Arc::new(
         Coordinator::with_runtime_feedback_and_latency(
             config,
-            runtime,
+            runtime.clone(),
             Arc::new(tonguetyped::feedback::NoFeedback),
             Arc::new(MonotonicClock::new()),
             latency.clone(),
         )
         .unwrap(),
     );
-
+    let owner_count = Arc::strong_count(&runtime);
     assert!(matches!(
         dispatch(&coordinator, Request::Start).await,
         Response::RecordingStarted
     ));
-    wait_for_state(&coordinator, "idle").await;
+    wait_for_worker_completion(&runtime, owner_count).await;
 
     let records = latency.records.lock().unwrap();
     assert_eq!(records.len(), 1);
@@ -515,6 +515,7 @@ async fn automatic_stop_boundary_wins_race_with_late_stop() {
         )
         .unwrap(),
     );
+    let owner_count = Arc::strong_count(&runtime);
 
     assert!(matches!(
         dispatch(&coordinator, Request::Start).await,
@@ -528,7 +529,7 @@ async fn automatic_stop_boundary_wins_race_with_late_stop() {
     ));
     clock.advance(Duration::from_millis(20));
     runtime.release_recording_finalization();
-    wait_for_state(&coordinator, "idle").await;
+    wait_for_worker_completion(&runtime, owner_count).await;
 
     let records = latency.records.lock().unwrap();
     assert_eq!(records.len(), 1);
@@ -560,6 +561,7 @@ async fn automatic_stop_error_preserves_finalization_latency() {
         )
         .unwrap(),
     );
+    let owner_count = Arc::strong_count(&runtime);
 
     assert!(matches!(
         dispatch(&coordinator, Request::Start).await,
@@ -568,7 +570,7 @@ async fn automatic_stop_error_preserves_finalization_latency() {
     wait_for_flag(&runtime.recording_finalization_started).await;
     clock.advance(Duration::from_millis(25));
     runtime.release_recording_finalization();
-    wait_for_state(&coordinator, "idle").await;
+    wait_for_worker_completion(&runtime, owner_count).await;
 
     let records = latency.records.lock().unwrap();
     assert_eq!(records.len(), 1);
