@@ -24,12 +24,10 @@ fixture documented in `README.md` before collecting benchmark evidence.
 
 ## Implemented measurements
 
-Each stop operation now emits one structured `tonguetyped::latency` record with
-a shared operation ID. It contains the monotonic stop receipt, audio
-finalization, VAD, cold model load, inference, output, history, and total
-stop-to-idle durations. Terminal outcomes distinguish `success`, `empty`,
+The latency event and its timing boundaries are documented in `README.md` under
+"Latency diagnostics." Terminal outcomes distinguish `success`, `empty`,
 `cancelled`, `recording_error`, `transcription_error`, `output_error`, and
-`history_error`. No timing record contains transcript text or audio.
+`history_error`.
 
 Startup diagnostics and `tonguetyped doctor` report the selected model ID,
 actual inference backend, and device. This build reports `whisper.cpp/cpu` and

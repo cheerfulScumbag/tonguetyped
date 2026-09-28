@@ -167,6 +167,21 @@ When history is enabled, TongueTyped stores transcript text in
 `$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Disable
 `history.enabled` to keep only the current daemon's latest result in memory.
 
+## Latency diagnostics
+
+`tonguetyped doctor` reports the selected model ID and the detected inference
+backend and device. The daemon logs the same inference configuration at startup.
+
+After each dictation finishes or is cancelled, the daemon writes one structured
+`tonguetyped::latency` event at the `info` level. The event identifies the model,
+backend, device, outcome, and whether model loading was cold. It reports separate
+durations for audio finalization, VAD, model loading, inference, output, and
+history, plus the total time from the earliest stop boundary until the daemon is
+idle. For hold-mode activation, the total begins when the key is released, while
+audio finalization begins when TongueTyped sends the stop signal after its
+50-millisecond auto-repeat check. Disabled or unreached phases are zero. Latency
+events contain no transcript text or audio.
+
 ## Transcription benchmark
 
 Measure cold model loading and repeated warm inference with a 16 kHz mono WAV
