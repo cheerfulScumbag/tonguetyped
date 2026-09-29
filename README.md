@@ -272,9 +272,9 @@ daemon's startup log report whichever backend is actually active
 (`whisper.cpp/cpu`, `transcribe.cpp/vulkan`, or `transcribe.cpp/cuda`) and its
 device. The GPU model is not eagerly downloaded at daemon startup (that would
 block every launch on a large synchronous fetch); provision it manually to
-`$XDG_DATA_HOME/tonguetyped/models/whisper-small-Q5_K_M.gguf` to use the GPU
-path, or run the benchmark once with a GPU feature, which downloads it in the
-CPU-fallback-free flow used here.
+`$XDG_DATA_HOME/tonguetyped/models/whisper-small-Q5_K_M.gguf` before using the
+GPU path or running the benchmark with a GPU feature - neither downloads it
+for you, and a missing file silently falls back to the CPU path.
 
 ### Benchmark: Vulkan and CUDA vs. the CPU baseline
 
