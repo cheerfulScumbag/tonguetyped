@@ -64,6 +64,7 @@ pub struct TranscriptionTimings {
     pub model_load: Duration,
     pub inference: Duration,
     pub cold_model_load: bool,
+    pub backend: Option<crate::inference::BackendInfo>,
 }
 
 pub struct TranscriptionAttempt {
@@ -384,6 +385,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         if timings.cold_model_load {
             timings.model_load = load_started.elapsed();
         }
+        timings.backend = engine.active_backend_info();
         let inference_started = Instant::now();
         let result = engine.transcribe(&samples, &config.transcription.language);
         timings.inference = inference_started.elapsed();
@@ -895,6 +897,9 @@ impl Coordinator {
                 timing.set_phase(Phase::ModelLoad, attempt.timings.model_load);
                 timing.set_phase(Phase::Inference, attempt.timings.inference);
                 timing.set_cold_model_load(attempt.timings.cold_model_load);
+                if let Some(backend) = attempt.timings.backend {
+                    timing.set_backend_info(backend);
+                }
             }
             let transcript = match attempt.result {
                 Ok(text) => text,

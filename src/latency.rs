@@ -103,6 +103,7 @@ pub struct LatencyOperation {
     output: Duration,
     history: Duration,
     cold_model_load: bool,
+    backend: Option<crate::inference::BackendInfo>,
     terminal: bool,
 }
 
@@ -122,6 +123,7 @@ impl LatencyOperation {
             output: Duration::ZERO,
             history: Duration::ZERO,
             cold_model_load: false,
+            backend: None,
             terminal: false,
         }
     }
@@ -171,6 +173,10 @@ impl LatencyOperation {
         self.cold_model_load = cold;
     }
 
+    pub fn set_backend_info(&mut self, backend: crate::inference::BackendInfo) {
+        self.backend = Some(backend);
+    }
+
     pub fn elapsed_since_stop(&self) -> Duration {
         self.stop_received
             .map(|started| self.clock.now().saturating_sub(started))
@@ -191,7 +197,10 @@ impl LatencyOperation {
         self.terminal = true;
         let stop_received = self.stop_received.unwrap();
         let total = self.elapsed_since_stop();
-        let backend = crate::inference::cached_backend_info();
+        let backend = self
+            .backend
+            .clone()
+            .unwrap_or_else(crate::inference::cached_backend_info);
         Some(LatencyRecord {
             operation_id: self.operation_id.clone(),
             outcome: outcome.to_string(),

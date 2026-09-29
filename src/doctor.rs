@@ -33,17 +33,18 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         .map(|d| d.name)
         .collect();
     let model_path = crate::model::ModelCatalog::model_path(&config.model.selected)?;
-    let (model_ready, model_error) = if model_path.exists() {
+    let (model_ready, model_error, active_backend) = if model_path.exists() {
         let mut engine = crate::inference::InferenceEngine::new(model_path.clone());
         match engine.load() {
             Ok(()) => {
+                let backend = engine.active_backend_info();
                 engine.unload();
-                (true, None)
+                (true, None, backend)
             }
-            Err(error) => (false, Some(error.to_string())),
+            Err(error) => (false, Some(error.to_string()), None),
         }
     } else {
-        (false, None)
+        (false, None, None)
     };
     let helpers_found = crate::output::list_available_backends();
     let output_method_available = config.output.method == crate::config::OutputMethod::None
@@ -53,7 +54,7 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         .map(|(status, error)| (Some(status), error))
         .unwrap_or((None, None));
 
-    let backend = crate::inference::backend_info();
+    let backend = active_backend.unwrap_or_else(crate::inference::backend_info);
 
     Ok(DoctorReport {
         compositor,

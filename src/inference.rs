@@ -158,6 +158,23 @@ impl InferenceEngine {
         }
     }
 
+    /// The backend/device that actually backed the loaded engine, as opposed
+    /// to `backend_info()`'s hardware-capability probe: this reflects `load`'s
+    /// real GPU-then-CPU-fallback outcome (e.g. `None` for the GPU model file,
+    /// which forces the CPU fallback even on GPU-capable hardware), so
+    /// diagnostics that already hold a loaded engine (`doctor`, per-dictation
+    /// latency) should prefer this over the capability probe.
+    pub fn active_backend_info(&self) -> Option<BackendInfo> {
+        match self.engine.as_ref()? {
+            Backend::Cpu(_) => Some(cpu_backend_info()),
+            #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
+            Backend::Gpu(_) => Some(gpu::probe_backend_info().unwrap_or_else(|| BackendInfo {
+                backend: gpu::BACKEND_NAME.to_string(),
+                device: "unknown".to_string(),
+            })),
+        }
+    }
+
     pub fn cpu_threads() -> i32 {
         cpu_thread_count(num_cpus::get_physical(), num_cpus::get())
     }
