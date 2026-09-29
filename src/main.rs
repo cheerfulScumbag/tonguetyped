@@ -111,7 +111,10 @@ async fn main() -> anyhow::Result<()> {
                         "not found"
                     }
                 );
+                println!("model id:       {}", report.model_id);
                 println!("model path:     {}", report.model_path);
+                println!("backend:        {}", report.inference_backend);
+                println!("device:         {}", report.inference_device);
                 if let Some(error) = report.model_error {
                     println!("model error:    {error}");
                 }

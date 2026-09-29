@@ -2,6 +2,32 @@ use anyhow::Context;
 use std::path::PathBuf;
 use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams};
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BackendInfo {
+    pub backend: String,
+    pub device: String,
+}
+
+pub fn backend_info() -> BackendInfo {
+    let devices = transcribe_rs::whisper_cpp::gpu::list_gpu_devices();
+    match devices.into_iter().max_by_key(|device| {
+        let kind = match device.kind {
+            transcribe_rs::whisper_cpp::gpu::GpuKind::Dedicated => 1,
+            transcribe_rs::whisper_cpp::gpu::GpuKind::Integrated => 0,
+        };
+        (kind, device.total_vram)
+    }) {
+        Some(device) => BackendInfo {
+            backend: "whisper.cpp/gpu".to_string(),
+            device: device.name,
+        },
+        None => BackendInfo {
+            backend: "whisper.cpp/cpu".to_string(),
+            device: "CPU".to_string(),
+        },
+    }
+}
+
 pub struct InferenceEngine {
     engine: Option<WhisperEngine>,
     model_path: PathBuf,

@@ -167,20 +167,38 @@ When history is enabled, TongueTyped stores transcript text in
 `$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Disable
 `history.enabled` to keep only the current daemon's latest result in memory.
 
+## Latency diagnostics
+
+`tonguetyped doctor` reports the selected model ID and the detected inference
+backend and device. The daemon logs the same inference configuration at startup.
+
+After each dictation finishes or is cancelled, the daemon writes one structured
+`tonguetyped::latency` event at the `info` level. The event identifies the model,
+backend, device, outcome, and whether model loading was cold. It reports separate
+durations for audio finalization, VAD, model loading, inference, output, and
+history, plus the total time from the earliest stop boundary until the daemon is
+idle. For hold-mode activation, the total begins when the key is released, while
+audio finalization begins when TongueTyped sends the stop signal after its
+50-millisecond auto-repeat check. Disabled or unreached phases are zero. Latency
+events contain no transcript text or audio.
+
 ## Transcription benchmark
 
-Measure model loading and inference separately with a 16 kHz mono WAV file:
+Measure cold model loading and repeated warm inference with a 16 kHz mono WAV
+file:
 
 ```sh
 cargo run --release --example transcribe_benchmark -- \
   "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
-  recording.wav
+  recording.wav --runs 5
 ```
 
-The benchmark uses fixed English. Its output includes audio duration, model-load
-time, transcription time, real-time factor, and transcript text. Compare builds
-with the same model, WAV, release profile, and otherwise idle machine. CPU model,
-core count, temperature, power policy, and competing load affect absolute timing.
+Pass `--vad-model PATH` to include production VAD before each inference run. The
+benchmark writes one JSON record containing raw runs, median, p95, model and
+audio SHA-256 hashes, host CPU, thread count, backend, device, and a competing
+load warning. It does not print transcript text. Compare builds with the same
+model, WAV, release profile, and otherwise idle machine. Do not use a result as
+a release threshold when `competing_load_warning` is non-null.
 
 A recovery run on an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used
 the `small-q5_1` model. Its 8.597-second synthetic speech WAV was generated with
@@ -192,16 +210,17 @@ ffmpeg -f lavfi \
   -ar 16000 -ac 1 recording.wav
 ```
 
-The baseline predates the benchmark example. Run it with the final benchmark
-source so both builds use the same input, language, timing boundaries, and
-default model-loading behavior:
+The repository includes a benchmark source compatible with baseline commit
+`a91a123`. Copy it into an archive of that revision, then run both examples with
+the same input, language, timing boundaries, and default model-loading behavior:
 
 ```sh
 baseline_dir="$(mktemp -d)"
 git archive a91a1236d26f15f972e7e30089cbb4acbf5f578f | \
   tar -x -C "$baseline_dir"
 mkdir "$baseline_dir/examples"
-cp examples/transcribe_benchmark.rs "$baseline_dir/examples/"
+cp examples/transcribe_benchmark_baseline.rs \
+  "$baseline_dir/examples/transcribe_benchmark.rs"
 cargo run --release --manifest-path "$baseline_dir/Cargo.toml" \
   --example transcribe_benchmark -- \
   "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
