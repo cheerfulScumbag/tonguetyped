@@ -161,9 +161,11 @@ impl InferenceEngine {
     /// The backend/device that actually backed the loaded engine, as opposed
     /// to `backend_info()`'s hardware-capability probe: this reflects `load`'s
     /// real GPU-then-CPU-fallback outcome (e.g. `None` for the GPU model file,
-    /// which forces the CPU fallback even on GPU-capable hardware), so
-    /// diagnostics that already hold a loaded engine (`doctor`, per-dictation
-    /// latency) should prefer this over the capability probe.
+    /// which forces the CPU fallback even on GPU-capable hardware). Blocks on
+    /// an unwarmed GPU device probe like `backend_info` does; use this from
+    /// callers that already tolerate that cost (e.g. `doctor`). Per-dictation
+    /// latency reporting, which cannot, uses `cached_active_backend_info`
+    /// instead.
     pub fn active_backend_info(&self) -> Option<BackendInfo> {
         match self.engine.as_ref()? {
             Backend::Cpu(_) => Some(cpu_backend_info()),
@@ -172,6 +174,23 @@ impl InferenceEngine {
                 backend: gpu::BACKEND_NAME.to_string(),
                 device: "unknown".to_string(),
             })),
+        }
+    }
+
+    /// Non-blocking counterpart to `active_backend_info`: safe to call from
+    /// the stop-to-idle hot path, like `cached_backend_info`.
+    pub fn cached_active_backend_info(&self) -> Option<BackendInfo> {
+        match self.engine.as_ref()? {
+            Backend::Cpu(_) => Some(cpu_backend_info()),
+            #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
+            Backend::Gpu(_) => Some(
+                gpu::cached_backend_info_if_ready()
+                    .flatten()
+                    .unwrap_or_else(|| BackendInfo {
+                        backend: gpu::BACKEND_NAME.to_string(),
+                        device: "unknown".to_string(),
+                    }),
+            ),
         }
     }
 

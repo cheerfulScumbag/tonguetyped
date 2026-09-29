@@ -385,7 +385,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         if timings.cold_model_load {
             timings.model_load = load_started.elapsed();
         }
-        timings.backend = engine.active_backend_info();
+        timings.backend = engine.cached_active_backend_info();
         let inference_started = Instant::now();
         let result = engine.transcribe(&samples, &config.transcription.language);
         timings.inference = inference_started.elapsed();
