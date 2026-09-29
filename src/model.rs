@@ -6,6 +6,12 @@ use tokio::io::AsyncWriteExt;
 pub struct ModelCatalog;
 
 impl ModelCatalog {
+    /// The transcribe.cpp GGUF model backing the GPU inference backends
+    /// (see `gpu-vulkan`/`gpu-cuda` features and `src/inference.rs`). Not
+    /// listed in `model_names()`: it is an internal counterpart to the
+    /// user-selected CPU model, not a user-facing choice in `setup`.
+    pub const GPU_MODEL_NAME: &'static str = "whisper-small-gpu-q5_k_m";
+
     pub fn model_names() -> &'static [&'static str] {
         &["whisper-small-q5_1"]
     }
@@ -13,11 +19,18 @@ impl ModelCatalog {
     pub fn model_file_name(model_name: &str) -> anyhow::Result<&'static str> {
         match model_name {
             "whisper-small-q5_1" => Ok("ggml-small-q5_1.bin"),
+            Self::GPU_MODEL_NAME => Ok("whisper-small-Q5_K_M.gguf"),
             _ => anyhow::bail!("unsupported model: {model_name}"),
         }
     }
 
     pub fn model_url(model_name: &str) -> anyhow::Result<String> {
+        if model_name == Self::GPU_MODEL_NAME {
+            return Ok(format!(
+                "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/main/{}",
+                Self::model_file_name(model_name)?
+            ));
+        }
         Ok(format!(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
             Self::model_file_name(model_name)?

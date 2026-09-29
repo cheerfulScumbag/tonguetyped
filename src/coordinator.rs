@@ -520,6 +520,13 @@ impl Coordinator {
         clock: Arc<dyn Clock>,
         latency_sink: Arc<dyn LatencySink>,
     ) -> anyhow::Result<Self> {
+        // backend_info() memoizes its result (see inference::gpu), but a GPU
+        // build's first call enumerates real devices and is not free - warm
+        // it here, off the hot path, so the first dictation's finish() call
+        // (which reports backend/device on every completed dictation) does
+        // not have a chance of adding that cost to stop-to-idle latency.
+        std::thread::spawn(crate::inference::backend_info);
+
         let last_result = if config.history.enabled {
             crate::history::HistoryStore::new(&crate::history::history_db_path()?)?
                 .get_last_result()?

@@ -240,3 +240,93 @@ and the CPU backend was used. Both runs produced this exact transcript:
 ```text
 Today I am testing local speech recognition, the microphone records my voice and the computer converts each sentence into written text.
 ```
+
+## GPU inference backends
+
+Two optional Cargo features add GPU inference on top of the tested CPU path,
+using the official Rust binding for
+[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
+(the `transcribe-cpp` crate):
+
+```sh
+cargo build --release --features gpu-vulkan   # or --features gpu-cuda
+```
+
+Neither feature is enabled by default; a plain `cargo build` is unaffected and
+never links against Vulkan, CUDA, or transcribe-cpp. If both features are
+enabled, CUDA takes priority. Building `gpu-cuda` on NixOS additionally needs
+`cudaPackages.cudatoolkit` and the driver's `/run/opengl-driver/lib` on the
+link path; the flake's devShell and `build.rs` set this up automatically.
+
+When a GPU feature is compiled in, `InferenceEngine::load` tries that backend
+first, against a separately downloaded GGUF model
+(`whisper-small-Q5_K_M.gguf`, from
+[handy-computer/whisper-small-gguf](https://huggingface.co/handy-computer/whisper-small-gguf),
+chosen to match the CPU path's `small` model at a comparable quantization).
+If the GGUF file is missing, or the backend fails to load or run, it logs a
+warning and falls back to the same tested CPU path used by a plain build -
+this fallback forces `use_gpu: false` explicitly, since whisper-rs otherwise
+opportunistically uses whatever GPU backend it was linked against, which is
+not what "tested CPU fallback" should mean. `tonguetyped doctor` and the
+daemon's startup log report whichever backend is actually active
+(`whisper.cpp/cpu`, `transcribe.cpp/vulkan`, or `transcribe.cpp/cuda`) and its
+device. The GPU model is not eagerly downloaded at daemon startup (that would
+block every launch on a large synchronous fetch); provision it manually to
+`$XDG_DATA_HOME/tonguetyped/models/whisper-small-Q5_K_M.gguf` to use the GPU
+path, or run the benchmark once with a GPU feature, which downloads it in the
+CPU-fallback-free flow used here.
+
+### Benchmark: Vulkan and CUDA vs. the CPU baseline
+
+The same `transcribe_benchmark` example used for the CPU baseline reports
+whichever backend the build and hardware actually select, so it doubles as
+the GPU benchmark - just build it with a GPU feature and it hashes and
+reports the GGUF file it actually ran against
+(`InferenceEngine::active_model_path`), not the CPU model path still passed
+on the CLI:
+
+```sh
+cargo build --release --example transcribe_benchmark --features gpu-vulkan
+./target/release/examples/transcribe_benchmark \
+  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
+  recording.wav --runs 3
+```
+
+Measured on an AMD Ryzen 7 9700X (8 physical cores) with an NVIDIA GeForce
+RTX 4080 SUPER (16 GB VRAM), using the exact same 8.597-second input WAV as
+the CPU baseline above (SHA-256 `2de0423a...f90c78`):
+
+| Backend | Device | Median inference | Realtime factor | Cold first inference |
+| --- | --- | ---: | ---: | ---: |
+| `whisper.cpp/cpu` | CPU | 18.01 s | 2.10x (slower than realtime) | same as median |
+| `transcribe.cpp/vulkan` | RTX 4080 SUPER | 0.057 s | 0.0066x (~320x faster than CPU) | 0.05-8.2 s (see note) |
+| `transcribe.cpp/cuda` | RTX 4080 SUPER | 0.053 s | 0.0062x (~340x faster than CPU) | 0.09-0.13 s |
+
+Both GPU backends produce the exact same transcript as the CPU path
+(byte-for-byte, verified separately from the benchmark tool, which discards
+transcript text). Full raw JSON reports, including per-run timings and the
+`competing_load_warning` field, are in
+`data/tt-transcribe-cpp-gpu-18/report.md`.
+
+**Vulkan's first-ever inference on a given machine pays a one-time shader
+compilation cost** (observed once at 8.18 s; every run after that, including
+across separate process launches, was 0.05-0.09 s) - the NVIDIA driver
+caches compiled Vulkan pipelines to disk, so this is a single per-machine
+cost, not a per-process or per-dictation one. CUDA's cold start was
+consistently under 0.13 s with no such spike. If a deployment relies on
+`model.idle_unload` with a short timeout on a machine whose shader cache gets
+cleared (e.g. driver updates, cache eviction), Vulkan's reload cost is worth
+being aware of; CUDA does not have this characteristic on the hardware
+tested.
+
+**Competing load, honestly**: this machine runs several concurrent build
+lanes, so most runs above show a non-null `competing_load_warning` (CPU load
+average or GPU free-memory pressure from another process). Every backend's
+*median inference time* was nonetheless stable within a few percent across
+contended and quiet runs (contention mostly costs a slower first/cold run,
+not the steady-state number) - but per the pipeline's own release-threshold
+guidance, none of these numbers should be read as a clean baseline. A truly
+idle run of the CUDA case did occur (`competing_load_warning: null`) and its
+numbers match the contended runs closely, which is the best available
+evidence that the contention here did not meaningfully distort the
+comparison.

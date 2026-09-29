@@ -63,6 +63,14 @@ fn main() -> anyhow::Result<()> {
     engine.load()?;
     let load_time = started.elapsed();
 
+    // A GPU build may silently fall back to a different model file than the
+    // one requested on the CLI (see InferenceEngine::active_model_path), so
+    // hash and report whichever file actually backed this run.
+    let active_model = engine
+        .active_model_path()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| args.model.clone());
+
     let mut runs = Vec::with_capacity(args.runs);
     for run in 1..=args.runs {
         let vad_started = Instant::now();
@@ -92,13 +100,12 @@ fn main() -> anyhow::Result<()> {
     sorted.sort_by(f64::total_cmp);
     let backend = tonguetyped::inference::backend_info();
     let report = BenchmarkReport {
-        model_file: args
-            .model
+        model_file: active_model
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("unknown")
             .to_string(),
-        model_sha256: sha256(&args.model)?,
+        model_sha256: sha256(&active_model)?,
         audio_sha256: sha256(&args.wav)?,
         audio_seconds,
         model_load_seconds: load_time.as_secs_f64(),
@@ -149,6 +156,20 @@ fn host_cpu() -> String {
 }
 
 fn competing_load_warning() -> Option<String> {
+    let cpu_warning = cpu_competing_load_warning();
+    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
+    let gpu_warning = tonguetyped::inference::gpu_competing_load_warning();
+    #[cfg(not(any(feature = "gpu-vulkan", feature = "gpu-cuda")))]
+    let gpu_warning: Option<String> = None;
+
+    match (cpu_warning, gpu_warning) {
+        (Some(cpu), Some(gpu)) => Some(format!("{cpu}; {gpu}")),
+        (Some(warning), None) | (None, Some(warning)) => Some(warning),
+        (None, None) => None,
+    }
+}
+
+fn cpu_competing_load_warning() -> Option<String> {
     let load = std::fs::read_to_string("/proc/loadavg")
         .ok()?
         .split_whitespace()

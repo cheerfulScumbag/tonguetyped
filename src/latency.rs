@@ -191,7 +191,7 @@ impl LatencyOperation {
         self.terminal = true;
         let stop_received = self.stop_received.unwrap();
         let total = self.elapsed_since_stop();
-        let backend = crate::inference::backend_info();
+        let backend = crate::inference::cached_backend_info();
         Some(LatencyRecord {
             operation_id: self.operation_id.clone(),
             outcome: outcome.to_string(),

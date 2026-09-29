@@ -183,8 +183,20 @@ fn doctor_distinguishes_invalid_model_from_missing_model() {
     assert!(stdout.contains("model:          invalid"));
     assert!(stdout.contains("model error:"));
     assert!(stdout.contains("model id:       whisper-small-q5_1"));
-    assert!(stdout.contains("backend:        whisper.cpp/cpu"));
-    assert!(stdout.contains("device:         CPU"));
+    // On a plain build this is always whisper.cpp/cpu. A gpu-vulkan/gpu-cuda
+    // build instead reports whatever backend the host's hardware actually
+    // supports (that's the point of doctor reporting the real backend), so
+    // only the CPU-only build asserts the specific CPU backend/device text.
+    #[cfg(not(any(feature = "gpu-vulkan", feature = "gpu-cuda")))]
+    {
+        assert!(stdout.contains("backend:        whisper.cpp/cpu"));
+        assert!(stdout.contains("device:         CPU"));
+    }
+    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
+    {
+        assert!(stdout.contains("backend:        "));
+        assert!(stdout.contains("device:         "));
+    }
 
     std::fs::remove_dir_all(root).unwrap();
 }
