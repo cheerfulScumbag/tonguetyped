@@ -156,6 +156,7 @@ tonguetyped last-result    Print the latest transcription
 tonguetyped doctor         Check runtime dependencies
 tonguetyped shortcut-test  Interactively test shortcut authorization and binding
 tonguetyped autostart      Enable or disable desktop-session autostart
+tonguetyped model          Manage the GGUF speech model catalog (GPU backend)
 ```
 
 The daemon listens on `$XDG_RUNTIME_DIR/tonguetyped/control.sock` and refuses to
