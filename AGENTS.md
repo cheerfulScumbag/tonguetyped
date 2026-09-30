@@ -42,3 +42,19 @@ Building `gpu-cuda` on NixOS needs `cudaPackages.cudatoolkit` and the driver's
 the crate-root `build.rs` (scoped to `CARGO_FEATURE_GPU_CUDA`) handle this - `rustc`'s
 linker (`rust-lld`, invoked directly) does not honor `LIBRARY_PATH`, only explicit
 `-L`/`-l`, so `cargo:rustc-link-search`/`-lib` in `build.rs` is the fix, not env vars.
+
+The GPU backend's model catalog (`src/catalog.rs`, managed with `tonguetyped model
+{list,install,remove,use}`) is scoped to `family = 'whisper'` GGUF models only, not
+transcribe.cpp's full catalog.db - the CPU path's vendored whisper.cpp checks for the
+legacy `GGML_FILE_MAGIC` and cannot load GGUF at all (any family), and other
+families' output/chunking semantics (diarization, streaming-only, non-whisper
+long-form strategies) have never been exercised against this project's single-shot
+`Session::run` usage. See `data/tt-model-catalog-19/report.md` before widening the
+catalog to a new family.
+
+A stack-allocated buffer inside an `async fn` is embedded inline in the generated
+state machine across every `.await` point in that function (not heap-allocated), and
+compounds when awaited from other async functions - `src/model.rs`'s SHA-256
+verifier hit a real stack overflow from a 1 MiB buffer for exactly this reason
+(fixed at 64 KiB, matching `examples/transcribe_benchmark.rs`'s synchronous hasher).
+Keep buffers inside `async fn` bodies small, or hash on a blocking thread instead.

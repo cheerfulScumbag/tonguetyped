@@ -364,11 +364,13 @@ impl CoordinatorRuntime for ProductionRuntime {
             };
         }
         let mut lifecycle = self.inference.lock().unwrap();
-        timings.cold_model_load = !lifecycle.has_model(&config.model.selected);
+        let engine_key = format!("{}\u{0}{}", config.model.selected, config.model.gpu_model);
+        timings.cold_model_load = !lifecycle.has_model(&engine_key);
         let load_started = Instant::now();
-        let engine = match lifecycle.ensure(&config.model.selected, || {
-            let mut engine = crate::inference::InferenceEngine::new(
+        let engine = match lifecycle.ensure(&engine_key, || {
+            let mut engine = crate::inference::InferenceEngine::with_gpu_model(
                 crate::model::ModelCatalog::model_path(&config.model.selected)?,
+                config.model.gpu_model.clone(),
             );
             engine.load()?;
             Ok(engine)

@@ -71,13 +71,29 @@ enum Backend {
 pub struct InferenceEngine {
     engine: Option<Backend>,
     model_path: PathBuf,
+    // Only read by the GPU backend's `load` call below; a default build
+    // compiles neither `gpu-vulkan` nor `gpu-cuda`, so this field is unused.
+    #[cfg_attr(
+        not(any(feature = "gpu-vulkan", feature = "gpu-cuda")),
+        allow(dead_code)
+    )]
+    gpu_model_id: String,
 }
 
 impl InferenceEngine {
     pub fn new(model_path: PathBuf) -> Self {
+        Self::with_gpu_model(model_path, crate::catalog::DEFAULT_GPU_MODEL_ID.to_string())
+    }
+
+    /// Like `new`, but selects which catalog entry (see `crate::catalog`) the
+    /// GPU backend (`gpu-vulkan`/`gpu-cuda`) tries first, instead of the
+    /// default. Has no effect on a build without a GPU feature enabled, or
+    /// when the CPU fallback is used because the GPU model isn't installed.
+    pub fn with_gpu_model(model_path: PathBuf, gpu_model_id: String) -> Self {
         InferenceEngine {
             engine: None,
             model_path,
+            gpu_model_id,
         }
     }
 
@@ -87,7 +103,7 @@ impl InferenceEngine {
         }
 
         #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-        match gpu::GpuEngine::load() {
+        match gpu::GpuEngine::load(&self.gpu_model_id) {
             Ok(engine) => {
                 self.engine = Some(Backend::Gpu(engine));
                 return Ok(());
