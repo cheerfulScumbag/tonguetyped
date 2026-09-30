@@ -66,8 +66,15 @@ in two parts:
     `backend_info()`. `Coordinator::new` also spawns a background thread that
     calls the blocking probe once, so the cache is warm well before any real
     dictation completes in practice.
-  - `doctor` and the daemon startup log still use the blocking `backend_info()`
-    - accuracy matters more than speed for a one-time diagnostic/startup call.
+  - The daemon startup log still uses the blocking `backend_info()` capability
+    probe - accuracy matters more than speed for a one-time startup call, and
+    no engine is loaded yet at that point to read a real outcome from. A
+    later review round found that this same probe, used verbatim for
+    `doctor` and the per-dictation latency record, reported hardware
+    capability rather than the backend a load actually fell back to; `doctor`
+    and latency reporting now read `InferenceEngine::active_backend_info()` /
+    `cached_active_backend_info()` off the loaded engine instead (see
+    `src/inference.rs`).
 
 **3. Eagerly downloading the GPU model at every daemon startup.** My first
 pass added a GPU-model existence/download check to `daemon.rs::prepare_dependencies`,
