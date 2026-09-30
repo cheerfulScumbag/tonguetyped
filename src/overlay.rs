@@ -170,6 +170,8 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         deadline: None,
         anim_start: Instant::now(),
         ticking: false,
+        ticking_animated: false,
+        timer_generation: 0,
         loop_signal: event_loop.get_signal(),
     };
 
@@ -231,6 +233,8 @@ struct State {
     deadline: Option<Instant>,
     anim_start: Instant,
     ticking: bool,
+    ticking_animated: bool,
+    timer_generation: u64,
     loop_signal: LoopSignal,
 }
 
@@ -281,11 +285,12 @@ impl State {
     }
 
     fn arm_timer(&mut self, loop_handle: &LoopHandle<'static, State>) {
-        if self.ticking {
+        let Some(phase) = self.phase else { return };
+        let needs_animated = phase.is_animated();
+        if self.ticking && self.ticking_animated == needs_animated {
             return;
         }
-        let Some(phase) = self.phase else { return };
-        let initial = if phase.is_animated() {
+        let initial = if needs_animated {
             TICK
         } else {
             self.deadline
@@ -293,13 +298,19 @@ impl State {
                 .unwrap_or(TICK)
         };
         self.ticking = true;
-        let _ = loop_handle
-            .insert_source(Timer::from_duration(initial), |_, _, state: &mut State| {
-                state.on_tick()
-            });
+        self.ticking_animated = needs_animated;
+        self.timer_generation += 1;
+        let generation = self.timer_generation;
+        let _ = loop_handle.insert_source(
+            Timer::from_duration(initial),
+            move |_, _, state: &mut State| state.on_tick(generation),
+        );
     }
 
-    fn on_tick(&mut self) -> TimeoutAction {
+    fn on_tick(&mut self, generation: u64) -> TimeoutAction {
+        if generation != self.timer_generation {
+            return TimeoutAction::Drop;
+        }
         match self.phase {
             Some(phase) if phase.is_animated() => {
                 self.redraw();
@@ -752,6 +763,9 @@ pub fn probe_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static WAYLAND_DISPLAY_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn unavailable_overlay_falls_back_without_blocking() {
@@ -760,6 +774,9 @@ mod tests {
         // deterministically -- independent of whether the machine running
         // this test happens to have a compositor (and independent of
         // whether that compositor speaks wlr-layer-shell; recent KWin does).
+        let _guard = WAYLAND_DISPLAY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var("WAYLAND_DISPLAY").ok();
         std::env::set_var("WAYLAND_DISPLAY", "tonguetyped-test-nonexistent-socket");
 
