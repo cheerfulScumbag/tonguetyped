@@ -17,6 +17,9 @@
       overlays = [(import rust-overlay)];
       pkgs = import nixpkgs {
         inherit system overlays;
+        # cudaPackages.cudatoolkit (below) is unfree; needed to build the
+        # optional gpu-cuda transcribe-cpp backend.
+        config.allowUnfree = true;
       };
       rustToolchain = pkgs.rust-bin.stable.latest.default.override {
         extensions = ["rust-src" "rust-analyzer"];
@@ -31,12 +34,27 @@
           alsa-lib
           xdotool
           openssl
+          # Vulkan: builds transcribe.cpp's `-DTRANSCRIBE_VULKAN=ON` backend
+          # (`cargo build --features gpu-vulkan`).
+          vulkan-headers
+          vulkan-loader
+          shaderc
+          # CUDA: builds transcribe.cpp's `-DTRANSCRIBE_CUDA=ON` backend
+          # (`cargo build --features gpu-cuda`). Requires an NVIDIA GPU +
+          # driver on the host to actually run.
+          cudaPackages.cudatoolkit
         ];
 
         shellHook = ''
           export RUST_BACKTRACE=1
           export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
           export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          export CUDAToolkit_ROOT="${pkgs.cudaPackages.cudatoolkit}"
+          # NixOS doesn't put CUDA (or the driver's libcuda.so) on the default
+          # runtime search path the way an FHS install would; build.rs adds
+          # the matching rustc-link-search/-rpath for linking a gpu-cuda
+          # build, this covers running other CUDA-touching tools from the shell.
+          export LD_LIBRARY_PATH="$CUDAToolkit_ROOT/lib:/run/opengl-driver/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         '';
       };
 

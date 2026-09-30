@@ -81,6 +81,11 @@ async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
     if !crate::model::ModelCatalog::model_path(&config.model.selected)?.exists() {
         download_manager.download(&config.model.selected).await?;
     }
+    // The GPU model is intentionally not eagerly provisioned here: doing so
+    // would block every daemon startup on a large synchronous download.
+    // InferenceEngine::load already falls back to the tested CPU path with a
+    // warning when it is missing (see src/inference/gpu.rs), so a GPU build
+    // works out of the box, just on CPU until the GGUF model is provisioned.
     if config.transcription.vad_enabled {
         download_manager.ensure_vad_model().await?;
     }
