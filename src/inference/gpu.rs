@@ -28,10 +28,9 @@ pub struct GpuEngine {
 }
 
 impl GpuEngine {
-    pub fn load() -> anyhow::Result<Self> {
+    pub fn load(gpu_model_id: &str) -> anyhow::Result<Self> {
         let model_path =
-            crate::model::ModelCatalog::model_path(crate::model::ModelCatalog::GPU_MODEL_NAME)
-                .context("failed to resolve GPU model path")?;
+            crate::catalog::model_path(gpu_model_id).context("failed to resolve GPU model path")?;
         if !model_path.exists() {
             anyhow::bail!("GPU model file not found: {}", model_path.display());
         }

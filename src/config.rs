@@ -69,6 +69,11 @@ impl std::fmt::Display for ActivationMode {
 pub struct ModelConfig {
     #[serde(default = "default_model_selected")]
     pub selected: String,
+    /// Which `crate::catalog` entry the GPU inference backend
+    /// (`gpu-vulkan`/`gpu-cuda`) loads, managed with `tonguetyped model`.
+    /// Ignored by builds without a GPU feature enabled.
+    #[serde(default = "default_gpu_model")]
+    pub gpu_model: String,
     #[serde(default)]
     pub idle_unload: IdleUnloadConfig,
 }
@@ -77,6 +82,7 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             selected: default_model_selected(),
+            gpu_model: default_gpu_model(),
             idle_unload: IdleUnloadConfig::default(),
         }
     }
@@ -347,6 +353,10 @@ fn default_model_selected() -> String {
     "whisper-small-q5_1".to_string()
 }
 
+fn default_gpu_model() -> String {
+    crate::catalog::DEFAULT_GPU_MODEL_ID.to_string()
+}
+
 fn default_idle_unload_policy() -> IdleUnloadPolicy {
     IdleUnloadPolicy::AfterIdle
 }
@@ -467,6 +477,9 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         crate::activation::portal_trigger(&self.activation.keybind)?;
         crate::model::ModelCatalog::model_file_name(&self.model.selected)?;
+        if crate::catalog::find(&self.model.gpu_model).is_none() {
+            anyhow::bail!("unsupported GPU model: {}", self.model.gpu_model);
+        }
         if self.transcription.max_recording_seconds == 0 {
             anyhow::bail!("max_recording_seconds must be a positive integer");
         }
@@ -565,6 +578,7 @@ mod tests {
         assert!(!config.audio.feedback_sounds);
         assert_eq!(config.transcription.max_recording_seconds, 120);
         assert_eq!(config.model.selected, "whisper-small-q5_1");
+        assert_eq!(config.model.gpu_model, crate::catalog::DEFAULT_GPU_MODEL_ID);
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
         assert_eq!(config.history.max_entries, 500);
     }
@@ -578,6 +592,16 @@ mod tests {
         config.output.typing_backend = "auto".to_string();
         config.model.selected = "../custom".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_gpu_model_selection() {
+        let mut config = Config::default();
+        config.model.gpu_model = "not-a-catalog-entry".to_string();
+        assert!(config.validate().is_err());
+
+        config.model.gpu_model = "whisper-tiny-q5_k_m".to_string();
+        config.validate().unwrap();
     }
 
     #[test]

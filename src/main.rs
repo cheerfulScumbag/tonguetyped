@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use tokio::io::AsyncWriteExt;
-use tonguetyped::{activation, autostart, config, daemon, doctor, ipc, setup};
+use tonguetyped::{activation, autostart, catalog, config, daemon, doctor, ipc, model, setup};
 
 #[derive(Parser)]
 #[command(name = "tonguetyped", version, about = "Linux dictation application")]
@@ -42,6 +42,29 @@ enum Commands {
         #[command(subcommand)]
         command: AutostartCommand,
     },
+    /// Manage the GGUF speech model catalog used by the GPU inference backend
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelCommand {
+    /// List catalog models and their local installation status
+    List,
+    /// Download a catalog model (resumable; verified against a pinned SHA-256)
+    Install {
+        /// Catalog model id, e.g. "whisper-small-q5_k_m" (see `model list`)
+        id: String,
+        /// Also select the downloaded model as the active GPU inference model
+        #[arg(long = "use")]
+        use_after_install: bool,
+    },
+    /// Delete a locally installed catalog model
+    Remove { id: String },
+    /// Select which installed catalog model the GPU backend loads
+    Use { id: String },
 }
 
 #[derive(Subcommand)]
@@ -113,6 +136,15 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!("model id:       {}", report.model_id);
                 println!("model path:     {}", report.model_path);
+                println!(
+                    "gpu model:      {} ({})",
+                    report.gpu_model_id,
+                    if report.gpu_model_installed {
+                        "installed"
+                    } else {
+                        "not installed"
+                    }
+                );
                 println!("backend:        {}", report.inference_backend);
                 println!("device:         {}", report.inference_device);
                 if let Some(error) = report.model_error {
@@ -168,9 +200,122 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Reload => send_command(ipc::Request::ReloadConfig).await?,
         Commands::LastResult => send_command(ipc::Request::GetLastResult).await?,
+        Commands::Model { command } => run_model_command(command).await?,
     }
 
     Ok(())
+}
+
+async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
+    match command {
+        ModelCommand::List => {
+            let config = config::Config::load()?;
+            let cpu_id = &config.model.selected;
+            let cpu_path = model::ModelCatalog::model_path(cpu_id)?;
+            println!(
+                "CPU model (fixed default): {cpu_id} [{}]",
+                if cpu_path.exists() {
+                    "installed"
+                } else {
+                    "not installed"
+                }
+            );
+            println!();
+            println!(
+                "{:<32} {:<10} {:>10}  {:<11}  license",
+                "GPU CATALOG MODEL ID", "QUANT", "SIZE", "STATUS"
+            );
+            for entry in catalog::ENTRIES {
+                let installed = catalog::is_installed(entry.id);
+                let status = match (installed, entry.id == config.model.gpu_model) {
+                    (true, true) => "active",
+                    (true, false) => "installed",
+                    (false, _) => "-",
+                };
+                println!(
+                    "{:<32} {:<10} {:>10}  {:<11}  {}",
+                    entry.id,
+                    entry.quant,
+                    human_size(entry.size_bytes),
+                    status,
+                    entry.license_spdx,
+                );
+            }
+        }
+        ModelCommand::Install {
+            id,
+            use_after_install,
+        } => {
+            if catalog::find(&id).is_none() {
+                anyhow::bail!("unknown catalog model: {id} (see `tonguetyped model list`)");
+            }
+            let manager = model::DownloadManager::new()?;
+            let (path, outcome) = manager.install_catalog_model(&id).await?;
+            match outcome {
+                model::DownloadOutcome::AlreadyInstalled => {
+                    println!("{id} is already installed at {}", path.display())
+                }
+                model::DownloadOutcome::Resumed => {
+                    println!("resumed and verified {id} at {}", path.display())
+                }
+                model::DownloadOutcome::Fresh => {
+                    println!("installed and verified {id} at {}", path.display())
+                }
+            }
+            if use_after_install {
+                select_gpu_model(&id)?;
+            }
+        }
+        ModelCommand::Remove { id } => {
+            if catalog::find(&id).is_none() {
+                anyhow::bail!("unknown catalog model: {id} (see `tonguetyped model list`)");
+            }
+            let config = config::Config::load()?;
+            if config.model.gpu_model == id {
+                anyhow::bail!(
+                    "{id} is the active GPU model; run `tonguetyped model use <other-id>` first"
+                );
+            }
+            if model::DownloadManager::remove_catalog_model(&id)? {
+                println!("removed {id}");
+            } else {
+                println!("{id} is not installed");
+            }
+        }
+        ModelCommand::Use { id } => {
+            if catalog::find(&id).is_none() {
+                anyhow::bail!("unknown catalog model: {id} (see `tonguetyped model list`)");
+            }
+            if !catalog::is_installed(&id) {
+                anyhow::bail!("{id} is not installed; run `tonguetyped model install {id}` first");
+            }
+            select_gpu_model(&id)?;
+        }
+    }
+    Ok(())
+}
+
+fn select_gpu_model(id: &str) -> anyhow::Result<()> {
+    let mut config = config::Config::load()?;
+    config.model.gpu_model = id.to_string();
+    config.save()?;
+    println!("selected {id} as the active GPU inference model");
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 async fn send_command(request: ipc::Request) -> anyhow::Result<()> {

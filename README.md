@@ -259,10 +259,10 @@ enabled, CUDA takes priority. Building `gpu-cuda` on NixOS additionally needs
 link path; the flake's devShell and `build.rs` set this up automatically.
 
 When a GPU feature is compiled in, `InferenceEngine::load` tries that backend
-first, against a separately downloaded GGUF model
-(`whisper-small-Q5_K_M.gguf`, from
+first, against a separately downloaded GGUF model - by default
+`whisper-small-Q5_K_M.gguf` from
 [handy-computer/whisper-small-gguf](https://huggingface.co/handy-computer/whisper-small-gguf),
-chosen to match the CPU path's `small` model at a comparable quantization).
+chosen to match the CPU path's `small` model at a comparable quantization.
 If the GGUF file is missing, or the backend fails to load or run, it logs a
 warning and falls back to the same tested CPU path used by a plain build -
 this fallback forces `use_gpu: false` explicitly, since whisper-rs otherwise
@@ -271,10 +271,41 @@ not what "tested CPU fallback" should mean. `tonguetyped doctor` and the
 daemon's startup log report whichever backend is actually active
 (`whisper.cpp/cpu`, `transcribe.cpp/vulkan`, or `transcribe.cpp/cuda`) and its
 device. The GPU model is not eagerly downloaded at daemon startup (that would
-block every launch on a large synchronous fetch); provision it manually to
-`$XDG_DATA_HOME/tonguetyped/models/whisper-small-Q5_K_M.gguf` before using the
-GPU path or running the benchmark with a GPU feature - neither downloads it
-for you, and a missing file silently falls back to the CPU path.
+block every launch on a large synchronous fetch); provision it with
+`tonguetyped model install <id>` before using the GPU path or running the
+benchmark with a GPU feature - a missing file silently falls back to the CPU
+path.
+
+### GGUF model catalog (`tonguetyped model`)
+
+The GPU backend isn't limited to that one default model. `src/catalog.rs`
+holds a reviewed catalog of every `family = "whisper"` GGUF model published by
+[handy-computer](https://huggingface.co/handy-computer), derived from
+[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s release
+`catalog.db` and cross-verified against HuggingFace's own metadata for each
+file (see `data/tt-model-catalog-19/report.md` for the derivation process and
+why other catalog.db families - canary, parakeet, voxtral, moonshine,
+sortformer diarization, and so on - are left out: they're real transcribe.cpp
+models, just not yet integration-tested against this project's single-shot
+usage). Every entry is pinned to a specific commit (not `main`) with an
+expected byte size and SHA-256, so what actually downloads can't drift from
+what was reviewed.
+
+```sh
+tonguetyped model list                          # catalog + install status
+tonguetyped model install whisper-tiny-q5_k_m   # resumable, verified download
+tonguetyped model install whisper-tiny-q5_k_m --use   # and select it
+tonguetyped model use whisper-tiny-q5_k_m       # switch the active GPU model
+tonguetyped model remove whisper-tiny-q5_k_m    # delete a non-active install
+```
+
+`install` resumes an interrupted download from its partial `.download` file
+when the server supports HTTP range requests, and always re-verifies the full
+file's SHA-256 before making it live - a corrupt or mismatched download is
+deleted rather than left in place. The selected model is stored in
+`model.gpu_model` in `config.toml`; it's ignored by builds without a GPU
+feature enabled, and the CPU model (`model.selected`, still just
+`whisper-small-q5_1`) is unaffected by any of this.
 
 ### Benchmark: Vulkan and CUDA vs. the CPU baseline
 
