@@ -77,8 +77,17 @@ pub fn run() -> anyhow::Result<()> {
     // newline-separated answers.
     if stdin.is_terminal() && stdout.is_terminal() {
         let outcome = console::run(capabilities)?;
-        if matches!(outcome, SetupOutcome::Cancelled) {
-            writeln!(stdout, "\nSetup cancelled. No changes were made.")?;
+        match outcome {
+            SetupOutcome::Cancelled => {
+                writeln!(stdout, "\nSetup cancelled. No changes were made.")?;
+            }
+            SetupOutcome::Saved => {
+                writeln!(stdout, "\nConfiguration saved.")?;
+                writeln!(
+                    stdout,
+                    "Run `tonguetyped doctor` to check the installation."
+                )?;
+            }
         }
         return Ok(());
     }
