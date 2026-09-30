@@ -34,6 +34,9 @@
           alsa-lib
           xdotool
           openssl
+          # libwayland-client.so: the layer-shell overlay's Wayland connection
+          # (src/overlay.rs). Unused, without erroring, on non-Wayland sessions.
+          wayland
           # Vulkan: builds transcribe.cpp's `-DTRANSCRIBE_VULKAN=ON` backend
           # (`cargo build --features gpu-vulkan`).
           vulkan-headers
@@ -83,6 +86,7 @@
           onnxruntime
           xdotool
           openssl
+          wayland
         ];
 
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";

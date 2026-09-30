@@ -9,8 +9,11 @@ locally with whisper.cpp, and can type the result into the focused application.
 TongueTyped requires Linux and an ALSA-compatible input device. Desktop shortcut
 activation also requires an XDG Global Shortcuts portal; terminal IPC commands
 remain available without one. Building from source requires Rust, CMake,
-libclang, OpenSSL, pkg-config, ALSA development files, and libxdo development
-files. The Nix flake provides these build dependencies:
+libclang, OpenSSL, pkg-config, ALSA development files, libxdo development
+files, and Wayland client development files (for the optional layer-shell
+overlay described under [Desktop feedback](#desktop-feedback); the daemon
+still runs without a Wayland session, falling back as described there). The
+Nix flake provides these build dependencies:
 
 ```sh
 nix develop
@@ -131,22 +134,29 @@ feedback_device = "default"
 ```
 
 The visual feedback identifies listening, transcription, completion,
-cancellation, and failure without taking keyboard focus. On KDE it uses
-Plasma's native OSD and falls back to a transient freedesktop notification if
-the OSD service is unavailable. Plasma and the notification daemon control
-placement and monitor selection, so the existing `overlay.position` and
-`overlay.monitor` settings do not override desktop accessibility or
-multi-monitor policy.
+cancellation, and failure without taking keyboard focus or accepting pointer
+input. It prefers a small, click-through `wlr-layer-shell` overlay badge
+positioned by `overlay.position` (`top-left`, `top-right`, `bottom-left`,
+`bottom-right`, `top`, `bottom`, or `center`) and `overlay.monitor` (`active`,
+or a specific output name from `tonguetyped doctor`). `zwlr_layer_shell_v1` is
+a wlroots-originated protocol; it is available on wlroots-based compositors
+(validated against Mango) and on modern KWin (validated against KDE Plasma
+6.7+), but not on X11 sessions or older/other compositors that never
+advertise it. Where it is unavailable, TongueTyped falls back to Plasma's
+native OSD on KDE, then a transient freedesktop notification -- in that
+fallback tier, the desktop environment controls placement and monitor
+selection, so `overlay.position`/`overlay.monitor` have no effect. Run
+`tonguetyped doctor` to see which tier is active.
 
 Sound feedback uses the desktop sound theme through `canberra-gtk-play` and
 accepts a volume from `0.0` through `1.0`. The Nix package includes this helper;
 source and development builds require it on `PATH`. A non-default
 `feedback_device` is passed as `PULSE_SINK`, which works with PulseAudio and
 PipeWire's PulseAudio compatibility service. A missing sound helper disables
-only sound feedback. Visual feedback is unavailable only when neither Plasma's
-OSD nor a desktop notification service can be reached. Recording and terminal
-commands continue to work. TongueTyped does not add animation, inject text, or
-move focus when it reports state.
+only sound feedback. Visual feedback is unavailable only when neither the
+layer-shell overlay, Plasma's OSD, nor a desktop notification service can be
+reached. Recording and terminal commands continue to work. TongueTyped does
+not inject text or move focus when it reports state.
 
 ## Commands
 

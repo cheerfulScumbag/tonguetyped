@@ -13,5 +13,6 @@ pub mod ipc;
 pub mod latency;
 pub mod model;
 pub mod output;
+pub mod overlay;
 pub mod setup;
 pub mod vad;

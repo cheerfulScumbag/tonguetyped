@@ -32,6 +32,7 @@ enigo = "0.3"
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
 ratatui = "0.30.2"
 crossterm = "0.29.0"
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
 
 [features]
 # GPU inference backends, built on the transcribe.cpp Rust binding. Neither is

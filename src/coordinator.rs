@@ -492,7 +492,7 @@ impl Coordinator {
         Self::with_runtime_and_feedback(
             config,
             Arc::new(ProductionRuntime::new()?),
-            Arc::new(DesktopFeedback),
+            Arc::new(DesktopFeedback::new()),
         )
     }
 
