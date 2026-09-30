@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Parser;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -98,7 +99,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut sorted: Vec<f64> = runs.iter().map(|run| run.inference_seconds).collect();
     sorted.sort_by(f64::total_cmp);
-    let backend = tonguetyped::inference::backend_info();
+    let backend = engine.active_backend_info().context("engine not loaded")?;
     let report = BenchmarkReport {
         model_file: active_model
             .file_name()
