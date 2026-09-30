@@ -71,10 +71,19 @@ tonguetyped setup
 ```
 
 The setup flow discovers microphones and typing backends before presenting choices.
-It validates the complete configuration before replacing
+When both stdin and stdout are a terminal, `setup` opens an interactive Ratatui
+console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc`
+returns to the previous one, and `q` quits without saving. The microphone step
+shows a live input level meter for whichever microphone is currently
+highlighted, so you can compare devices before committing to one. Piped or
+non-interactive stdin/stdout (scripts, tests, CI) falls back to the original
+line-based prompts, reading newline-separated answers from stdin.
+
+Either flow validates the complete configuration before replacing
 `$XDG_CONFIG_HOME/tonguetyped/config.toml`. Enabling autostart installs
 `$XDG_CONFIG_HOME/autostart/tonguetyped.desktop`; disabling it removes that entry.
-Enter `q` at any prompt to leave the configuration and autostart entry unchanged.
+Cancelling (`q`/`Esc` in the console, or `q` at any line-based prompt) leaves the
+configuration and autostart entry unchanged.
 
 For development outside the installed package, start the daemon from a graphical
 desktop session:

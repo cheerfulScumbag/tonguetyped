@@ -1,8 +1,10 @@
 use crate::config::{ActivationMode, Config, OutputMethod};
 use std::io::{self, BufRead, IsTerminal, Write};
 
+mod console;
+
 #[derive(Debug)]
-struct Capabilities {
+pub(crate) struct Capabilities {
     microphones: Vec<(String, String)>,
     typing_backends: Vec<String>,
 }
@@ -60,7 +62,7 @@ impl Ui {
     }
 }
 
-enum SetupOutcome {
+pub(crate) enum SetupOutcome {
     Saved,
     Cancelled,
 }
@@ -69,6 +71,27 @@ pub fn run() -> anyhow::Result<()> {
     let capabilities = Capabilities::discover()?;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+
+    // Piped/non-interactive stdin or stdout (scripts, tests, CI) falls back to the
+    // line-based flow below so `tonguetyped setup` stays scriptable with plain
+    // newline-separated answers.
+    if stdin.is_terminal() && stdout.is_terminal() {
+        let outcome = console::run(capabilities)?;
+        match outcome {
+            SetupOutcome::Cancelled => {
+                writeln!(stdout, "\nSetup cancelled. No changes were made.")?;
+            }
+            SetupOutcome::Saved => {
+                writeln!(stdout, "\nConfiguration saved.")?;
+                writeln!(
+                    stdout,
+                    "Run `tonguetyped doctor` to check the installation."
+                )?;
+            }
+        }
+        return Ok(());
+    }
+
     let mut stderr = io::stderr();
     let ui = Ui {
         color: stdout.is_terminal() && std::env::var_os("NO_COLOR").is_none(),

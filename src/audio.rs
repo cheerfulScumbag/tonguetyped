@@ -156,6 +156,12 @@ impl AudioRecorder {
     pub fn stop(&mut self) {
         if let Some(stream) = self.stream.take() {
             let _ = stream.pause();
+            // cpal's ALSA backend can panic inside `Stream::drop` itself (not just
+            // its background worker thread) when the worker already died from a
+            // driver quirk on a given device - e.g. a bad `get_htstamp` reading on
+            // some surround-channel ALSA aliases. Catch that here so one
+            // misbehaving device can't take down the whole process.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(stream)));
         }
     }
 
@@ -363,5 +369,28 @@ mod tests {
         let oversampled = input_config_rank(cpal::SampleFormat::I16, 48_000, 48_000, 16_000);
 
         assert!(oversampled > undersampled);
+    }
+
+    // cpal 0.15.3's ALSA backend can panic its background worker thread on some
+    // ALSA capture aliases (e.g. surround channel layouts the hardware doesn't
+    // really support for input); once that worker has died, `Stream::drop`'s own
+    // self-pipe wakeup then panics too, on whichever thread drops the stream.
+    // Skips if this machine doesn't expose the triggering device name.
+    #[test]
+    fn stop_does_not_propagate_worker_thread_panic() {
+        let device_name = "surround40:CARD=Generic,DEV=0";
+        let devices = list_devices().unwrap();
+        if !devices.iter().any(|d| d.name == device_name) {
+            return;
+        }
+        let mut recorder = match AudioRecorder::new(device_name, 16_000, None, None) {
+            Ok(recorder) => recorder,
+            Err(_) => return,
+        };
+        if recorder.start().is_err() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        recorder.stop();
     }
 }

@@ -52,6 +52,17 @@ long-form strategies) have never been exercised against this project's single-sh
 `Session::run` usage. See `data/tt-model-catalog-19/report.md` before widening the
 catalog to a new family.
 
+`setup::run` (`src/setup.rs`) picks between two UIs by checking whether both
+stdin and stdout are a terminal (`IsTerminal`): an interactive Ratatui console
+(`src/setup/console.rs`) when both are a TTY, else the original line-based
+prompt flow in `setup.rs` itself (kept so scripts/tests/CI can still drive
+`tonguetyped setup` with piped newline-separated answers - see
+`tests/setup_cli.rs`). The console's microphone step opens a live
+`audio::AudioRecorder` (with a `level_callback`) on whichever device is
+currently highlighted, not just the confirmed choice, so the VU meter tracks
+list navigation; it's torn down and reopened on every selection change and on
+leaving the step.
+
 A stack-allocated buffer inside an `async fn` is embedded inline in the generated
 state machine across every `.await` point in that function (not heap-allocated), and
 compounds when awaited from other async functions - `src/model.rs`'s SHA-256
