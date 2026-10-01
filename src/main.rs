@@ -116,6 +116,14 @@ async fn main() -> anyhow::Result<()> {
                 let report = doctor::run_doctor(&config).await?;
                 println!("compositor:     {}", report.compositor);
                 println!(
+                    "overlay:        {}",
+                    if report.layer_shell_overlay_available {
+                        "layer-shell available"
+                    } else {
+                        "layer-shell unavailable (falls back to OSD/notification)"
+                    }
+                );
+                println!(
                     "audio:          {}",
                     if report.audio_available {
                         "available"

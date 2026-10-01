@@ -1,6 +1,8 @@
 use crate::config::Config;
+use crate::overlay::OverlayHandle;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackEvent {
@@ -15,18 +17,34 @@ pub trait Feedback: Send + Sync {
     fn send(&self, event: FeedbackEvent, config: &Config);
 }
 
-pub struct DesktopFeedback;
+#[derive(Default)]
+pub struct DesktopFeedback {
+    overlay: Arc<OverlayHandle>,
+}
+
+impl DesktopFeedback {
+    pub fn new() -> Self {
+        Self {
+            overlay: Arc::new(OverlayHandle::new()),
+        }
+    }
+}
 
 impl Feedback for DesktopFeedback {
     fn send(&self, event: FeedbackEvent, config: &Config) {
-        let overlay = config.overlay.clone();
+        let overlay_config = config.overlay.clone();
         let audio = config.audio.clone();
-        if !overlay.enabled && !audio.feedback_sounds {
+        if !overlay_config.enabled && !audio.feedback_sounds {
             return;
         }
 
+        // The overlay's first probe blocks briefly (Wayland connect + one
+        // global-list round trip); every call after that is a non-blocking
+        // channel send. Keep this off the coordinator's state-machine thread
+        // the same way the legacy D-Bus calls below already were.
+        let overlay = self.overlay.clone();
         std::thread::spawn(move || {
-            if overlay.enabled {
+            if overlay_config.enabled && !overlay.try_send(event, &overlay_config) {
                 show_visual(event);
             }
             if audio.feedback_sounds {

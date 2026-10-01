@@ -4,6 +4,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DoctorReport {
     pub compositor: String,
+    pub layer_shell_overlay_available: bool,
     pub audio_available: bool,
     pub audio_devices: Vec<String>,
     pub model_ready: bool,
@@ -22,6 +23,7 @@ pub struct DoctorReport {
 
 pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<DoctorReport> {
     let compositor = detect_compositor();
+    let layer_shell_overlay_available = crate::overlay::probe_available();
     let audio_available = audio::AudioRecorder::new(&config.audio.microphone, 16_000, None, None)
         .and_then(|mut recorder| {
             recorder.start()?;
@@ -63,6 +65,7 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
 
     Ok(DoctorReport {
         compositor,
+        layer_shell_overlay_available,
         audio_available,
         audio_devices,
         model_ready,

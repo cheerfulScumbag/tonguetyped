@@ -69,3 +69,24 @@ compounds when awaited from other async functions - `src/model.rs`'s SHA-256
 verifier hit a real stack overflow from a 1 MiB buffer for exactly this reason
 (fixed at 64 KiB, matching `examples/transcribe_benchmark.rs`'s synchronous hasher).
 Keep buffers inside `async fn` bodies small, or hash on a blocking thread instead.
+
+The visual feedback overlay (`src/overlay.rs`, wired from `feedback.rs`'s
+`DesktopFeedback`) is a `zwlr_layer_shell_v1` surface built on
+`smithay-client-toolkit` (calloop feature only, `xkbcommon` off - no seat/keyboard
+use). `zwlr_layer_shell_v1` is a wlroots-originated protocol, but modern KWin
+advertises it too (confirmed on KWin 6.7 via `wayland-info`); `OverlayHandle::
+try_send` probes for the global once per process (`OnceLock`-cached, same
+probe-then-cache shape as the GPU `backend_info`/`cached_backend_info` split
+above) and `feedback.rs` falls back to the existing Plasma OSD / notification /
+sound chain whenever it's absent (X11 sessions, compositors that never added
+it). The layer surface is created once, lazily, on the first event and kept
+transparent-but-mapped between dictations rather than being torn down, so
+there's no per-dictation Wayland round trip on the stop-to-idle hot path.
+`examples/overlay_preview.rs` cycles or holds each semantic state for manual
+validation on a given compositor (`cargo run --example overlay_preview --
+top-right recording`); screenshotting it requires a compositor-native tool
+(`grim` needs wlr-screencopy, which KWin doesn't have - use `spectacle -b -f -n
+-o out.png` there) and, on a multi-monitor KWin session, checking every
+output's corner, since `output: None` (config's `monitor = "active"`) places
+the surface on whichever output KWin currently considers focused, not
+necessarily the one at the top-left of the combined virtual screen.
