@@ -6,12 +6,13 @@ locally with whisper.cpp, and can type the result into the focused application.
 
 ## Requirements
 
-TongueTyped requires Linux and an ALSA-compatible input device. Desktop shortcut
-activation also requires an XDG Global Shortcuts portal; terminal IPC commands
-remain available without one. Building from source requires Rust, CMake,
-libclang, OpenSSL, pkg-config, ALSA development files, libxdo development
-files, and Wayland client development files (for the optional layer-shell
-overlay described under [Desktop feedback](#desktop-feedback); the daemon
+TongueTyped requires Linux and a PipeWire- or ALSA-compatible input device.
+Desktop shortcut activation also requires an XDG Global Shortcuts portal;
+terminal IPC commands remain available without one. Building from source
+requires Rust, CMake, libclang, OpenSSL, pkg-config, PipeWire and ALSA
+development files, libxdo development files, and Wayland client development
+files (for the optional layer-shell overlay described under
+[Desktop feedback](#desktop-feedback); the daemon
 still runs without a Wayland session, falling back as described there). The
 Nix flake provides these build dependencies:
 
@@ -78,7 +79,8 @@ When both stdin and stdout are a terminal, `setup` opens an interactive Ratatui
 console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc`
 returns to the previous one, and `q` quits without saving. The microphone step
 shows a live input level meter for whichever microphone is currently
-highlighted, so you can compare devices before committing to one. Piped or
+highlighted after navigation settles, so you can compare devices without
+restarting audio capture for every keypress. Piped or
 non-interactive stdin/stdout (scripts, tests, CI) falls back to the original
 line-based prompts, reading newline-separated answers from stdin.
 
@@ -272,9 +274,13 @@ using the official Rust binding for
 cargo build --release --features gpu-vulkan   # or --features gpu-cuda
 ```
 
-Neither feature is enabled by default; a plain `cargo build` is unaffected and
-never links against Vulkan, CUDA, or transcribe-cpp. If both features are
-enabled, CUDA takes priority. Building `gpu-cuda` on NixOS additionally needs
+Neither feature is enabled by Cargo's default feature set, so a plain
+`cargo build` never links against Vulkan, CUDA, or transcribe-cpp. The flake's
+`packages.default` enables `gpu-vulkan`, which gives `nix build` and
+`nix profile install` GPU acceleration on Vulkan-capable systems while keeping
+the tested CPU fallback on systems without a usable GPU or installed GGUF
+model. If both features are enabled, CUDA takes priority. Building `gpu-cuda`
+on NixOS additionally needs
 `cudaPackages.cudatoolkit` and the driver's `/run/opengl-driver/lib` on the
 link path; the flake's devShell and `build.rs` set this up automatically.
 

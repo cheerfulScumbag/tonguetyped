@@ -5,6 +5,7 @@ use rubato::{FftFixedIn, Resampler};
 use std::sync::{Arc, Mutex};
 
 pub struct AudioDevice {
+    pub id: String,
     pub name: String,
     pub is_default: bool,
     pub channels: u16,
@@ -12,21 +13,30 @@ pub struct AudioDevice {
 }
 
 pub fn list_devices() -> anyhow::Result<Vec<AudioDevice>> {
+    #[cfg(target_os = "linux")]
+    let _alsa_errors = alsa::Output::local_error_handler().ok();
     let host = cpal::default_host();
     let default_device = host.default_input_device();
-    let default_name = default_device.as_ref().and_then(|d| d.name().ok());
 
     let mut devices = Vec::new();
     if let Ok(device_list) = host.input_devices() {
         for device in device_list {
-            let name = device.name().unwrap_or_else(|_| "unknown".to_string());
-            let is_default = Some(&name) == default_name.as_ref();
+            let name = device
+                .description()
+                .map(|description| description.name().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let id = device
+                .id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|_| name.clone());
+            let is_default = default_device.as_ref() == Some(&device);
             let config = device.default_input_config().ok();
             devices.push(AudioDevice {
+                id,
                 name,
                 is_default,
                 channels: config.as_ref().map(|c| c.channels()).unwrap_or(0),
-                sample_rate: config.as_ref().map(|c| c.sample_rate().0).unwrap_or(0),
+                sample_rate: config.as_ref().map(|c| c.sample_rate()).unwrap_or(0),
             });
         }
     }
@@ -53,21 +63,25 @@ impl AudioRecorder {
         level_callback: Option<LevelCallback>,
         error_callback: Option<ErrorCallback>,
     ) -> anyhow::Result<Self> {
+        #[cfg(target_os = "linux")]
+        let _alsa_errors = alsa::Output::local_error_handler().ok();
         let host = cpal::default_host();
 
-        let device = if device_name == "default" {
+        let device = if matches!(device_name, "default" | "pipewire") {
             host.default_input_device()
                 .context("no default input device")?
         } else {
-            let mut found = None;
-            if let Ok(devices) = host.input_devices() {
-                for d in devices {
-                    if d.name().map(|n| n == device_name).unwrap_or(false) {
-                        found = Some(d);
-                        break;
-                    }
-                }
-            }
+            let by_id = device_name
+                .parse::<cpal::DeviceId>()
+                .ok()
+                .and_then(|id| host.device_by_id(&id));
+            let found = by_id.or_else(|| {
+                host.input_devices().ok()?.find(|device| {
+                    device
+                        .description()
+                        .is_ok_and(|description| description.name() == device_name)
+                })
+            });
             found.context(format!("input device '{}' not found", device_name))?
         };
 
@@ -84,18 +98,18 @@ impl AudioRecorder {
             .max_by_key(|config| {
                 input_config_rank(
                     config.sample_format(),
-                    config.min_sample_rate().0,
-                    config.max_sample_rate().0,
+                    config.min_sample_rate(),
+                    config.max_sample_rate(),
                     target_rate,
                 )
             })
             .context("no supported input sample format")?;
 
         let channels = config_range.channels();
-        let source_rate = cpal::SampleRate(target_rate.clamp(
-            config_range.min_sample_rate().0,
-            config_range.max_sample_rate().0,
-        ));
+        let source_rate = target_rate.clamp(
+            config_range.min_sample_rate(),
+            config_range.max_sample_rate(),
+        );
         let sample_format = config_range.sample_format();
 
         let config = cpal::StreamConfig {
@@ -105,9 +119,9 @@ impl AudioRecorder {
         };
 
         let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-        let resampler = if source_rate.0 != target_rate {
+        let resampler = if source_rate != target_rate {
             let rs =
-                FftFixedIn::<f32>::new(source_rate.0 as usize, target_rate as usize, 1024, 1, 1)?;
+                FftFixedIn::<f32>::new(source_rate as usize, target_rate as usize, 1024, 1, 1)?;
             Some(Arc::new(Mutex::new(rs)))
         } else {
             None
@@ -124,13 +138,13 @@ impl AudioRecorder {
         };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
-                build_input_stream::<f32>(&device, &config, capture, error_callback)?
+                build_input_stream::<f32>(&device, config, capture, error_callback)?
             }
             cpal::SampleFormat::I16 => {
-                build_input_stream::<i16>(&device, &config, capture, error_callback)?
+                build_input_stream::<i16>(&device, config, capture, error_callback)?
             }
             cpal::SampleFormat::U16 => {
-                build_input_stream::<u16>(&device, &config, capture, error_callback)?
+                build_input_stream::<u16>(&device, config, capture, error_callback)?
             }
             format => anyhow::bail!("unsupported input sample format: {format}"),
         };
@@ -141,7 +155,7 @@ impl AudioRecorder {
             pending,
             resampler,
             source_frames,
-            source_rate: source_rate.0,
+            source_rate,
             target_rate,
         })
     }
@@ -156,12 +170,6 @@ impl AudioRecorder {
     pub fn stop(&mut self) {
         if let Some(stream) = self.stream.take() {
             let _ = stream.pause();
-            // cpal's ALSA backend can panic inside `Stream::drop` itself (not just
-            // its background worker thread) when the worker already died from a
-            // driver quirk on a given device - e.g. a bad `get_htstamp` reading on
-            // some surround-channel ALSA aliases. Catch that here so one
-            // misbehaving device can't take down the whole process.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(stream)));
         }
     }
 
@@ -242,10 +250,10 @@ struct CaptureState {
 
 fn build_input_stream<T>(
     device: &cpal::Device,
-    config: &cpal::StreamConfig,
+    config: cpal::StreamConfig,
     capture: CaptureState,
     error_callback: Option<ErrorCallback>,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample,
     f32: FromSample<T>,
@@ -369,28 +377,5 @@ mod tests {
         let oversampled = input_config_rank(cpal::SampleFormat::I16, 48_000, 48_000, 16_000);
 
         assert!(oversampled > undersampled);
-    }
-
-    // cpal 0.15.3's ALSA backend can panic its background worker thread on some
-    // ALSA capture aliases (e.g. surround channel layouts the hardware doesn't
-    // really support for input); once that worker has died, `Stream::drop`'s own
-    // self-pipe wakeup then panics too, on whichever thread drops the stream.
-    // Skips if this machine doesn't expose the triggering device name.
-    #[test]
-    fn stop_does_not_propagate_worker_thread_panic() {
-        let device_name = "surround40:CARD=Generic,DEV=0";
-        let devices = list_devices().unwrap();
-        if !devices.iter().any(|d| d.name == device_name) {
-            return;
-        }
-        let mut recorder = match AudioRecorder::new(device_name, 16_000, None, None) {
-            Ok(recorder) => recorder,
-            Err(_) => return,
-        };
-        if recorder.start().is_err() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        recorder.stop();
     }
 }
