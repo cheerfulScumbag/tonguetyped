@@ -271,9 +271,10 @@ where
             capture.process(&converted);
         },
         move |error| {
-            tracing::error!("audio stream error: {}", error);
             if let Some(callback) = &error_callback {
                 callback(error.to_string());
+            } else {
+                tracing::error!("audio stream error: {}", error);
             }
         },
         None,

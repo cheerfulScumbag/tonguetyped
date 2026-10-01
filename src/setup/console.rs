@@ -97,6 +97,7 @@ struct ConsoleState {
     mic_recorder_index: Option<usize>,
     mic_restart_at: Option<Instant>,
     mic_error: Option<String>,
+    mic_stream_error: Arc<Mutex<Option<String>>>,
 }
 
 impl ConsoleState {
@@ -143,6 +144,7 @@ impl ConsoleState {
             mic_recorder_index: None,
             mic_restart_at: None,
             mic_error: None,
+            mic_stream_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -392,6 +394,9 @@ impl ConsoleState {
             *level = 0.0;
         }
         self.mic_error = None;
+        if let Ok(mut guard) = self.mic_stream_error.lock() {
+            *guard = None;
+        }
         let device_name = self.capabilities.microphones[self.mic_selection].0.clone();
         let level = self.mic_level.clone();
         let callback: audio::LevelCallback = Arc::new(move |value| {
@@ -399,7 +404,14 @@ impl ConsoleState {
                 *guard = value;
             }
         });
-        match audio::AudioRecorder::new(&device_name, 16_000, Some(callback), None) {
+        let stream_error = self.mic_stream_error.clone();
+        let error_callback: audio::ErrorCallback = Arc::new(move |message| {
+            if let Ok(mut guard) = stream_error.lock() {
+                *guard = Some(message);
+            }
+        });
+        match audio::AudioRecorder::new(&device_name, 16_000, Some(callback), Some(error_callback))
+        {
             Ok(mut recorder) => match recorder.start() {
                 Ok(()) => self.mic_recorder = Some(recorder),
                 Err(err) => self.mic_error = Some(err.to_string()),
@@ -420,6 +432,11 @@ impl ConsoleState {
     }
 
     fn refresh_mic_monitor(&mut self) {
+        let stream_error = self.mic_stream_error.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(message) = stream_error {
+            self.mic_error = Some(message);
+            self.mic_recorder = None;
+        }
         if self
             .mic_restart_at
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -761,6 +778,27 @@ mod tests {
         assert_eq!(state.mic_selection, 2);
         assert_eq!(state.mic_recorder_index, None);
         assert!(state.mic_restart_at.is_some());
+    }
+
+    #[test]
+    fn async_stream_error_is_routed_into_the_mic_error_panel_instead_of_the_terminal() {
+        let capabilities = Capabilities {
+            microphones: vec![("test-mic-1".to_string(), "Test microphone 1".to_string())],
+            typing_backends: Vec::new(),
+        };
+        let mut state = ConsoleState::new(Config::default(), capabilities);
+        state.step = StepKind::Microphone;
+        state.mic_recorder_index = Some(0);
+
+        // Simulate what AudioRecorder's error_callback does from its background
+        // audio thread when a device disconnects mid-stream.
+        *state.mic_stream_error.lock().unwrap() = Some("Device disconnected".to_string());
+
+        state.refresh_mic_monitor();
+
+        assert_eq!(state.mic_error, Some("Device disconnected".to_string()));
+        assert!(state.mic_recorder.is_none());
+        assert!(state.mic_stream_error.lock().unwrap().is_none());
     }
 
     #[test]
