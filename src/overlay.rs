@@ -10,10 +10,11 @@
 //! idle latency note).
 //!
 //! `zwlr_layer_shell_v1` originated as a wlroots protocol extension (this
-//! project validates against Mango, a wlroots-based compositor), but modern
-//! KWin advertises it too (confirmed on KWin 6.7 via `wayland-info`), so on
-//! most current KDE Plasma Wayland sessions this overlay renders directly
-//! rather than falling back. The fallback chain still matters for X11
+//! project is code-reviewed, but not live-validated, against Mango, a
+//! wlroots-based compositor), but modern KWin advertises it too (confirmed
+//! and live-validated on KDE Plasma 6.7 via `wayland-info`), so on most
+//! current KDE Plasma Wayland sessions this overlay renders directly rather
+//! than falling back. The fallback chain still matters for X11
 //! sessions and any compositor that doesn't advertise the global: there,
 //! [`OverlayHandle::try_send`] returns `false` after one cheap failed probe
 //! and `feedback.rs` falls back to the existing Plasma OSD / notification /

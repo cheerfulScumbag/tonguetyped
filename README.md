@@ -140,9 +140,9 @@ positioned by `overlay.position` (`top-left`, `top-right`, `bottom-left`,
 `bottom-right`, `top`, `bottom`, or `center`) and `overlay.monitor` (`active`,
 or a specific output name from `tonguetyped doctor`). `zwlr_layer_shell_v1` is
 a wlroots-originated protocol; it is available on wlroots-based compositors
-(validated against Mango) and on modern KWin (validated against KDE Plasma
-6.7+), but not on X11 sessions or older/other compositors that never
-advertise it. Where it is unavailable, TongueTyped falls back to Plasma's
+(code-reviewed against Mango, but not live-validated) and on modern KWin
+(validated against KDE Plasma 6.7+), but not on X11 sessions or older/other
+compositors that never advertise it. Where it is unavailable, TongueTyped falls back to Plasma's
 native OSD on KDE, then a transient freedesktop notification -- in that
 fallback tier, the desktop environment controls placement and monitor
 selection, so `overlay.position`/`overlay.monitor` have no effect. Run
