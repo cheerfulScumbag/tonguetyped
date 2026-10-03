@@ -32,7 +32,6 @@
           libclang
           pkg-config
           alsa-lib
-          pipewire
           spirv-headers
           xdotool
           openssl
@@ -88,7 +87,6 @@
         buildInputs = with pkgs; [
           alsa-lib
           onnxruntime
-          pipewire
           spirv-headers
           xdotool
           openssl

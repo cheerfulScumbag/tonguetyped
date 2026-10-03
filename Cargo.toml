@@ -14,7 +14,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 sha2 = "0.10"
-cpal = { version = "0.18.2", features = ["pipewire"] }
+cpal = "0.18.2"
 alsa = "0.11"
 rubato = "0.15"
 transcribe-rs = { version = "=0.3.11", features = ["whisper-cpp"] }

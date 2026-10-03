@@ -67,7 +67,7 @@ impl AudioRecorder {
         let _alsa_errors = alsa::Output::local_error_handler().ok();
         let host = cpal::default_host();
 
-        let device = if matches!(device_name, "default" | "pipewire") {
+        let device = if device_name == "default" {
             host.default_input_device()
                 .context("no default input device")?
         } else {

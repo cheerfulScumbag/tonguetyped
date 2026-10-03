@@ -63,8 +63,7 @@ prompt flow in `setup.rs` itself (kept so scripts/tests/CI can still drive
 `audio::AudioRecorder` (with a `level_callback`) on whichever device remains
 highlighted after a short navigation settle period, not just the confirmed
 choice. The delay prevents rapid stream teardown and recreation while retaining
-the live VU preview. Linux builds prefer CPAL's native PipeWire host and fall
-back to ALSA when PipeWire is unavailable.
+the live VU preview.
 
 A stack-allocated buffer inside an `async fn` is embedded inline in the generated
 state machine across every `.await` point in that function (not heap-allocated), and

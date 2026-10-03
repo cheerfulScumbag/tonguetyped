@@ -6,11 +6,10 @@ locally with whisper.cpp, and can type the result into the focused application.
 
 ## Requirements
 
-TongueTyped requires Linux and a PipeWire- or ALSA-compatible input device.
-Desktop shortcut activation also requires an XDG Global Shortcuts portal;
-terminal IPC commands remain available without one. Building from source
-requires Rust, CMake, libclang, OpenSSL, pkg-config, PipeWire and ALSA
-development files, libxdo development files, and Wayland client development
+TongueTyped requires Linux and an ALSA-compatible input device. Desktop shortcut
+activation also requires an XDG Global Shortcuts portal; terminal IPC commands
+remain available without one. Building from source requires Rust, CMake,
+libclang, OpenSSL, pkg-config, ALSA development files, libxdo development
 files (for the optional layer-shell overlay described under
 [Desktop feedback](#desktop-feedback); the daemon
 still runs without a Wayland session, falling back as described there). The
