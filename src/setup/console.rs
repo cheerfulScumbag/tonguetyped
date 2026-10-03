@@ -425,6 +425,9 @@ impl ConsoleState {
         self.mic_recorder = None;
         self.mic_recorder_index = None;
         self.mic_error = None;
+        if let Ok(mut guard) = self.mic_stream_error.lock() {
+            *guard = None;
+        }
         if let Ok(mut level) = self.mic_level.lock() {
             *level = 0.0;
         }
@@ -799,6 +802,32 @@ mod tests {
         assert_eq!(state.mic_error, Some("Device disconnected".to_string()));
         assert!(state.mic_recorder.is_none());
         assert!(state.mic_stream_error.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn switching_mic_selection_discards_the_previous_device_stream_error() {
+        let capabilities = Capabilities {
+            microphones: vec![
+                ("test-mic-1".to_string(), "Test microphone 1".to_string()),
+                ("test-mic-2".to_string(), "Test microphone 2".to_string()),
+            ],
+            typing_backends: Vec::new(),
+        };
+        let mut state = ConsoleState::new(Config::default(), capabilities);
+        state.step = StepKind::Microphone;
+        state.mic_recorder_index = Some(0);
+
+        // Device 0 reports an async error from its background audio thread, but
+        // the user navigates to device 1 before refresh_mic_monitor() drains it.
+        *state.mic_stream_error.lock().unwrap() = Some("Device 0 disconnected".to_string());
+        state.move_selection(1);
+
+        assert_eq!(state.mic_selection, 1);
+        assert!(state.mic_stream_error.lock().unwrap().is_none());
+
+        state.refresh_mic_monitor();
+
+        assert_eq!(state.mic_error, None);
     }
 
     #[test]
