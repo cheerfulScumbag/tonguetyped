@@ -16,19 +16,32 @@ impl Capabilities {
             "System default microphone".to_string(),
         )];
         for device in crate::audio::list_devices()? {
-            if !microphones.iter().any(|(value, _)| value == &device.name) {
+            if !microphones.iter().any(|(value, _)| value == &device.id) {
                 let detail = if device.is_default {
                     format!("{} (current default)", device.name)
                 } else {
                     device.name.clone()
                 };
-                microphones.push((device.name, detail));
+                microphones.push((device.id, detail));
             }
         }
         Ok(Self {
             microphones,
             typing_backends: crate::output::list_available_backends(),
         })
+    }
+
+    fn microphone_index(&self, selected: &str) -> usize {
+        self.microphones
+            .iter()
+            .position(|(value, label)| {
+                value == selected
+                    || label == selected
+                    || label
+                        .strip_suffix(" (current default)")
+                        .is_some_and(|name| name == selected)
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -144,11 +157,7 @@ fn configure(
         .iter()
         .map(|(_, label)| label.clone())
         .collect();
-    let microphone_default = capabilities
-        .microphones
-        .iter()
-        .position(|(value, _)| value == &config.audio.microphone)
-        .unwrap_or(0);
+    let microphone_default = capabilities.microphone_index(&config.audio.microphone);
     let Some(microphone) = choose(
         input,
         output,
@@ -425,5 +434,25 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn microphone_selection_accepts_stable_ids_and_legacy_names() {
+        let capabilities = Capabilities {
+            microphones: vec![
+                ("default".into(), "System default microphone".into()),
+                ("pipewire:usb-source".into(), "USB Microphone".into()),
+                (
+                    "pipewire:default-source".into(),
+                    "Built-in Audio (current default)".into(),
+                ),
+            ],
+            typing_backends: Vec::new(),
+        };
+
+        assert_eq!(capabilities.microphone_index("pipewire:usb-source"), 1);
+        assert_eq!(capabilities.microphone_index("USB Microphone"), 1);
+        assert_eq!(capabilities.microphone_index("Built-in Audio"), 2);
+        assert_eq!(capabilities.microphone_index("missing microphone"), 0);
     }
 }

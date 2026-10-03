@@ -32,6 +32,7 @@
           libclang
           pkg-config
           alsa-lib
+          spirv-headers
           xdotool
           openssl
           # libwayland-client.so: the layer-shell overlay's Wayland connection
@@ -51,6 +52,7 @@
         shellHook = ''
           export RUST_BACKTRACE=1
           export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
+          export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.glibc.dev}/include"
           export CMAKE_POLICY_VERSION_MINIMUM=3.5
           export CUDAToolkit_ROOT="${pkgs.cudaPackages.cudatoolkit}"
           # NixOS doesn't put CUDA (or the driver's libcuda.so) on the default
@@ -79,17 +81,27 @@
           libclang
           makeWrapper
           pkg-config
+          shaderc
         ];
 
         buildInputs = with pkgs; [
           alsa-lib
           onnxruntime
+          spirv-headers
           xdotool
           openssl
           wayland
+          vulkan-headers
+          vulkan-loader
         ];
 
+        # Vulkan works across GPU vendors, and InferenceEngine falls back to
+        # the CPU backend when Vulkan or its separately installed model is
+        # unavailable. CUDA remains an explicit developer build.
+        buildFeatures = ["gpu-vulkan"];
+
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+        BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.glibc.dev}/include";
         CMAKE_POLICY_VERSION_MINIMUM = "3.5";
         ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
         ORT_PREFER_DYNAMIC_LINK = "1";

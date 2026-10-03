@@ -29,7 +29,9 @@ vad-rs (Silero VAD), rusqlite (history). See Cargo.toml for full dep list.
 Inference has an optional GPU path behind `InferenceEngine` (`src/inference.rs`,
 `src/inference/gpu.rs`): the `gpu-vulkan`/`gpu-cuda` Cargo features add the
 `transcribe-cpp` binding (github.com/handy-computer/transcribe.cpp), tried first and
-falling back to the tested CPU path on any failure. Neither is enabled by default.
+falling back to the tested CPU path on any failure. Cargo's default feature set enables
+neither backend, while `flake.nix`'s `packages.default` enables `gpu-vulkan` for
+`nix build` and `nix profile install`.
 `backend_info()` (blocking, for `doctor`/daemon startup) and `cached_backend_info()`
 (non-blocking, for the per-dictation latency path in `latency.rs`) are deliberately
 separate - the GPU device probe is not free (~100ms first call) and must not land on
@@ -58,10 +60,10 @@ stdin and stdout are a terminal (`IsTerminal`): an interactive Ratatui console
 prompt flow in `setup.rs` itself (kept so scripts/tests/CI can still drive
 `tonguetyped setup` with piped newline-separated answers - see
 `tests/setup_cli.rs`). The console's microphone step opens a live
-`audio::AudioRecorder` (with a `level_callback`) on whichever device is
-currently highlighted, not just the confirmed choice, so the VU meter tracks
-list navigation; it's torn down and reopened on every selection change and on
-leaving the step.
+`audio::AudioRecorder` (with a `level_callback`) on whichever device remains
+highlighted after a short navigation settle period, not just the confirmed
+choice. The delay prevents rapid stream teardown and recreation while retaining
+the live VU preview.
 
 A stack-allocated buffer inside an `async fn` is embedded inline in the generated
 state machine across every `.await` point in that function (not heap-allocated), and

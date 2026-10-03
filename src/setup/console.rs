@@ -9,12 +9,23 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const MIC_PREVIEW_SETTLE_TIME: Duration = Duration::from_millis(250);
+const LOGO: &str = r#"████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗
+╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗
+   ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║
+   ██║   ██║   ██║██║╚██╗██║██║   ██║██║   ██║██╔══╝     ██║     ╚██╔╝  ██╔═══╝ ██╔══╝  ██║  ██║
+   ██║   ╚██████╔╝██║ ╚████║╚██████╔╝╚██████╔╝███████╗   ██║      ██║   ██║     ███████╗██████╔╝
+   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚═╝     ╚══════╝╚═════╝
+
+                              ░▒▓  S P E A K .  T Y P E .  R E P E A T .  ▓▒░"#;
+const LOGO_HEIGHT: u16 = 8;
 
 const ACTIVATION_LABELS: [&str; 2] = [
     "Hold the shortcut while speaking",
@@ -84,7 +95,9 @@ struct ConsoleState {
     mic_level: Arc<Mutex<f32>>,
     mic_recorder: Option<audio::AudioRecorder>,
     mic_recorder_index: Option<usize>,
+    mic_restart_at: Option<Instant>,
     mic_error: Option<String>,
+    mic_stream_error: Arc<Mutex<Option<String>>>,
 }
 
 impl ConsoleState {
@@ -97,11 +110,7 @@ impl ConsoleState {
             .iter()
             .position(|name| name == &config.model.selected)
             .unwrap_or(0);
-        let mic_selection = capabilities
-            .microphones
-            .iter()
-            .position(|(value, _)| value == &config.audio.microphone)
-            .unwrap_or(0);
+        let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = output_labels(&capabilities);
         let output_selection =
@@ -133,7 +142,9 @@ impl ConsoleState {
             mic_level: Arc::new(Mutex::new(0.0)),
             mic_recorder: None,
             mic_recorder_index: None,
+            mic_restart_at: None,
             mic_error: None,
+            mic_stream_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -142,6 +153,7 @@ impl ConsoleState {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> anyhow::Result<SetupOutcome> {
         loop {
+            self.refresh_mic_monitor();
             terminal.draw(|frame| self.render(frame))?;
             if event::poll(Duration::from_millis(66))? {
                 if let Event::Key(key) = event::read()? {
@@ -218,9 +230,12 @@ impl ConsoleState {
         if len == 0 {
             return;
         }
-        let index = self.current_index_mut();
-        *index = (*index as i32 + delta).clamp(0, len - 1) as usize;
-        self.sync_mic_monitor();
+        let previous = *self.current_index_mut();
+        let next = (previous as i32 + delta).clamp(0, len - 1) as usize;
+        *self.current_index_mut() = next;
+        if self.step == StepKind::Microphone && next != previous {
+            self.defer_mic_monitor();
+        }
     }
 
     fn current_options_len(&self) -> usize {
@@ -364,6 +379,7 @@ impl ConsoleState {
     /// list, not just the one last confirmed, so switching the selection is audible
     /// feedback before the user commits to it.
     fn sync_mic_monitor(&mut self) {
+        self.mic_restart_at = None;
         if self.step != StepKind::Microphone {
             self.mic_recorder = None;
             self.mic_recorder_index = None;
@@ -378,6 +394,9 @@ impl ConsoleState {
             *level = 0.0;
         }
         self.mic_error = None;
+        if let Ok(mut guard) = self.mic_stream_error.lock() {
+            *guard = None;
+        }
         let device_name = self.capabilities.microphones[self.mic_selection].0.clone();
         let level = self.mic_level.clone();
         let callback: audio::LevelCallback = Arc::new(move |value| {
@@ -385,7 +404,14 @@ impl ConsoleState {
                 *guard = value;
             }
         });
-        match audio::AudioRecorder::new(&device_name, 16_000, Some(callback), None) {
+        let stream_error = self.mic_stream_error.clone();
+        let error_callback: audio::ErrorCallback = Arc::new(move |message| {
+            if let Ok(mut guard) = stream_error.lock() {
+                *guard = Some(message);
+            }
+        });
+        match audio::AudioRecorder::new(&device_name, 16_000, Some(callback), Some(error_callback))
+        {
             Ok(mut recorder) => match recorder.start() {
                 Ok(()) => self.mic_recorder = Some(recorder),
                 Err(err) => self.mic_error = Some(err.to_string()),
@@ -393,6 +419,37 @@ impl ConsoleState {
             Err(err) => self.mic_error = Some(err.to_string()),
         }
         self.mic_recorder_index = Some(self.mic_selection);
+    }
+
+    fn defer_mic_monitor(&mut self) {
+        self.mic_recorder = None;
+        self.mic_recorder_index = None;
+        self.mic_error = None;
+        if let Ok(mut guard) = self.mic_stream_error.lock() {
+            *guard = None;
+        }
+        if let Ok(mut level) = self.mic_level.lock() {
+            *level = 0.0;
+        }
+        self.mic_restart_at = Some(Instant::now() + MIC_PREVIEW_SETTLE_TIME);
+    }
+
+    fn refresh_mic_monitor(&mut self) {
+        let stream_error = self
+            .mic_stream_error
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some(message) = stream_error {
+            self.mic_error = Some(message);
+            self.mic_recorder = None;
+        }
+        if self
+            .mic_restart_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.sync_mic_monitor();
+        }
     }
 
     fn step_title(&self) -> &'static str {
@@ -446,7 +503,7 @@ impl ConsoleState {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
+                Constraint::Length(LOGO_HEIGHT),
                 Constraint::Length(1),
                 Constraint::Min(5),
                 Constraint::Length(1),
@@ -454,12 +511,12 @@ impl ConsoleState {
             .split(area);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "TongueTyped setup",
+            Paragraph::new(Text::styled(
+                LOGO,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
-            ))),
+            )),
             chunks[0],
         );
         frame.render_widget(
@@ -494,7 +551,12 @@ impl ConsoleState {
     fn render_body(&self, frame: &mut Frame, area: Rect) {
         match self.step {
             StepKind::Model => frame.render_widget(
-                list_paragraph(&self.model_values, self.model_selection, self.step_title()),
+                list_paragraph(
+                    &self.model_values,
+                    self.model_selection,
+                    self.step_title(),
+                    area.height,
+                ),
                 area,
             ),
             StepKind::Microphone => self.render_microphone(frame, area),
@@ -503,6 +565,7 @@ impl ConsoleState {
                     &ACTIVATION_LABELS.map(String::from),
                     self.activation_selection,
                     self.step_title(),
+                    area.height,
                 ),
                 area,
             ),
@@ -512,6 +575,7 @@ impl ConsoleState {
                     &self.output_labels,
                     self.output_selection,
                     self.step_title(),
+                    area.height,
                 ),
                 area,
             ),
@@ -520,6 +584,7 @@ impl ConsoleState {
                     &self.backend_values,
                     self.backend_selection,
                     self.step_title(),
+                    area.height,
                 ),
                 area,
             ),
@@ -528,6 +593,7 @@ impl ConsoleState {
                     &STARTUP_LABELS.map(String::from),
                     self.startup_selection,
                     self.step_title(),
+                    area.height,
                 ),
                 area,
             ),
@@ -548,7 +614,12 @@ impl ConsoleState {
             .map(|(_, label)| label.clone())
             .collect();
         frame.render_widget(
-            list_paragraph(&labels, self.mic_selection, self.step_title()),
+            list_paragraph(
+                &labels,
+                self.mic_selection,
+                self.step_title(),
+                chunks[0].height,
+            ),
             chunks[0],
         );
 
@@ -637,7 +708,12 @@ fn output_labels(capabilities: &Capabilities) -> Vec<String> {
     labels
 }
 
-fn list_paragraph<'a>(labels: &[String], selected: usize, title: &'a str) -> Paragraph<'a> {
+fn list_paragraph<'a>(
+    labels: &[String],
+    selected: usize,
+    title: &'a str,
+    height: u16,
+) -> Paragraph<'a> {
     let lines: Vec<Line> = labels
         .iter()
         .enumerate()
@@ -654,7 +730,11 @@ fn list_paragraph<'a>(labels: &[String], selected: usize, title: &'a str) -> Par
             Line::from(Span::styled(text, style))
         })
         .collect();
-    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title))
+    let visible_rows = usize::from(height.saturating_sub(2)).max(1);
+    let scroll = selected.saturating_sub(visible_rows - 1) as u16;
+    Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .scroll((scroll, 0))
 }
 
 fn level_to_ratio(level: f32) -> f64 {
@@ -683,5 +763,85 @@ mod tests {
     fn quiet_signal_is_between_bounds() {
         let ratio = level_to_ratio(0.01);
         assert!(ratio > 0.0 && ratio < 1.0);
+    }
+
+    #[test]
+    fn rapid_mic_navigation_defers_preview_restart_until_selection_settles() {
+        let capabilities = Capabilities {
+            microphones: vec![
+                ("test-mic-1".to_string(), "Test microphone 1".to_string()),
+                ("test-mic-2".to_string(), "Test microphone 2".to_string()),
+                ("test-mic-3".to_string(), "Test microphone 3".to_string()),
+            ],
+            typing_backends: Vec::new(),
+        };
+        let mut state = ConsoleState::new(Config::default(), capabilities);
+        state.step = StepKind::Microphone;
+        state.mic_recorder_index = Some(0);
+
+        state.move_selection(1);
+        state.move_selection(1);
+
+        assert_eq!(state.mic_selection, 2);
+        assert_eq!(state.mic_recorder_index, None);
+        assert!(state.mic_restart_at.is_some());
+    }
+
+    #[test]
+    fn async_stream_error_is_routed_into_the_mic_error_panel_instead_of_the_terminal() {
+        let capabilities = Capabilities {
+            microphones: vec![("test-mic-1".to_string(), "Test microphone 1".to_string())],
+            typing_backends: Vec::new(),
+        };
+        let mut state = ConsoleState::new(Config::default(), capabilities);
+        state.step = StepKind::Microphone;
+        state.mic_recorder_index = Some(0);
+
+        // Simulate what AudioRecorder's error_callback does from its background
+        // audio thread when a device disconnects mid-stream.
+        *state.mic_stream_error.lock().unwrap() = Some("Device disconnected".to_string());
+
+        state.refresh_mic_monitor();
+
+        assert_eq!(state.mic_error, Some("Device disconnected".to_string()));
+        assert!(state.mic_recorder.is_none());
+        assert!(state.mic_stream_error.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn switching_mic_selection_discards_the_previous_device_stream_error() {
+        let capabilities = Capabilities {
+            microphones: vec![
+                ("test-mic-1".to_string(), "Test microphone 1".to_string()),
+                ("test-mic-2".to_string(), "Test microphone 2".to_string()),
+            ],
+            typing_backends: Vec::new(),
+        };
+        let mut state = ConsoleState::new(Config::default(), capabilities);
+        state.step = StepKind::Microphone;
+        state.mic_recorder_index = Some(0);
+
+        // Device 0 reports an async error from its background audio thread, but
+        // the user navigates to device 1 before refresh_mic_monitor() drains it.
+        *state.mic_stream_error.lock().unwrap() = Some("Device 0 disconnected".to_string());
+        state.move_selection(1);
+
+        assert_eq!(state.mic_selection, 1);
+        assert!(state.mic_stream_error.lock().unwrap().is_none());
+
+        state.refresh_mic_monitor();
+
+        assert_eq!(state.mic_error, None);
+    }
+
+    #[test]
+    fn logo_preserves_the_chosen_block_shadow_spacing() {
+        let lines: Vec<_> = LOGO.lines().collect();
+
+        assert_eq!(lines.len(), usize::from(LOGO_HEIGHT));
+        assert!(lines[2].starts_with("   ██║"));
+        assert!(lines[5].starts_with("   ╚═╝"));
+        assert!(lines[6].is_empty());
+        assert!(lines[7].starts_with("                              ░▒▓"));
     }
 }
