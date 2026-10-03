@@ -435,7 +435,11 @@ impl ConsoleState {
     }
 
     fn refresh_mic_monitor(&mut self) {
-        let stream_error = self.mic_stream_error.lock().ok().and_then(|mut guard| guard.take());
+        let stream_error = self
+            .mic_stream_error
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
         if let Some(message) = stream_error {
             self.mic_error = Some(message);
             self.mic_recorder = None;
