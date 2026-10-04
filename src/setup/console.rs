@@ -108,13 +108,13 @@ struct ConsoleState {
 
 impl ConsoleState {
     fn new(config: Config, capabilities: Capabilities) -> Self {
-        let model_values: Vec<String> = crate::model::ModelCatalog::model_names()
+        let model_values: Vec<String> = crate::catalog::ENTRIES
             .iter()
-            .map(|name| (*name).to_string())
+            .map(|entry| entry.id.to_string())
             .collect();
         let model_selection = model_values
             .iter()
-            .position(|name| name == &config.model.selected)
+            .position(|name| name == &config.model.active_model)
             .unwrap_or(0);
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
@@ -354,7 +354,7 @@ impl ConsoleState {
     fn advance(&mut self) -> anyhow::Result<ControlFlow> {
         match self.step {
             StepKind::Model => {
-                self.config.model.selected = self.model_values[self.model_selection].clone();
+                self.config.model.active_model = self.model_values[self.model_selection].clone();
                 self.download_queue = super::model_requirements(&self.config)
                     .into_iter()
                     .filter(|requirement| !requirement.already_present)
@@ -809,7 +809,7 @@ impl ConsoleState {
 
     fn render_confirm(&self, frame: &mut Frame, area: Rect) {
         let lines = vec![
-            Line::from(format!("Model:       {}", self.config.model.selected)),
+            Line::from(format!("Model:       {}", self.config.model.active_model)),
             Line::from(format!("Microphone:  {}", self.config.audio.microphone)),
             Line::from(format!(
                 "Activation:  {} with {}",
@@ -910,7 +910,7 @@ mod tests {
         state.download_queue = vec![crate::setup::ModelRequirement {
             label: "second-model".to_string(),
             already_present: false,
-            kind: crate::setup::ModelKind::Cpu("whisper-small-q5_1".to_string()),
+            id: "whisper-small-q5_k_m".to_string(),
         }];
 
         state.refresh_downloads();

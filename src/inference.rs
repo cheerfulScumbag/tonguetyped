@@ -1,9 +1,19 @@
+//! Single GGUF inference module, built on the `transcribe-cpp` Rust binding for
+//! [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp). One
+//! library, one GGUF model format, and one code path handles every backend:
+//! CPU, Vulkan, CUDA, ROCm, and Metal (whichever the current build was
+//! compiled with - see the `gpu-vulkan`/`gpu-cuda`/`gpu-rocm`/`gpu-metal`
+//! Cargo features). `InferenceEngine::load` always requests an explicit
+//! backend, in a fixed priority order, never `transcribe_cpp::Backend::Auto` -
+//! an accelerator whose feature wasn't compiled in simply isn't natively
+//! satisfiable and `Model::load_with` returns `Error::Backend`, so the same
+//! unconditional priority list works correctly on every build without any
+//! `cfg` gating of its own. Every attempt - accelerator or CPU - loads the
+//! exact same GGUF file (`InferenceEngine::new`'s `model_path`): fallback
+//! never substitutes a different model.
+
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams, WhisperLoadParams};
-
-#[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-mod gpu;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct BackendInfo {
@@ -11,203 +21,210 @@ pub struct BackendInfo {
     pub device: String,
 }
 
-pub fn backend_info() -> BackendInfo {
-    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-    if let Some(info) = gpu::probe_backend_info() {
-        return info;
-    }
+/// Backends `InferenceEngine::load` requests, in priority order, before the
+/// unconditional final `Cpu` entry. Never includes `Backend::Auto`: an
+/// explicit request is the only way to know (via a clean `Error::Backend`,
+/// rather than silent native rerouting) whether a given backend was actually
+/// used, which is what makes the CPU fallback deterministic and testable.
+const ACCELERATOR_PRIORITY: &[(transcribe_cpp::Backend, &str)] = &[
+    (transcribe_cpp::Backend::Cuda, "cuda"),
+    (transcribe_cpp::Backend::Rocm, "rocm"),
+    (transcribe_cpp::Backend::Vulkan, "vulkan"),
+    (transcribe_cpp::Backend::Metal, "metal"),
+];
 
-    // The CPU path always loads with use_gpu: false (see `load`), so this is
-    // never anything but the CPU backend/device.
-    cpu_backend_info()
+static CAPABILITY_PROBE: std::sync::OnceLock<BackendInfo> = std::sync::OnceLock::new();
+
+/// Hardware-capability probe: which backend this build and host would use for
+/// a model that loads cleanly, without actually loading one. Blocks on the
+/// first call (enumerating non-CPU devices is a real, non-free native call -
+/// tens of milliseconds), then serves a memoized result instantly, since
+/// backend availability cannot change over a process's lifetime. Use
+/// `cached_backend_info` instead from a hot path that cannot afford that
+/// first-call cost.
+pub fn backend_info() -> BackendInfo {
+    CAPABILITY_PROBE.get_or_init(detect_capability).clone()
 }
 
-fn cpu_backend_info() -> BackendInfo {
+/// Non-blocking counterpart to `backend_info`: serves the memoized result
+/// once warm, or a `"detecting"` placeholder before the first `backend_info`
+/// call completes. `Coordinator::new` warms the real probe in the background,
+/// so the placeholder should only ever surface very early in process startup.
+pub fn cached_backend_info() -> BackendInfo {
+    CAPABILITY_PROBE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| BackendInfo {
+            backend: "detecting".to_string(),
+            device: "unknown".to_string(),
+        })
+}
+
+fn detect_capability() -> BackendInfo {
+    for (backend, kind) in ACCELERATOR_PRIORITY {
+        if transcribe_cpp::backend_available(*backend) {
+            return BackendInfo {
+                backend: format!("transcribe.cpp/{kind}"),
+                device: device_description(kind).unwrap_or_else(|| "unknown".to_string()),
+            };
+        }
+    }
     BackendInfo {
-        backend: "whisper.cpp/cpu".to_string(),
+        backend: "transcribe.cpp/cpu".to_string(),
         device: "CPU".to_string(),
     }
 }
 
-/// Like `backend_info`, but never blocks on a not-yet-warmed GPU device
-/// probe - returns a "detecting" placeholder instead. Use this from hot
-/// paths (per-dictation latency reporting) where a native GPU enumeration
-/// call costing on the order of 100ms would itself distort the very
-/// stop-to-idle latency being measured. `Coordinator::new` warms the real
-/// probe in the background, so the placeholder should only ever surface for
-/// a dictation that finishes within that narrow startup window.
-#[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-pub fn cached_backend_info() -> BackendInfo {
-    match gpu::cached_backend_info_if_ready() {
-        Some(Some(info)) => info,
-        Some(None) => cpu_backend_info(),
-        None => BackendInfo {
-            backend: "detecting".to_string(),
-            device: "unknown".to_string(),
-        },
+fn device_description(kind: &str) -> Option<String> {
+    transcribe_cpp::devices()
+        .into_iter()
+        .find(|device| device.kind == kind)
+        .map(|device| non_empty(device.description).unwrap_or(device.name))
+}
+
+/// Below this much free device memory, another process is plausibly
+/// contending for the accelerator and a benchmark result on it should not be
+/// trusted as a clean baseline. The whisper-small GGUF model plus its
+/// KV/compute buffers need on the order of a few hundred MB; 1 GiB is a
+/// conservative floor.
+const MIN_FREE_ACCELERATOR_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Flags whichever accelerator this build and host would use (per
+/// `backend_info`) if it currently has suspiciously little free device
+/// memory, so a benchmark run isn't reported as a clean baseline. `None` on a
+/// CPU-only build or host, or when the device has headroom.
+pub fn accelerator_competing_load_warning() -> Option<String> {
+    for (backend, kind) in ACCELERATOR_PRIORITY {
+        if !transcribe_cpp::backend_available(*backend) {
+            continue;
+        }
+        let device = transcribe_cpp::devices()
+            .into_iter()
+            .find(|device| device.kind == *kind)?;
+        if device.memory_total == 0 || device.memory_free >= MIN_FREE_ACCELERATOR_BYTES {
+            return None;
+        }
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        return Some(format!(
+            "pre-run transcribe.cpp/{kind} device '{}' had {:.2} GiB free of {:.2} GiB total; do not use this result as a release threshold",
+            device.description,
+            device.memory_free as f64 / GIB,
+            device.memory_total as f64 / GIB,
+        ));
     }
+    None
 }
 
-#[cfg(not(any(feature = "gpu-vulkan", feature = "gpu-cuda")))]
-pub fn cached_backend_info() -> BackendInfo {
-    cpu_backend_info()
+fn non_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
-/// A GPU-benchmark counterpart to a CPU competing-load check: flags a GPU
-/// backend build whose device is currently short on free memory, so a
-/// contended run isn't reported as a clean baseline. `None` when no GPU
-/// feature is compiled in, or the device has enough headroom.
-#[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-pub fn gpu_competing_load_warning() -> Option<String> {
-    gpu::competing_load_warning()
-}
-
-enum Backend {
-    Cpu(WhisperEngine),
-    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-    Gpu(gpu::GpuEngine),
+struct LoadedSession {
+    session: transcribe_cpp::Session,
+    backend: BackendInfo,
 }
 
 pub struct InferenceEngine {
-    engine: Option<Backend>,
+    session: Option<LoadedSession>,
     model_path: PathBuf,
-    // Only read by the GPU backend's `load` call below; a default build
-    // compiles neither `gpu-vulkan` nor `gpu-cuda`, so this field is unused.
-    #[cfg_attr(
-        not(any(feature = "gpu-vulkan", feature = "gpu-cuda")),
-        allow(dead_code)
-    )]
-    gpu_model_id: String,
 }
 
 impl InferenceEngine {
     pub fn new(model_path: PathBuf) -> Self {
-        Self::with_gpu_model(model_path, crate::catalog::DEFAULT_GPU_MODEL_ID.to_string())
-    }
-
-    /// Like `new`, but selects which catalog entry (see `crate::catalog`) the
-    /// GPU backend (`gpu-vulkan`/`gpu-cuda`) tries first, instead of the
-    /// default. Has no effect on a build without a GPU feature enabled, or
-    /// when the CPU fallback is used because the GPU model isn't installed.
-    pub fn with_gpu_model(model_path: PathBuf, gpu_model_id: String) -> Self {
         InferenceEngine {
-            engine: None,
+            session: None,
             model_path,
-            gpu_model_id,
         }
     }
 
     pub fn load(&mut self) -> anyhow::Result<()> {
-        if self.engine.is_some() {
+        if self.session.is_some() {
             return Ok(());
         }
-
-        #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-        match gpu::GpuEngine::load(&self.gpu_model_id) {
-            Ok(engine) => {
-                self.engine = Some(Backend::Gpu(engine));
-                return Ok(());
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "GPU inference backend ({}) unavailable, falling back to CPU: {err:#}",
-                    gpu::BACKEND_NAME
-                );
-            }
-        }
-
         if !self.model_path.exists() {
             anyhow::bail!("model file not found: {}", self.model_path.display());
         }
 
-        // Force use_gpu: false. whisper-rs otherwise auto-detects any GPU
-        // backend (Vulkan/CUDA/Metal) it was linked against and prefers it,
-        // which would make this "CPU fallback" only ever tested as CPU by
-        // accident of which libraries happened to be present at build time -
-        // exactly the ambiguity a tested fallback must not have. See the
-        // slice 2 GPU benchmark writeup for the crash this caused before the
-        // fix (whisper.cpp's own opportunistic Vulkan use hit an
-        // out-of-device-memory abort under contended VRAM).
-        let params = WhisperLoadParams {
-            use_gpu: false,
+        let session_options = transcribe_cpp::SessionOptions {
+            n_threads: Self::cpu_threads(),
             ..Default::default()
         };
-        let engine = WhisperEngine::load_with_params(&self.model_path, params)
-            .context("failed to create WhisperEngine")?;
 
-        self.engine = Some(Backend::Cpu(engine));
-        Ok(())
+        let mut last_error: Option<anyhow::Error> = None;
+        for backend in Self::backend_candidates() {
+            let model = match transcribe_cpp::Model::load_with(
+                &self.model_path,
+                &transcribe_cpp::ModelOptions {
+                    backend,
+                    device: None,
+                },
+            ) {
+                Ok(model) => model,
+                Err(error) => {
+                    if backend != transcribe_cpp::Backend::Cpu {
+                        tracing::warn!(
+                            "inference backend {backend:?} unavailable, trying next: {error:#}"
+                        );
+                    }
+                    last_error = Some(error.into());
+                    continue;
+                }
+            };
+            match model.session_with(&session_options) {
+                Ok(session) => {
+                    self.session = Some(LoadedSession {
+                        backend: describe_loaded_backend(&model),
+                        session,
+                    });
+                    return Ok(());
+                }
+                Err(error) => {
+                    last_error = Some(error.into());
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no inference backend available")))
+            .context("failed to create inference session")
+    }
+
+    /// Every backend this engine will try, in priority order, ending with the
+    /// unconditional, always-available explicit CPU backend.
+    fn backend_candidates() -> impl Iterator<Item = transcribe_cpp::Backend> {
+        ACCELERATOR_PRIORITY
+            .iter()
+            .map(|(backend, _)| *backend)
+            .chain(std::iter::once(transcribe_cpp::Backend::Cpu))
     }
 
     pub fn unload(&mut self) {
-        self.engine = None;
+        self.session = None;
     }
 
     pub fn transcribe(&mut self, audio: &[f32], language: &str) -> anyhow::Result<String> {
-        match self.engine.as_mut().context("engine not loaded")? {
-            Backend::Cpu(engine) => {
-                let options = WhisperInferenceParams {
-                    language: (language != "auto").then(|| language.to_string()),
-                    n_threads: Self::cpu_threads(),
-                    ..Default::default()
-                };
-                let result = engine
-                    .transcribe_with(audio, &options)
-                    .context("transcription failed")?;
-                Ok(result.text)
-            }
-            #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-            Backend::Gpu(engine) => engine.transcribe(audio, language),
-        }
+        let loaded = self.session.as_mut().context("engine not loaded")?;
+        let options = transcribe_cpp::RunOptions {
+            language: (language != "auto").then(|| language.to_string()),
+            ..Default::default()
+        };
+        let transcript = loaded
+            .session
+            .run(audio, &options)
+            .context("transcription failed")?;
+        Ok(transcript.text)
     }
 
-    /// The model file actually backing the loaded engine: the GPU GGUF model
-    /// when a GPU backend loaded, otherwise the CPU model passed to `new`.
-    /// Benchmark tooling should hash and report this path, not the CLI's
-    /// input model argument, since a GPU build may silently be running a
-    /// different file than the one requested.
+    /// The GGUF file backing the loaded engine - always the exact path passed
+    /// to `new`, on every backend: fallback never substitutes a different
+    /// model file or family.
     pub fn active_model_path(&self) -> Option<&Path> {
-        match self.engine.as_ref()? {
-            Backend::Cpu(_) => Some(&self.model_path),
-            #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-            Backend::Gpu(engine) => Some(engine.model_path()),
-        }
+        self.session.is_some().then_some(self.model_path.as_path())
     }
 
-    /// The backend/device that actually backed the loaded engine, as opposed
-    /// to `backend_info()`'s hardware-capability probe: this reflects `load`'s
-    /// real GPU-then-CPU-fallback outcome (e.g. `None` for the GPU model file,
-    /// which forces the CPU fallback even on GPU-capable hardware). Blocks on
-    /// an unwarmed GPU device probe like `backend_info` does; use this from
-    /// callers that already tolerate that cost (e.g. `doctor`). Per-dictation
-    /// latency reporting, which cannot, uses `cached_active_backend_info`
-    /// instead.
+    /// The backend/device that actually backed the loaded engine - the real
+    /// outcome of `load`'s accelerator-then-CPU-fallback chain, as opposed to
+    /// `backend_info()`'s hardware-capability probe.
     pub fn active_backend_info(&self) -> Option<BackendInfo> {
-        match self.engine.as_ref()? {
-            Backend::Cpu(_) => Some(cpu_backend_info()),
-            #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-            Backend::Gpu(_) => Some(gpu::probe_backend_info().unwrap_or_else(|| BackendInfo {
-                backend: gpu::BACKEND_NAME.to_string(),
-                device: "unknown".to_string(),
-            })),
-        }
-    }
-
-    /// Non-blocking counterpart to `active_backend_info`: safe to call from
-    /// the stop-to-idle hot path, like `cached_backend_info`.
-    pub fn cached_active_backend_info(&self) -> Option<BackendInfo> {
-        match self.engine.as_ref()? {
-            Backend::Cpu(_) => Some(cpu_backend_info()),
-            #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-            Backend::Gpu(_) => Some(
-                gpu::cached_backend_info_if_ready()
-                    .flatten()
-                    .unwrap_or_else(|| BackendInfo {
-                        backend: gpu::BACKEND_NAME.to_string(),
-                        device: "unknown".to_string(),
-                    }),
-            ),
-        }
+        self.session.as_ref().map(|loaded| loaded.backend.clone())
     }
 
     pub fn cpu_threads() -> i32 {
@@ -218,6 +235,28 @@ impl InferenceEngine {
         directories::BaseDirs::new()
             .map(|b| b.data_dir().join("tonguetyped").join("models"))
             .ok_or_else(|| anyhow::anyhow!("cannot determine the user data directory"))
+    }
+}
+
+/// Builds `BackendInfo` from a successfully loaded model's own resolved
+/// backend/device - the ground truth for which backend actually ended up
+/// bound, rather than which one was requested. Prefers `Device::kind` over
+/// `Model::backend()` for the category label: the latter was observed in
+/// practice to return device-indexed strings like `"Vulkan0"` (and `"CPU"`
+/// uppercase for the CPU backend) rather than the clean, lowercase vendor
+/// vocabulary (`"cpu"`, `"vulkan"`, `"cuda"`, `"rocm"`, `"metal"`, ...)
+/// `Device::kind` documents and `detect_capability` already uses, so this
+/// keeps both backend-info sources speaking the same vocabulary.
+fn describe_loaded_backend(model: &transcribe_cpp::Model) -> BackendInfo {
+    match model.device() {
+        Ok(device) => BackendInfo {
+            backend: format!("transcribe.cpp/{}", device.kind),
+            device: non_empty(device.description).unwrap_or(device.name),
+        },
+        Err(_) => BackendInfo {
+            backend: format!("transcribe.cpp/{}", model.backend().to_lowercase()),
+            device: "unknown".to_string(),
+        },
     }
 }
 
@@ -239,5 +278,37 @@ mod tests {
     fn cpu_thread_count_does_not_exceed_available_logical_cpus() {
         assert_eq!(cpu_thread_count(8, 16), 8);
         assert_eq!(cpu_thread_count(8, 4), 4);
+    }
+
+    #[test]
+    fn backend_candidates_end_with_explicit_cpu() {
+        assert_eq!(
+            InferenceEngine::backend_candidates().last(),
+            Some(transcribe_cpp::Backend::Cpu)
+        );
+    }
+
+    #[test]
+    fn backend_candidates_never_include_auto() {
+        assert!(InferenceEngine::backend_candidates()
+            .all(|backend| backend != transcribe_cpp::Backend::Auto));
+    }
+
+    #[test]
+    fn load_reports_a_missing_model_file_without_trying_any_backend() {
+        let mut engine = InferenceEngine::new(PathBuf::from(
+            "/nonexistent/tonguetyped-inference-test/missing.gguf",
+        ));
+        let error = engine.load().unwrap_err();
+        assert!(error.to_string().contains("model file not found"));
+        assert!(engine.active_model_path().is_none());
+        assert!(engine.active_backend_info().is_none());
+    }
+
+    #[test]
+    fn unloaded_engine_reports_no_active_model_or_backend() {
+        let engine = InferenceEngine::new(PathBuf::from("irrelevant.gguf"));
+        assert!(engine.active_model_path().is_none());
+        assert!(engine.active_backend_info().is_none());
     }
 }

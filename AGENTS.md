@@ -23,21 +23,34 @@ Format: `cargo fmt --check`  |  Lint: `cargo clippy -- -D warnings`  |  Test: `c
 Single binary `tonguetyped`. CLI via clap dispatches to subcommands. Daemon owns the
 coordinator state machine. Clients connect via Unix-domain socket (newline-delimited JSON).
 
-Key crates: cpal (audio capture), rubato (resampling), transcribe-rs/whisper-cpp (inference),
-vad-rs (Silero VAD), rusqlite (history). See Cargo.toml for full dep list.
+Key crates: cpal (audio capture), rubato (resampling), transcribe-cpp (inference, every
+backend), vad-rs (Silero VAD), rusqlite (history). See Cargo.toml for full dep list.
 
-Inference has an optional GPU path behind `InferenceEngine` (`src/inference.rs`,
-`src/inference/gpu.rs`): the `gpu-vulkan`/`gpu-cuda` Cargo features add the
-`transcribe-cpp` binding (github.com/handy-computer/transcribe.cpp), tried first and
-falling back to the tested CPU path on any failure. Cargo's default feature set enables
-neither backend, while `flake.nix`'s `packages.default` enables `gpu-vulkan` for
-`nix build` and `nix profile install`.
-`backend_info()` (blocking, for `doctor`/daemon startup) and `cached_backend_info()`
-(non-blocking, for the per-dictation latency path in `latency.rs`) are deliberately
-separate - the GPU device probe is not free (~100ms first call) and must not land on
-the stop-to-idle hot path. See `README.md`'s "GPU inference backends" section and
-`data/tt-transcribe-cpp-gpu-18/report.md` for the full story (including a whisper-rs
-GPU auto-detection bug this surfaced) and real Vulkan/CUDA benchmark numbers.
+Inference is one module, `InferenceEngine` (`src/inference.rs`), built entirely on the
+`transcribe-cpp` binding (github.com/handy-computer/transcribe.cpp) - there is no
+separate CPU-only library or legacy GGML model anymore (removed in
+`data/tt-transcribe-cpp-1/report.md`; see it for the full before/after story and real
+CPU/Vulkan/CUDA benchmark+transcript evidence). `load()` always requests an explicit
+backend (never `Backend::Auto`), trying `Cuda`, `Rocm`, `Vulkan`, `Metal`, then the
+unconditional, always-available `Cpu`, all against the one configured GGUF file
+(`config.model.active_model`, resolved via `catalog::model_path`) - a backend whose
+Cargo feature (`gpu-vulkan`/`gpu-cuda`/`gpu-rocm`/`gpu-metal`) wasn't compiled in simply
+isn't natively satisfiable (`Error::Backend`), so this fallback chain needs no `cfg`
+gating and is correct on every build by construction. None of the four features is
+enabled by Cargo's default set, while `flake.nix`'s `packages.default` enables
+`gpu-vulkan` for `nix build`/`nix profile install`.
+Report backend/device by reading the *loaded* model (`Model::device()`), not by
+re-probing: prefer `Device::kind` over `Model::backend()` for the category label -
+the latter returns device-indexed strings in practice (`"Vulkan0"`, uppercase `"CPU"`),
+not the clean lowercase vocabulary (`"cpu"`, `"vulkan"`, ...) its own doc comment
+suggests and `Device::kind` actually documents.
+`backend_info()`/`cached_backend_info()` (the *hardware-capability* probe, used only
+before any model has loaded - `doctor`'s fallback, the daemon startup log) keep the
+prior blocking-vs-non-blocking split: a fresh `backend_available`/`devices()` call is
+not free (~100ms first call) and must not land on the stop-to-idle hot path. Once an
+engine has actually loaded, though, `active_backend_info()` is cheap enough to call
+directly from the hot path (`coordinator.rs`) - the expensive part is backend
+*initialization*, already paid by `Model::load_with`, not the metadata read after.
 
 Building `gpu-cuda` on NixOS needs `cudaPackages.cudatoolkit` and the driver's
 `/run/opengl-driver/lib` (`libcuda.so`) on the link path; `flake.nix`'s devShell and
@@ -45,27 +58,25 @@ the crate-root `build.rs` (scoped to `CARGO_FEATURE_GPU_CUDA`) handle this - `ru
 linker (`rust-lld`, invoked directly) does not honor `LIBRARY_PATH`, only explicit
 `-L`/`-l`, so `cargo:rustc-link-search`/`-lib` in `build.rs` is the fix, not env vars.
 
-The GPU backend's model catalog (`src/catalog.rs`, managed with `tonguetyped model
+The model catalog (`src/catalog.rs`, managed with `tonguetyped model
 {list,install,remove,use}`) is scoped to `family = 'whisper'` GGUF models only, not
-transcribe.cpp's full catalog.db - the CPU path's vendored whisper.cpp checks for the
-legacy `GGML_FILE_MAGIC` and cannot load GGUF at all (any family), and other
-families' output/chunking semantics (diarization, streaming-only, non-whisper
+transcribe.cpp's full catalog.db. The CPU path can now load any family architecturally
+(that's the whole point of the consolidation in `data/tt-transcribe-cpp-1/report.md`),
+but other families' output/chunking semantics (diarization, streaming-only, non-whisper
 long-form strategies) have never been exercised against this project's single-shot
 `Session::run` usage. See `data/tt-model-catalog-19/report.md` before widening the
 catalog to a new family.
 
-Neither `setup.rs`'s line-based flow nor the `nix build`/`nix profile install` GPU
-default made the GGUF catalog model (or even the CPU `.bin`) show up without a manual
-`tonguetyped model install` - `data/tt-transcribe-cpp-gpu-18/report.md` documents that
-as a deliberate choice to keep daemon startup non-blocking, but it meant a fresh
-install silently ran ~2x-realtime CPU inference (confirmed via a real
-`journalctl --user` `tonguetyped::latency` line: `backend=whisper.cpp/cpu
-inference_ms=33792` for one short dictation, vs. the GPU path's sub-second numbers in
-the same report) with no indication why. The setup console (`src/setup.rs`'s
+Neither `setup.rs`'s line-based flow nor the `nix build`/`nix profile install` default
+made the configured GGUF model show up without a manual `tonguetyped model install` -
+`data/tt-transcribe-cpp-gpu-18/report.md` documents that as a deliberate choice to keep
+daemon startup non-blocking, but it meant a fresh install silently ran CPU-only
+inference with no indication why. The setup console (`src/setup.rs`'s
 `model_requirements`/`provision_model_async`, wired into `src/setup/console.rs`'s
-`Downloading` step) now fetches whichever of those two files are missing, with
-progress and errors visible before the wizard finishes; `daemon.rs::prepare_dependencies`
-still only auto-fetches the CPU model at startup, on purpose, per that report.
+`Downloading` step) fetches it when missing, with progress and errors visible before
+the wizard finishes; `daemon.rs::prepare_dependencies` also fetches it synchronously at
+daemon startup if absent (there is only the one file to fetch now, so this is no longer
+the eager-GPU-prefetch tradeoff that report weighed against).
 `model::DownloadManager`'s download methods take an `Option<ProgressCallback>`:
 `None` keeps the existing indicatif terminal bar (CLI, scripted `configure()`); the
 Ratatui console passes `Some` and draws its own `Gauge` instead, since indicatif and
@@ -95,9 +106,10 @@ The visual feedback overlay (`src/overlay.rs`, wired from `feedback.rs`'s
 use). `zwlr_layer_shell_v1` is a wlroots-originated protocol, but modern KWin
 advertises it too (confirmed on KWin 6.7 via `wayland-info`); `OverlayHandle::
 try_send` probes for the global once per process (`OnceLock`-cached, same
-probe-then-cache shape as the GPU `backend_info`/`cached_backend_info` split
-above) and `feedback.rs` falls back to the existing Plasma OSD / notification /
-sound chain whenever it's absent (X11 sessions, compositors that never added
+probe-then-cache shape as the inference module's `backend_info`/
+`cached_backend_info` split above) and `feedback.rs` falls back to the
+existing Plasma OSD / notification / sound chain whenever it's absent (X11
+sessions, compositors that never added
 it). The layer surface is created once, lazily, on the first event and kept
 transparent-but-mapped between dictations rather than being torn down, so
 there's no per-dictation Wayland round trip on the stop-to-idle hot path.
@@ -121,7 +133,7 @@ up the new default.
 
 `output::type_text`'s `typing_backend = "auto"` path now caches which helper
 (`wtype`/`enigo`/`dotool`) actually works via `output::cached_auto_backend`
-(`OnceLock`, same probe-then-cache shape as the GPU and overlay probes above) -
+(`OnceLock`, same probe-then-cache shape as the inference and overlay probes above) -
 `probe_type_backend()`'s subprocess self-tests were re-run on every single
 dictation's output phase before this, measured at just over 2s in the same real
 `journalctl` latency line referenced above.

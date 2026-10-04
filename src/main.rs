@@ -42,7 +42,7 @@ enum Commands {
         #[command(subcommand)]
         command: AutostartCommand,
     },
-    /// Manage the GGUF speech model catalog used by the GPU inference backend
+    /// Manage the GGUF speech model catalog used for inference
     Model {
         #[command(subcommand)]
         command: ModelCommand,
@@ -57,13 +57,13 @@ enum ModelCommand {
     Install {
         /// Catalog model id, e.g. "whisper-small-q5_k_m" (see `model list`)
         id: String,
-        /// Also select the downloaded model as the active GPU inference model
+        /// Also select the downloaded model as the active inference model
         #[arg(long = "use")]
         use_after_install: bool,
     },
     /// Delete a locally installed catalog model
     Remove { id: String },
-    /// Select which installed catalog model the GPU backend loads
+    /// Select which installed catalog model the inference engine loads
     Use { id: String },
 }
 
@@ -144,15 +144,6 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!("model id:       {}", report.model_id);
                 println!("model path:     {}", report.model_path);
-                println!(
-                    "gpu model:      {} ({})",
-                    report.gpu_model_id,
-                    if report.gpu_model_installed {
-                        "installed"
-                    } else {
-                        "not installed"
-                    }
-                );
                 println!("backend:        {}", report.inference_backend);
                 println!("device:         {}", report.inference_device);
                 if let Some(error) = report.model_error {
@@ -218,24 +209,13 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
     match command {
         ModelCommand::List => {
             let config = config::Config::load()?;
-            let cpu_id = &config.model.selected;
-            let cpu_path = model::ModelCatalog::model_path(cpu_id)?;
-            println!(
-                "CPU model (fixed default): {cpu_id} [{}]",
-                if cpu_path.exists() {
-                    "installed"
-                } else {
-                    "not installed"
-                }
-            );
-            println!();
             println!(
                 "{:<32} {:<10} {:>10}  {:<11}  license",
-                "GPU CATALOG MODEL ID", "QUANT", "SIZE", "STATUS"
+                "MODEL ID", "QUANT", "SIZE", "STATUS"
             );
             for entry in catalog::ENTRIES {
                 let installed = catalog::is_installed(entry.id);
-                let status = match (installed, entry.id == config.model.gpu_model) {
+                let status = match (installed, entry.id == config.model.active_model) {
                     (true, true) => "active",
                     (true, false) => "installed",
                     (false, _) => "-",
@@ -271,7 +251,7 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                 }
             }
             if use_after_install {
-                select_gpu_model(&id)?;
+                select_model(&id)?;
             }
         }
         ModelCommand::Remove { id } => {
@@ -279,9 +259,9 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                 anyhow::bail!("unknown catalog model: {id} (see `tonguetyped model list`)");
             }
             let config = config::Config::load()?;
-            if config.model.gpu_model == id {
+            if config.model.active_model == id {
                 anyhow::bail!(
-                    "{id} is the active GPU model; run `tonguetyped model use <other-id>` first"
+                    "{id} is the active model; run `tonguetyped model use <other-id>` first"
                 );
             }
             if model::DownloadManager::remove_catalog_model(&id)? {
@@ -297,17 +277,17 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
             if !catalog::is_installed(&id) {
                 anyhow::bail!("{id} is not installed; run `tonguetyped model install {id}` first");
             }
-            select_gpu_model(&id)?;
+            select_model(&id)?;
         }
     }
     Ok(())
 }
 
-fn select_gpu_model(id: &str) -> anyhow::Result<()> {
+fn select_model(id: &str) -> anyhow::Result<()> {
     let mut config = config::Config::load()?;
-    config.model.gpu_model = id.to_string();
+    config.model.active_model = id.to_string();
     config.save()?;
-    println!("selected {id} as the active GPU inference model");
+    println!("selected {id} as the active inference model");
     Ok(())
 }
 

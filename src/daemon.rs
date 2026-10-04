@@ -32,7 +32,7 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
 
     let backend = crate::inference::backend_info();
     tracing::info!(
-        model_id = %config.model.selected,
+        model_id = %config.model.active_model,
         inference_backend = %backend.backend,
         inference_device = %backend.device,
         "inference configuration"
@@ -78,16 +78,11 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
 
 async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
     let download_manager = crate::model::DownloadManager::new()?;
-    if !crate::model::ModelCatalog::model_path(&config.model.selected)?.exists() {
+    if !crate::catalog::is_installed(&config.model.active_model) {
         download_manager
-            .download(&config.model.selected, None)
+            .install_catalog_model(&config.model.active_model, None)
             .await?;
     }
-    // The GPU model is intentionally not eagerly provisioned here: doing so
-    // would block every daemon startup on a large synchronous download.
-    // InferenceEngine::load already falls back to the tested CPU path with a
-    // warning when it is missing (see src/inference/gpu.rs), so a GPU build
-    // works out of the box, just on CPU until the GGUF model is provisioned.
     if config.transcription.vad_enabled {
         download_manager.ensure_vad_model().await?;
     }

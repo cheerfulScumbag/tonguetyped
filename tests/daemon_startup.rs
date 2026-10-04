@@ -2,6 +2,18 @@ use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Places an empty stub at the default catalog model's resolved path, so
+/// `prepare_dependencies`/`doctor` see it as already installed and these
+/// tests never trigger a real network download.
+fn install_default_model_stub(data_home: &std::path::Path) {
+    let entry = tonguetyped::catalog::find(tonguetyped::catalog::DEFAULT_MODEL_ID).unwrap();
+    std::fs::write(
+        data_home.join("tonguetyped/models").join(entry.filename),
+        [],
+    )
+    .unwrap();
+}
+
 struct Daemon(Child);
 
 impl Drop for Daemon {
@@ -25,7 +37,7 @@ fn ipc_starts_when_shortcut_portal_is_unavailable() {
         "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
     )
     .unwrap();
-    std::fs::write(data_home.join("tonguetyped/models/ggml-small-q5_1.bin"), []).unwrap();
+    install_default_model_stub(&data_home);
 
     let binary = env!("CARGO_BIN_EXE_tonguetyped");
     let child = Command::new(binary)
@@ -168,7 +180,7 @@ fn doctor_distinguishes_invalid_model_from_missing_model() {
         "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
     )
     .unwrap();
-    std::fs::write(data_home.join("tonguetyped/models/ggml-small-q5_1.bin"), []).unwrap();
+    install_default_model_stub(&data_home);
 
     let output = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
         .arg("doctor")
@@ -182,21 +194,112 @@ fn doctor_distinguishes_invalid_model_from_missing_model() {
     assert!(output.status.success());
     assert!(stdout.contains("model:          invalid"));
     assert!(stdout.contains("model error:"));
-    assert!(stdout.contains("model id:       whisper-small-q5_1"));
-    // On a plain build this is always whisper.cpp/cpu. A gpu-vulkan/gpu-cuda
-    // build instead reports whatever backend the host's hardware actually
-    // supports (that's the point of doctor reporting the real backend), so
-    // only the CPU-only build asserts the specific CPU backend/device text.
-    #[cfg(not(any(feature = "gpu-vulkan", feature = "gpu-cuda")))]
+    assert!(stdout.contains(&format!(
+        "model id:       {}",
+        tonguetyped::catalog::DEFAULT_MODEL_ID
+    )));
+    // On a plain build this is always transcribe.cpp/cpu. A gpu-vulkan/
+    // gpu-cuda/gpu-rocm/gpu-metal build instead reports whatever backend the
+    // host's hardware actually supports (that's the point of doctor
+    // reporting the real backend), so only the CPU-only build asserts the
+    // specific CPU backend/device text.
+    #[cfg(not(any(
+        feature = "gpu-vulkan",
+        feature = "gpu-cuda",
+        feature = "gpu-rocm",
+        feature = "gpu-metal"
+    )))]
     {
-        assert!(stdout.contains("backend:        whisper.cpp/cpu"));
+        assert!(stdout.contains("backend:        transcribe.cpp/cpu"));
         assert!(stdout.contains("device:         CPU"));
     }
-    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
+    #[cfg(any(
+        feature = "gpu-vulkan",
+        feature = "gpu-cuda",
+        feature = "gpu-rocm",
+        feature = "gpu-metal"
+    ))]
     {
         assert!(stdout.contains("backend:        "));
         assert!(stdout.contains("device:         "));
     }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn doctor_reports_a_missing_model_with_no_error_and_no_file() {
+    let root = std::env::temp_dir().join(format!("tt-missing-model-{}", std::process::id()));
+    let config_home = root.join("config");
+    let data_home = root.join("data");
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
+    std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    std::fs::write(
+        config_home.join("tonguetyped/config.toml"),
+        "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
+    )
+    .unwrap();
+    // No model stub written at all - the catalog file genuinely does not exist.
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
+        .arg("doctor")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success());
+    assert!(stdout.contains("model:          not found"));
+    assert!(!stdout.contains("model error:"));
+    assert!(stdout.contains(&format!(
+        "model id:       {}",
+        tonguetyped::catalog::DEFAULT_MODEL_ID
+    )));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn doctor_reports_the_actually_configured_model_id_not_the_default() {
+    let root = std::env::temp_dir().join(format!("tt-configured-model-{}", std::process::id()));
+    let config_home = root.join("config");
+    let data_home = root.join("data");
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
+    std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let non_default_id = "whisper-tiny-q5_k_m";
+    assert_ne!(non_default_id, tonguetyped::catalog::DEFAULT_MODEL_ID);
+    std::fs::write(
+        config_home.join("tonguetyped/config.toml"),
+        format!(
+            "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n[model]\nactive_model = \"{non_default_id}\"\n"
+        ),
+    )
+    .unwrap();
+    let entry = tonguetyped::catalog::find(non_default_id).unwrap();
+    std::fs::write(
+        data_home.join("tonguetyped/models").join(entry.filename),
+        [],
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
+        .arg("doctor")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success());
+    assert!(stdout.contains(&format!("model id:       {non_default_id}")));
+    assert!(stdout.contains(entry.filename));
 
     std::fs::remove_dir_all(root).unwrap();
 }

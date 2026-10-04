@@ -67,13 +67,15 @@ impl std::fmt::Display for ActivationMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
-    #[serde(default = "default_model_selected")]
-    pub selected: String,
-    /// Which `crate::catalog` entry the GPU inference backend
-    /// (`gpu-vulkan`/`gpu-cuda`) loads, managed with `tonguetyped model`.
-    /// Ignored by builds without a GPU feature enabled.
-    #[serde(default = "default_gpu_model")]
-    pub gpu_model: String,
+    /// Which `crate::catalog` GGUF entry `InferenceEngine` loads, on every
+    /// backend alike (CPU, Vulkan, CUDA, ROCm, Metal) - managed with
+    /// `tonguetyped model`. Backend-neutral: the same file is requested on
+    /// whichever accelerator is available and on the CPU fallback, so
+    /// switching backends (or losing accelerator hardware) never changes
+    /// which model is in use. A config written before this field existed is
+    /// migrated automatically - see `migrate_legacy_model_config`.
+    #[serde(default = "default_active_model")]
+    pub active_model: String,
     #[serde(default)]
     pub idle_unload: IdleUnloadConfig,
 }
@@ -81,8 +83,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            selected: default_model_selected(),
-            gpu_model: default_gpu_model(),
+            active_model: default_active_model(),
             idle_unload: IdleUnloadConfig::default(),
         }
     }
@@ -354,12 +355,8 @@ fn default_keybind_status() -> String {
     "untested".to_string()
 }
 
-fn default_model_selected() -> String {
-    "whisper-small-q5_1".to_string()
-}
-
-fn default_gpu_model() -> String {
-    crate::catalog::DEFAULT_GPU_MODEL_ID.to_string()
+fn default_active_model() -> String {
+    crate::catalog::DEFAULT_MODEL_ID.to_string()
 }
 
 fn default_idle_unload_policy() -> IdleUnloadPolicy {
@@ -438,6 +435,47 @@ fn default_overlay_monitor() -> String {
     "active".to_string()
 }
 
+/// Rewrites a config file's pre-consolidation `[model]` table - the GPU-only
+/// `gpu_model` plus the separate, CPU-only legacy GGML `selected` field - into
+/// the single backend-neutral `active_model` this version reads. Mutates
+/// `raw` in place and returns whether a migration actually happened, so
+/// `Config::load` knows whether to persist the rewritten file. A no-op (and
+/// returns `false`) on a config that already has `active_model`, or has
+/// neither legacy field (nothing to migrate - `#[serde(default)]` fills it).
+///
+/// Picks `gpu_model` when present (it already names a real catalog GGUF
+/// entry, and preserves exactly what a GPU build was actually running);
+/// otherwise falls back to `catalog::DEFAULT_MODEL_ID`, the GGUF equivalent of
+/// the legacy `selected` field's one possible value (`whisper-small-q5_1`).
+fn migrate_legacy_model_config(raw: &mut toml::Value) -> bool {
+    let Some(model) = raw
+        .as_table_mut()
+        .and_then(|table| table.get_mut("model"))
+        .and_then(|model| model.as_table_mut())
+    else {
+        return false;
+    };
+    if model.contains_key("active_model") {
+        return false;
+    }
+    let legacy_gpu_model = model.remove("gpu_model");
+    let legacy_selected = model.remove("selected");
+    if legacy_gpu_model.is_none() && legacy_selected.is_none() {
+        return false;
+    }
+    let active_model = legacy_gpu_model
+        .as_ref()
+        .and_then(|value| value.as_str())
+        .filter(|id| crate::catalog::find(id).is_some())
+        .unwrap_or(crate::catalog::DEFAULT_MODEL_ID)
+        .to_string();
+    model.insert(
+        "active_model".to_string(),
+        toml::Value::String(active_model),
+    );
+    true
+}
+
 impl Config {
     pub fn config_path() -> anyhow::Result<PathBuf> {
         let dir = directories::BaseDirs::new()
@@ -455,8 +493,13 @@ impl Config {
             return Ok(config);
         }
         let content = fs::read_to_string(&path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut raw: toml::Value = toml::from_str(&content)?;
+        let migrated = migrate_legacy_model_config(&mut raw);
+        let config: Config = raw.try_into()?;
         config.validate()?;
+        if migrated {
+            config.save()?;
+        }
         Ok(config)
     }
 
@@ -466,7 +509,9 @@ impl Config {
             return Ok(Config::default());
         }
         let content = fs::read_to_string(&path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut raw: toml::Value = toml::from_str(&content)?;
+        migrate_legacy_model_config(&mut raw);
+        let config: Config = raw.try_into()?;
         config.validate()?;
         Ok(config)
     }
@@ -481,9 +526,8 @@ impl Config {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         crate::activation::portal_trigger(&self.activation.keybind)?;
-        crate::model::ModelCatalog::model_file_name(&self.model.selected)?;
-        if crate::catalog::find(&self.model.gpu_model).is_none() {
-            anyhow::bail!("unsupported GPU model: {}", self.model.gpu_model);
+        if crate::catalog::find(&self.model.active_model).is_none() {
+            anyhow::bail!("unsupported model: {}", self.model.active_model);
         }
         if self.transcription.max_recording_seconds == 0 {
             anyhow::bail!("max_recording_seconds must be a positive integer");
@@ -575,6 +619,7 @@ fn atomic_write_at(path: &Path, temporary: &Path, content: &[u8]) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn defaults_are_valid_and_match_stage_one_contract() {
@@ -582,8 +627,7 @@ mod tests {
         config.validate().unwrap();
         assert!(!config.audio.feedback_sounds);
         assert_eq!(config.transcription.max_recording_seconds, 120);
-        assert_eq!(config.model.selected, "whisper-small-q5_1");
-        assert_eq!(config.model.gpu_model, crate::catalog::DEFAULT_GPU_MODEL_ID);
+        assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
         assert_eq!(config.history.max_entries, 500);
     }
@@ -595,17 +639,17 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.output.typing_backend = "auto".to_string();
-        config.model.selected = "../custom".to_string();
+        config.model.active_model = "../custom".to_string();
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn rejects_unknown_gpu_model_selection() {
+    fn rejects_unknown_model_selection() {
         let mut config = Config::default();
-        config.model.gpu_model = "not-a-catalog-entry".to_string();
+        config.model.active_model = "not-a-catalog-entry".to_string();
         assert!(config.validate().is_err());
 
-        config.model.gpu_model = "whisper-tiny-q5_k_m".to_string();
+        config.model.active_model = "whisper-tiny-q5_k_m".to_string();
         config.validate().unwrap();
     }
 
@@ -653,6 +697,95 @@ mod tests {
         assert!(atomic_write_at(&destination, &temporary, b"replacement").is_err());
         assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
         assert_eq!(fs::read_to_string(&temporary).unwrap(), "another writer");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_gpu_model_field_into_active_model() {
+        let mut raw: toml::Value = toml::from_str(
+            "[model]\nselected = \"whisper-small-q5_1\"\ngpu_model = \"whisper-tiny-q5_k_m\"\n",
+        )
+        .unwrap();
+        assert!(migrate_legacy_model_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.model.active_model, "whisper-tiny-q5_k_m");
+    }
+
+    #[test]
+    fn migrates_legacy_selected_only_config_to_the_default_catalog_model() {
+        // Predates `gpu_model` entirely (a config written before slice 2's
+        // catalog existed) - only the legacy GGML `selected` field is present.
+        let mut raw: toml::Value =
+            toml::from_str("[model]\nselected = \"whisper-small-q5_1\"\n").unwrap();
+        assert!(migrate_legacy_model_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
+    }
+
+    #[test]
+    fn migration_is_a_no_op_once_active_model_is_present() {
+        let mut raw: toml::Value =
+            toml::from_str("[model]\nactive_model = \"whisper-tiny-q5_k_m\"\n").unwrap();
+        assert!(!migrate_legacy_model_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.model.active_model, "whisper-tiny-q5_k_m");
+    }
+
+    #[test]
+    fn migration_is_a_no_op_for_a_config_with_no_model_table_at_all() {
+        let mut raw: toml::Value = toml::from_str("[activation]\nmode = \"toggle\"\n").unwrap();
+        assert!(!migrate_legacy_model_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
+    }
+
+    // `Config::load`/`config_path` resolve `XDG_CONFIG_HOME` via
+    // `directories::BaseDirs`, a process-wide env var - same shape as
+    // `setup.rs`'s `XDG_DATA_HOME_LOCK` guarding `XDG_DATA_HOME`.
+    static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn load_migrates_and_persists_a_pre_consolidation_config_file_on_disk() {
+        let _guard = XDG_CONFIG_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-config-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config_dir = root.join("tonguetyped");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            "[model]\nselected = \"whisper-small-q5_1\"\ngpu_model = \"whisper-tiny-q5_k_m\"\n",
+        )
+        .unwrap();
+
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+
+        let config = Config::load().unwrap();
+        assert_eq!(config.model.active_model, "whisper-tiny-q5_k_m");
+
+        // The migration is persisted: a second load sees the new format
+        // directly, with no legacy fields left to migrate.
+        let on_disk = fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(on_disk.contains("active_model = \"whisper-tiny-q5_k_m\""));
+        assert!(!on_disk.contains("gpu_model"));
+        assert!(!on_disk.contains("selected"));
+        let reloaded = Config::load().unwrap();
+        assert_eq!(reloaded.model.active_model, "whisper-tiny-q5_k_m");
+
+        match previous {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

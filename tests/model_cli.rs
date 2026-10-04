@@ -65,7 +65,7 @@ impl Drop for Env {
 }
 
 #[test]
-fn list_shows_cpu_default_and_catalog_entries_with_install_status() {
+fn list_shows_catalog_entries_with_install_status() {
     let env = Env::new("list");
     env.fake_install("whisper-tiny-q5_k_m");
 
@@ -73,7 +73,6 @@ fn list_shows_cpu_default_and_catalog_entries_with_install_status() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
 
-    assert!(stdout.contains("CPU model (fixed default): whisper-small-q5_1 [not installed]"));
     assert!(stdout.contains("whisper-tiny-q5_k_m"));
     let installed_line = stdout
         .lines()
@@ -86,6 +85,13 @@ fn list_shows_cpu_default_and_catalog_entries_with_install_status() {
         .unwrap();
     assert!(!uninstalled_line.contains("installed"));
     assert!(!uninstalled_line.contains("active"));
+    // The default active model (not yet installed in this fresh config) is
+    // marked accordingly rather than "active", since it isn't installed.
+    let default_line = stdout
+        .lines()
+        .find(|line| line.starts_with(tonguetyped::catalog::DEFAULT_MODEL_ID))
+        .unwrap();
+    assert!(!default_line.contains("active"));
 }
 
 #[test]
@@ -127,7 +133,7 @@ fn use_persists_the_selection_and_list_marks_it_active() {
     assert!(use_output.status.success());
     assert!(env
         .config_toml()
-        .contains("gpu_model = \"whisper-tiny-q5_k_m\""));
+        .contains("active_model = \"whisper-tiny-q5_k_m\""));
 
     let list_output = env.command(&["model", "list"]).output().unwrap();
     let stdout = String::from_utf8(list_output.stdout).unwrap();
@@ -139,7 +145,7 @@ fn use_persists_the_selection_and_list_marks_it_active() {
 }
 
 #[test]
-fn remove_refuses_to_delete_the_active_gpu_model() {
+fn remove_refuses_to_delete_the_active_model() {
     let env = Env::new("remove-active");
     env.fake_install("whisper-tiny-q5_k_m");
     assert!(env
@@ -155,7 +161,7 @@ fn remove_refuses_to_delete_the_active_gpu_model() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("is the active GPU model"));
+    assert!(stderr.contains("is the active model"));
     assert!(env.models_dir().join("whisper-tiny-Q5_K_M.gguf").exists());
 }
 

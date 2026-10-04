@@ -2,16 +2,17 @@
 //! [handy-computer](https://huggingface.co/handy-computer), derived from
 //! [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s release
 //! `catalog.db` (see `data/tt-model-catalog-19/report.md` for the derivation and
-//! verification process). Scoped to the `whisper` architecture family: the only
-//! family confirmed loadable by both inference backends this project compiles
-//! (transcribe-rs's whisper.cpp binding, CPU-only, requires the legacy GGML
-//! magic and cannot load these GGUF files at all; the transcribe.cpp GPU backend
-//! loads GGUF natively and already serves one of these files today - see
-//! `DEFAULT_GPU_MODEL_ID`). Other catalog.db families (canary, parakeet, voxtral,
-//! moonshine, sortformer diarization, ...) are real transcribe.cpp models but
-//! have not been integration-tested against this project's single-shot
-//! `Session::run` usage or its long-form/streaming assumptions, so they are
-//! intentionally left out of this catalog rather than offered unverified.
+//! verification process). Scoped to the `whisper` architecture family: the one
+//! family this project has actually integration-tested end to end through its
+//! single-shot `Session::run` usage (see `data/tt-transcribe-cpp-1/report.md`
+//! for the CPU-path consolidation that made `src/inference.rs` a single
+//! transcribe.cpp module for every backend, CPU included). Other catalog.db
+//! families (canary, parakeet, voxtral, moonshine, sortformer diarization, ...)
+//! are real transcribe.cpp models the module can load architecturally - it has
+//! no whisper-specific assumptions - but their output/chunking semantics
+//! (diarization, streaming-only, hard-cap/soft-window long-form) have not been
+//! verified against this project's VAD-then-single-buffer pipeline, so they
+//! are intentionally left out of this catalog rather than offered unverified.
 //!
 //! Regenerate by re-running the derivation script recorded in that report if
 //! transcribe.cpp publishes a new `catalog.db`; do not hand-edit entries.
@@ -1040,10 +1041,16 @@ pub const ENTRIES: &[CatalogModel] = &[
     },
 ];
 
-/// Matches today's hardcoded GPU model exactly (same repo, revision, filename,
-/// and SHA-256 already verified in the slice 2 GPU benchmark report) so existing
-/// installs and configs are unaffected by this catalog's introduction.
-pub const DEFAULT_GPU_MODEL_ID: &str = "whisper-small-q5_k_m";
+/// The default active model for every backend (CPU and every accelerator
+/// alike): the one GGUF file `InferenceEngine::load` tries first on an
+/// accelerator and falls back to on CPU. Matches the GPU path's historical
+/// hardcoded default (same repo, revision, filename, and SHA-256 already
+/// verified in the slice 2 GPU benchmark report), so existing GPU-build
+/// installs are unaffected, and is also the nearest GGUF equivalent (same
+/// `small` family, a comparable quantization) to the legacy CPU-only build's
+/// `whisper-small-q5_1` default that `config::migrate_legacy_model_config`
+/// maps pre-consolidation configs onto.
+pub const DEFAULT_MODEL_ID: &str = "whisper-small-q5_k_m";
 
 pub fn find(id: &str) -> Option<&'static CatalogModel> {
     ENTRIES.iter().find(|entry| entry.id == id)
@@ -1096,13 +1103,13 @@ mod tests {
     }
 
     #[test]
-    fn default_gpu_model_is_in_the_catalog() {
-        assert!(find(DEFAULT_GPU_MODEL_ID).is_some());
+    fn default_model_is_in_the_catalog() {
+        assert!(find(DEFAULT_MODEL_ID).is_some());
     }
 
     #[test]
     fn download_url_uses_pinned_revision_not_main() {
-        let entry = find(DEFAULT_GPU_MODEL_ID).unwrap();
+        let entry = find(DEFAULT_MODEL_ID).unwrap();
         let url = entry.download_url();
         assert!(url.contains(entry.revision));
         assert!(!url.contains("/resolve/main/"));

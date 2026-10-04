@@ -17,8 +17,7 @@ sha2 = "0.10"
 cpal = "0.18.2"
 alsa = "0.11"
 rubato = "0.15"
-transcribe-rs = { version = "=0.3.11", features = ["whisper-cpp"] }
-transcribe-cpp = { version = "=0.2.4", optional = true, default-features = false }
+transcribe-cpp = { version = "=0.2.4", default-features = false }
 vad-rs = { git = "https://github.com/cjpais/vad-rs", rev = "2a412ed858695b9251f3f5a1a20d95b59fa7c498" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 indicatif = "0.17"
@@ -36,11 +35,19 @@ crossterm = "0.29.0"
 smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
 
 [features]
-# GPU inference backends, built on the transcribe.cpp Rust binding. Neither is
-# enabled by default: the default build keeps the tested transcribe-rs/whisper.cpp
-# CPU path exactly as-is. When a GPU feature is compiled in, InferenceEngine
-# tries that backend first and falls back to the CPU path if the model is
-# missing or loading/inference fails. If both are enabled, cuda takes priority
-# (see src/inference.rs).
-gpu-vulkan = ["dep:transcribe-cpp", "transcribe-cpp/vulkan"]
-gpu-cuda = ["dep:transcribe-cpp", "transcribe-cpp/cuda"]
+# Accelerator backends for the single transcribe.cpp inference module
+# (src/inference.rs). None is enabled by default, so a plain `cargo build`
+# links transcribe.cpp with no accelerator - CPU only. InferenceEngine always
+# tries accelerators in a fixed priority order (cuda, rocm, vulkan, metal)
+# before falling back to the explicit, always-available CPU backend; a
+# backend whose feature isn't compiled in simply isn't satisfiable natively
+# and InferenceEngine moves on to the next candidate, so this priority list
+# needs no `cfg` gating of its own. Enabling a feature only controls whether
+# transcribe-cpp-sys's CMake build compiles and links that backend.
+gpu-vulkan = ["transcribe-cpp/vulkan"]
+gpu-cuda = ["transcribe-cpp/cuda"]
+gpu-rocm = ["transcribe-cpp/rocm"]
+gpu-metal = ["transcribe-cpp/metal"]
+
+[dev-dependencies]
+hound = "3"
