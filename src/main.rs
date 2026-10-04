@@ -258,7 +258,7 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                 anyhow::bail!("unknown catalog model: {id} (see `tonguetyped model list`)");
             }
             let manager = model::DownloadManager::new()?;
-            let (path, outcome) = manager.install_catalog_model(&id).await?;
+            let (path, outcome) = manager.install_catalog_model(&id, None).await?;
             match outcome {
                 model::DownloadOutcome::AlreadyInstalled => {
                     println!("{id} is already installed at {}", path.display())

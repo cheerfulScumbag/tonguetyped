@@ -1,4 +1,4 @@
-use super::{Capabilities, SetupOutcome};
+use super::{Capabilities, ModelRequirement, ProvisionHandle, SetupOutcome};
 use crate::audio;
 use crate::config::{ActivationMode, Config, OutputMethod};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -33,9 +33,10 @@ const ACTIVATION_LABELS: [&str; 2] = [
 ];
 const STARTUP_LABELS: [&str; 2] = ["Start manually", "Start TongueTyped when you sign in"];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepKind {
     Model,
+    Downloading,
     Microphone,
     Activation,
     Shortcut,
@@ -98,6 +99,11 @@ struct ConsoleState {
     mic_restart_at: Option<Instant>,
     mic_error: Option<String>,
     mic_stream_error: Arc<Mutex<Option<String>>>,
+    download_queue: Vec<ModelRequirement>,
+    download_active_label: Option<String>,
+    download_handle: Option<ProvisionHandle>,
+    download_log: Vec<(String, Result<crate::model::DownloadOutcome, String>)>,
+    downloading_needed: bool,
 }
 
 impl ConsoleState {
@@ -145,6 +151,11 @@ impl ConsoleState {
             mic_restart_at: None,
             mic_error: None,
             mic_stream_error: Arc::new(Mutex::new(None)),
+            download_queue: Vec::new(),
+            download_active_label: None,
+            download_handle: None,
+            download_log: Vec::new(),
+            downloading_needed: false,
         }
     }
 
@@ -154,6 +165,7 @@ impl ConsoleState {
     ) -> anyhow::Result<SetupOutcome> {
         loop {
             self.refresh_mic_monitor();
+            self.refresh_downloads();
             terminal.draw(|frame| self.render(frame))?;
             if event::poll(Duration::from_millis(66))? {
                 if let Event::Key(key) = event::read()? {
@@ -181,8 +193,25 @@ impl ConsoleState {
         match self.step {
             StepKind::Shortcut => self.handle_shortcut_key(key),
             StepKind::Confirm => self.handle_confirm_key(key),
+            StepKind::Downloading => self.handle_downloading_key(key),
             _ => self.handle_list_key(key),
         }
+    }
+
+    fn downloads_finished(&self) -> bool {
+        self.download_handle.is_none() && self.download_queue.is_empty()
+    }
+
+    fn handle_downloading_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
+        match key.code {
+            KeyCode::Char('q') => return Ok(ControlFlow::Finish(SetupOutcome::Cancelled)),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => return Ok(self.retreat()),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.downloads_finished() => {
+                return self.advance();
+            }
+            _ => {}
+        }
+        Ok(ControlFlow::Continue)
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
@@ -246,7 +275,7 @@ impl ConsoleState {
             StepKind::Output => self.output_labels.len(),
             StepKind::OutputBackend => self.backend_values.len(),
             StepKind::Startup => STARTUP_LABELS.len(),
-            StepKind::Shortcut | StepKind::Confirm => 0,
+            StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => 0,
         }
     }
 
@@ -258,7 +287,7 @@ impl ConsoleState {
             StepKind::Output => &mut self.output_selection,
             StepKind::OutputBackend => &mut self.backend_selection,
             StepKind::Startup => &mut self.startup_selection,
-            StepKind::Shortcut | StepKind::Confirm => {
+            StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => {
                 unreachable!("no list selection for this step")
             }
         }
@@ -271,7 +300,14 @@ impl ConsoleState {
     fn next_step(&self) -> Option<StepKind> {
         use StepKind::*;
         Some(match self.step {
-            Model => Microphone,
+            Model => {
+                if self.downloading_needed {
+                    Downloading
+                } else {
+                    Microphone
+                }
+            }
+            Downloading => Microphone,
             Microphone => Activation,
             Activation => Shortcut,
             Shortcut => Output,
@@ -292,7 +328,14 @@ impl ConsoleState {
         use StepKind::*;
         Some(match self.step {
             Model => return None,
-            Microphone => Model,
+            Downloading => Model,
+            Microphone => {
+                if self.downloading_needed {
+                    Downloading
+                } else {
+                    Model
+                }
+            }
             Activation => Microphone,
             Shortcut => Activation,
             Output => Shortcut,
@@ -312,6 +355,15 @@ impl ConsoleState {
         match self.step {
             StepKind::Model => {
                 self.config.model.selected = self.model_values[self.model_selection].clone();
+                self.download_queue = super::model_requirements(&self.config)
+                    .into_iter()
+                    .filter(|requirement| !requirement.already_present)
+                    .collect();
+                self.download_log.clear();
+                self.downloading_needed = !self.download_queue.is_empty();
+                if self.downloading_needed {
+                    self.start_next_download();
+                }
             }
             StepKind::Microphone => {
                 self.config.audio.microphone =
@@ -353,6 +405,7 @@ impl ConsoleState {
                 self.config.startup.autostart = self.startup_selection == 1;
                 self.config.validate()?;
             }
+            StepKind::Downloading => {}
             StepKind::Confirm => unreachable!("confirm handled separately"),
         }
         self.error = None;
@@ -452,9 +505,34 @@ impl ConsoleState {
         }
     }
 
+    fn start_next_download(&mut self) {
+        if self.download_queue.is_empty() {
+            self.download_active_label = None;
+            return;
+        }
+        let requirement = self.download_queue.remove(0);
+        self.download_active_label = Some(requirement.label.clone());
+        self.download_handle = Some(super::provision_model_async(requirement));
+    }
+
+    fn refresh_downloads(&mut self) {
+        let Some(handle) = &self.download_handle else {
+            return;
+        };
+        let finished = handle.result.lock().ok().and_then(|mut guard| guard.take());
+        let Some(outcome) = finished else {
+            return;
+        };
+        let label = self.download_active_label.take().unwrap_or_default();
+        self.download_log.push((label, outcome));
+        self.download_handle = None;
+        self.start_next_download();
+    }
+
     fn step_title(&self) -> &'static str {
         match self.step {
             StepKind::Model => "Speech model",
+            StepKind::Downloading => "Fetching speech model",
             StepKind::Microphone => "Microphone",
             StepKind::Activation => "Activation",
             StepKind::Shortcut => "Shortcut",
@@ -466,35 +544,38 @@ impl ConsoleState {
     }
 
     fn step_index(&self) -> usize {
+        let offset = usize::from(self.downloading_needed);
         match self.step {
             StepKind::Model => 1,
-            StepKind::Microphone => 2,
-            StepKind::Activation => 3,
-            StepKind::Shortcut => 4,
-            StepKind::Output => 5,
-            StepKind::OutputBackend => 6,
+            StepKind::Downloading => 2,
+            StepKind::Microphone => 2 + offset,
+            StepKind::Activation => 3 + offset,
+            StepKind::Shortcut => 4 + offset,
+            StepKind::Output => 5 + offset,
+            StepKind::OutputBackend => 6 + offset,
             StepKind::Startup => {
                 if self.has_backend_step() {
-                    7
+                    7 + offset
                 } else {
-                    6
+                    6 + offset
                 }
             }
             StepKind::Confirm => {
                 if self.has_backend_step() {
-                    8
+                    8 + offset
                 } else {
-                    7
+                    7 + offset
                 }
             }
         }
     }
 
     fn step_total(&self) -> usize {
+        let offset = usize::from(self.downloading_needed);
         if self.has_backend_step() {
-            8
+            8 + offset
         } else {
-            7
+            7 + offset
         }
     }
 
@@ -544,6 +625,8 @@ impl ConsoleState {
                 "Type modifiers+key (e.g. Ctrl+Shift+Space)  Enter confirm  Esc back"
             }
             StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
+            StepKind::Downloading if !self.downloads_finished() => "Fetching...  Esc back  q quit",
+            StepKind::Downloading => "Enter continue  Esc back  q quit",
             _ => "↑/↓ choose  Enter continue  Esc back  q quit",
         }
     }
@@ -559,6 +642,7 @@ impl ConsoleState {
                 ),
                 area,
             ),
+            StepKind::Downloading => self.render_downloading(frame, area),
             StepKind::Microphone => self.render_microphone(frame, area),
             StepKind::Activation => frame.render_widget(
                 list_paragraph(
@@ -599,6 +683,60 @@ impl ConsoleState {
             ),
             StepKind::Confirm => self.render_confirm(frame, area),
         }
+    }
+
+    fn render_downloading(&self, frame: &mut Frame, area: Rect) {
+        let mut lines: Vec<Line> = self
+            .download_log
+            .iter()
+            .map(|(label, outcome)| match outcome {
+                Ok(outcome) => Line::from(Span::styled(
+                    format!("  {label}: {}", super::outcome_label(*outcome)),
+                    Style::default().fg(Color::Green),
+                )),
+                Err(error) => Line::from(Span::styled(
+                    format!("  {label}: failed - {error}"),
+                    Style::default().fg(Color::Red),
+                )),
+            })
+            .collect();
+        if let Some(label) = &self.download_active_label {
+            lines.push(Line::from(format!("> Fetching {label}...")));
+        } else if self.downloads_finished() {
+            lines.push(Line::from(Span::styled(
+                "All required files are ready.",
+                Style::default().fg(Color::Green),
+            )));
+        }
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(3)])
+            .split(area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(self.step_title()),
+            ),
+            chunks[0],
+        );
+
+        let (downloaded, total) = self
+            .download_handle
+            .as_ref()
+            .and_then(|handle| handle.progress.lock().ok().map(|guard| *guard))
+            .unwrap_or((0, 0));
+        let ratio = if total == 0 {
+            0.0
+        } else {
+            (downloaded as f64 / total as f64).clamp(0.0, 1.0)
+        };
+        let gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title("Progress"))
+            .gauge_style(Style::default().fg(Color::Cyan))
+            .ratio(ratio);
+        frame.render_widget(gauge, chunks[1]);
     }
 
     fn render_microphone(&self, frame: &mut Frame, area: Rect) {
@@ -748,6 +886,100 @@ fn level_to_ratio(level: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_mic_capabilities() -> Capabilities {
+        Capabilities {
+            microphones: vec![(
+                "default".to_string(),
+                "System default microphone".to_string(),
+            )],
+            typing_backends: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn completed_download_records_outcome_and_starts_the_next_queued_requirement() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Downloading;
+        state.downloading_needed = true;
+        state.download_active_label = Some("first-model".to_string());
+        state.download_handle = Some(ProvisionHandle {
+            progress: Arc::new(Mutex::new((10, 10))),
+            result: Arc::new(Mutex::new(Some(Ok(crate::model::DownloadOutcome::Fresh)))),
+        });
+        state.download_queue = vec![crate::setup::ModelRequirement {
+            label: "second-model".to_string(),
+            already_present: false,
+            kind: crate::setup::ModelKind::Cpu("whisper-small-q5_1".to_string()),
+        }];
+
+        state.refresh_downloads();
+
+        assert_eq!(
+            state.download_log,
+            vec![(
+                "first-model".to_string(),
+                Ok(crate::model::DownloadOutcome::Fresh)
+            )]
+        );
+        assert_eq!(
+            state.download_active_label,
+            Some("second-model".to_string())
+        );
+        assert!(state.download_queue.is_empty());
+        assert!(!state.downloads_finished());
+    }
+
+    #[test]
+    fn download_failure_is_recorded_and_enter_waits_for_the_queue_to_drain() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Downloading;
+        state.downloading_needed = true;
+        state.download_active_label = Some("flaky-model".to_string());
+        state.download_handle = Some(ProvisionHandle {
+            progress: Arc::new(Mutex::new((0, 0))),
+            result: Arc::new(Mutex::new(Some(Err("network unreachable".to_string())))),
+        });
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!state.downloads_finished());
+        state.handle_downloading_key(enter).unwrap();
+        assert_eq!(
+            state.step,
+            StepKind::Downloading,
+            "Enter must not skip past an in-flight download"
+        );
+
+        state.refresh_downloads();
+        assert!(state.downloads_finished());
+        assert_eq!(
+            state.download_log,
+            vec![(
+                "flaky-model".to_string(),
+                Err("network unreachable".to_string())
+            )]
+        );
+
+        state.handle_downloading_key(enter).unwrap();
+        assert_eq!(
+            state.step,
+            StepKind::Microphone,
+            "a failed download is non-fatal - the user can still continue setup"
+        );
+    }
+
+    #[test]
+    fn leaving_the_model_step_skips_downloading_when_nothing_is_missing() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Model;
+        // The real download queue only ever contains entries whose files are
+        // missing (see `model_requirements`); emulate "nothing missing" by
+        // starting from an already-empty queue rather than touching the
+        // filesystem or network in this test.
+        state.downloading_needed = false;
+
+        assert_eq!(state.next_step(), Some(StepKind::Microphone));
+    }
 
     #[test]
     fn silence_maps_to_empty_gauge() {

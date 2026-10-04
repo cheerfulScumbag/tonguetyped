@@ -312,7 +312,12 @@ impl std::fmt::Display for RecordingExpiryPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverlayConfig {
-    #[serde(default = "default_false")]
+    // Visual dictation feedback defaults on: `OverlayHandle::try_send` probes
+    // for wlr-layer-shell once and `feedback.rs` falls back to the existing
+    // Plasma OSD / notification chain whenever it (or any desktop
+    // notification service) is unavailable, so this never blocks recording -
+    // see src/overlay.rs's module docs.
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_overlay_position")]
     pub position: String,
@@ -323,7 +328,7 @@ pub struct OverlayConfig {
 impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             position: default_overlay_position(),
             monitor: default_overlay_monitor(),
         }
@@ -652,12 +657,11 @@ mod tests {
     }
 
     #[test]
-    fn feedback_settings_are_validated_without_enabling_them_by_default() {
+    fn feedback_settings_default_the_overlay_on_and_sounds_off() {
         let mut config = Config::default();
-        assert!(!config.overlay.enabled);
+        assert!(config.overlay.enabled);
         assert!(!config.audio.feedback_sounds);
 
-        config.overlay.enabled = true;
         config.audio.feedback_sounds = true;
         config.audio.feedback_volume = 1.0;
         config.validate().unwrap();

@@ -54,6 +54,23 @@ long-form strategies) have never been exercised against this project's single-sh
 `Session::run` usage. See `data/tt-model-catalog-19/report.md` before widening the
 catalog to a new family.
 
+Neither `setup.rs`'s line-based flow nor the `nix build`/`nix profile install` GPU
+default made the GGUF catalog model (or even the CPU `.bin`) show up without a manual
+`tonguetyped model install` - `data/tt-transcribe-cpp-gpu-18/report.md` documents that
+as a deliberate choice to keep daemon startup non-blocking, but it meant a fresh
+install silently ran ~2x-realtime CPU inference (confirmed via a real
+`journalctl --user` `tonguetyped::latency` line: `backend=whisper.cpp/cpu
+inference_ms=33792` for one short dictation, vs. the GPU path's sub-second numbers in
+the same report) with no indication why. The setup console (`src/setup.rs`'s
+`model_requirements`/`provision_model_async`, wired into `src/setup/console.rs`'s
+`Downloading` step) now fetches whichever of those two files are missing, with
+progress and errors visible before the wizard finishes; `daemon.rs::prepare_dependencies`
+still only auto-fetches the CPU model at startup, on purpose, per that report.
+`model::DownloadManager`'s download methods take an `Option<ProgressCallback>`:
+`None` keeps the existing indicatif terminal bar (CLI, scripted `configure()`); the
+Ratatui console passes `Some` and draws its own `Gauge` instead, since indicatif and
+ratatui's alternate screen would otherwise fight over the same terminal.
+
 `setup::run` (`src/setup.rs`) picks between two UIs by checking whether both
 stdin and stdout are a terminal (`IsTerminal`): an interactive Ratatui console
 (`src/setup/console.rs`) when both are a TTY, else the original line-based
@@ -92,3 +109,19 @@ top-right recording`); screenshotting it requires a compositor-native tool
 output's corner, since `output: None` (config's `monitor = "active"`) places
 the surface on whichever output KWin currently considers focused, not
 necessarily the one at the top-left of the combined virtual screen.
+
+`config::OverlayConfig::enabled` defaults to `true` (changed from `false`): this is
+the only visual dictation feedback there is - `feedback.rs::DesktopFeedback::send`
+skips its visual branch entirely when `overlay.enabled` is false, regardless of
+whether the layer-shell overlay or its OSD/notification fallback would have worked,
+so a `false` default meant a correctly-configured KDE Wayland install still showed
+nothing on screen while recording. Changing the Rust default does not touch an
+already-written `config.toml`; `tonguetyped setup` is how an existing install picks
+up the new default.
+
+`output::type_text`'s `typing_backend = "auto"` path now caches which helper
+(`wtype`/`enigo`/`dotool`) actually works via `output::cached_auto_backend`
+(`OnceLock`, same probe-then-cache shape as the GPU and overlay probes above) -
+`probe_type_backend()`'s subprocess self-tests were re-run on every single
+dictation's output phase before this, measured at just over 2s in the same real
+`journalctl` latency line referenced above.

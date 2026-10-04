@@ -2,7 +2,16 @@ use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+/// Reports `(downloaded_bytes, expected_total_bytes)` after each chunk of a
+/// model download. Passing `None` to a download method keeps the default
+/// indicatif terminal bar (`tonguetyped model install`, scripted `setup`);
+/// a caller that cannot share a terminal with indicatif - the Ratatui setup
+/// console, which owns the alternate screen - passes `Some` instead and
+/// draws its own progress from the callback.
+pub type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 pub struct ModelCatalog;
 
@@ -76,14 +85,24 @@ impl DownloadManager {
 
     /// Downloads the project's built-in CPU model (see `ModelCatalog`),
     /// verifying it against its pinned size and SHA-256 once complete.
-    pub async fn download(&self, model_name: &str) -> anyhow::Result<PathBuf> {
+    pub async fn download(
+        &self,
+        model_name: &str,
+        on_progress: Option<ProgressCallback>,
+    ) -> anyhow::Result<(PathBuf, DownloadOutcome)> {
         let url = ModelCatalog::model_url(model_name)?;
         let dest_path = ModelCatalog::model_path(model_name)?;
         let expected_size = ModelCatalog::model_size_bytes(model_name)?;
         let expected_sha256 = ModelCatalog::model_sha256(model_name)?;
-        self.fetch_verified(&url, &dest_path, expected_size, expected_sha256, model_name)
-            .await
-            .map(|(path, _)| path)
+        self.fetch_verified(
+            &url,
+            &dest_path,
+            expected_size,
+            expected_sha256,
+            model_name,
+            on_progress,
+        )
+        .await
     }
 
     /// Downloads a catalog model (see `crate::catalog`), verifying it against
@@ -92,6 +111,7 @@ impl DownloadManager {
     pub async fn install_catalog_model(
         &self,
         id: &str,
+        on_progress: Option<ProgressCallback>,
     ) -> anyhow::Result<(PathBuf, DownloadOutcome)> {
         let entry = crate::catalog::find(id)
             .ok_or_else(|| anyhow::anyhow!("unknown catalog model: {id}"))?;
@@ -102,6 +122,7 @@ impl DownloadManager {
             entry.size_bytes,
             entry.sha256,
             entry.id,
+            on_progress,
         )
         .await
     }
@@ -113,6 +134,7 @@ impl DownloadManager {
         expected_size: u64,
         expected_sha256: &str,
         label: &str,
+        on_progress: Option<ProgressCallback>,
     ) -> anyhow::Result<(PathBuf, DownloadOutcome)> {
         if dest_path.exists() {
             return Ok((dest_path.to_path_buf(), DownloadOutcome::AlreadyInstalled));
@@ -160,17 +182,24 @@ impl DownloadManager {
             file.seek(std::io::SeekFrom::Start(resume_from)).await?;
         }
 
-        let pb = ProgressBar::new(expected_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{msg} {bar:40} {bytes}/{total_bytes} ({eta})")
-                .unwrap(),
-        );
-        pb.set_message(format!(
-            "{} {label}",
-            if resuming { "Resuming" } else { "Downloading" }
-        ));
-        pb.set_position(resume_from);
+        // A caller with its own terminal UI (the setup console's alternate
+        // screen) passes `on_progress` and draws its own indicator; indicatif's
+        // bar would otherwise write over that screen since both share the same
+        // terminal regardless of which fd they target.
+        let pb = on_progress.is_none().then(|| {
+            let pb = ProgressBar::new(expected_size);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{msg} {bar:40} {bytes}/{total_bytes} ({eta})")
+                    .unwrap(),
+            );
+            pb.set_message(format!(
+                "{} {label}",
+                if resuming { "Resuming" } else { "Downloading" }
+            ));
+            pb.set_position(resume_from);
+            pb
+        });
 
         let mut stream = response.bytes_stream();
         let mut downloaded = resume_from;
@@ -180,11 +209,18 @@ impl DownloadManager {
             let chunk = chunk.context("download chunk error")?;
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
-            pb.set_position(downloaded);
+            if let Some(pb) = &pb {
+                pb.set_position(downloaded);
+            }
+            if let Some(callback) = &on_progress {
+                callback(downloaded, expected_size);
+            }
         }
         file.flush().await?;
         drop(file);
-        pb.finish_with_message(format!("Downloaded {label}, verifying checksum"));
+        if let Some(pb) = &pb {
+            pb.finish_with_message(format!("Downloaded {label}, verifying checksum"));
+        }
 
         if let Err(error) = verify_sha256(&tmp_path, expected_sha256).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -363,6 +399,7 @@ mod tests {
                 body.len() as u64,
                 &expected_sha256,
                 "test-model",
+                None,
             )
             .await
             .unwrap();
@@ -394,6 +431,7 @@ mod tests {
                 body.len() as u64,
                 &expected_sha256,
                 "test-model",
+                None,
             )
             .await
             .unwrap();
@@ -425,6 +463,7 @@ mod tests {
                 body.len() as u64,
                 &expected_sha256,
                 "test-model",
+                None,
             )
             .await
             .unwrap();
@@ -452,6 +491,7 @@ mod tests {
                 body.len() as u64,
                 "0000000000000000000000000000000000000000000000000000000000000000",
                 "test-model",
+                None,
             )
             .await;
 
@@ -472,7 +512,14 @@ mod tests {
         // No server is listening on this address; a redownload attempt would
         // fail to connect, proving this path never sends a request.
         let (path, outcome) = manager
-            .fetch_verified("http://127.0.0.1:1", &dest, 12, "irrelevant", "test-model")
+            .fetch_verified(
+                "http://127.0.0.1:1",
+                &dest,
+                12,
+                "irrelevant",
+                "test-model",
+                None,
+            )
             .await
             .unwrap();
 
@@ -504,6 +551,7 @@ mod tests {
                 body.len() as u64,
                 &expected_sha256,
                 "test-model",
+                None,
             )
             .await
             .unwrap();
