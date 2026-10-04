@@ -79,9 +79,12 @@ console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc
 returns to the previous one, and `q` quits without saving. The microphone step
 shows a live input level meter for whichever microphone is currently
 highlighted after navigation settles, so you can compare devices without
-restarting audio capture for every keypress. Piped or
-non-interactive stdin/stdout (scripts, tests, CI) falls back to the original
-line-based prompts, reading newline-separated answers from stdin.
+restarting audio capture for every keypress. After the model step, the
+console fetches any selected model file (CPU, and GPU on a GPU-feature
+build) that isn't already installed, with progress shown before continuing.
+Piped or non-interactive stdin/stdout (scripts, tests, CI) falls back to the
+original line-based prompts, reading newline-separated answers from stdin
+and leaving model downloads to the daemon or `tonguetyped model install`.
 
 Either flow validates the complete configuration before replacing
 `$XDG_CONFIG_HOME/tonguetyped/config.toml`. Enabling autostart installs
@@ -121,12 +124,13 @@ explicitly to validate desktop shortcut authorization and binding.
 
 ## Desktop feedback
 
-Visual and sound feedback are disabled by default. Enable either one in
-`config.toml` without changing the terminal workflow:
+Visual feedback (the overlay) is enabled by default; sound feedback is not.
+Disable the overlay or enable sound in `config.toml` without changing the
+terminal workflow:
 
 ```toml
 [overlay]
-enabled = true
+enabled = false
 
 [audio]
 feedback_sounds = true
@@ -296,10 +300,11 @@ not what "tested CPU fallback" should mean. `tonguetyped doctor` and the
 daemon's startup log report whichever backend is actually active
 (`whisper.cpp/cpu`, `transcribe.cpp/vulkan`, or `transcribe.cpp/cuda`) and its
 device. The GPU model is not eagerly downloaded at daemon startup (that would
-block every launch on a large synchronous fetch); provision it with
-`tonguetyped model install <id>` before using the GPU path or running the
-benchmark with a GPU feature - a missing file silently falls back to the CPU
-path.
+block every launch on a large synchronous fetch); the interactive `tonguetyped
+setup` console fetches it (and the CPU model) if either is missing, or
+provision it directly with `tonguetyped model install <id>` before using the
+GPU path or running the benchmark with a GPU feature - a missing file
+silently falls back to the CPU path.
 
 ### GGUF model catalog (`tonguetyped model`)
 
