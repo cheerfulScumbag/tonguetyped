@@ -1,6 +1,7 @@
 use crate::config::OutputMethod;
 use anyhow::Context;
 use std::process::Command;
+use std::sync::OnceLock;
 
 pub fn output_text(
     text: &str,
@@ -24,7 +25,7 @@ pub fn output_text(
 
 fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()> {
     let backend = if backend == "auto" {
-        probe_type_backend()
+        cached_auto_backend()
     } else {
         backend.to_string()
     };
@@ -72,6 +73,18 @@ fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()>
     }
 
     Ok(())
+}
+
+/// Memoized `probe_type_backend()`: which typing helper is actually installed
+/// cannot change over a daemon process's lifetime, so re-running its
+/// subprocess self-tests (observed costing over a second in the real
+/// stop-to-idle latency log, since "auto" means probing wtype, then enigo,
+/// then dotool on every single dictation) on every "auto"-backend output is
+/// pure waste - same probe-then-cache shape as `inference::backend_info`'s
+/// GPU device probe and `overlay::OverlayHandle`'s layer-shell probe.
+fn cached_auto_backend() -> String {
+    static BACKEND: OnceLock<String> = OnceLock::new();
+    BACKEND.get_or_init(probe_type_backend).clone()
 }
 
 pub fn probe_type_backend() -> String {
@@ -173,6 +186,14 @@ mod tests {
     fn test_probe_returns_string() {
         let backend = probe_type_backend();
         assert!(!backend.is_empty());
+    }
+
+    #[test]
+    fn auto_backend_choice_is_memoized_across_calls() {
+        let first = cached_auto_backend();
+        let second = cached_auto_backend();
+        assert_eq!(first, second);
+        assert_eq!(first, probe_type_backend());
     }
 
     #[test]

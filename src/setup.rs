@@ -1,7 +1,111 @@
 use crate::config::{ActivationMode, Config, OutputMethod};
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::{Arc, Mutex};
 
 mod console;
+
+/// A speech model the daemon needs a file for before dictation will work,
+/// and which download call provisions it: the fixed CPU model `setup`'s
+/// "Speech model" step selects, or (only on a build with a GPU feature
+/// compiled in) the GPU catalog model the Vulkan/CUDA backend loads. Missing
+/// either one silently forces CPU inference - see AGENTS.md's GPU inference
+/// backends note - so the console step below fetches both.
+pub(crate) struct ModelRequirement {
+    pub label: String,
+    pub already_present: bool,
+    kind: ModelKind,
+}
+
+enum ModelKind {
+    Cpu(String),
+    #[cfg_attr(
+        not(any(feature = "gpu-vulkan", feature = "gpu-cuda")),
+        allow(dead_code)
+    )]
+    Gpu(String),
+}
+
+pub(crate) fn model_requirements(config: &Config) -> Vec<ModelRequirement> {
+    #[cfg_attr(
+        not(any(feature = "gpu-vulkan", feature = "gpu-cuda")),
+        allow(unused_mut)
+    )]
+    let mut requirements = vec![ModelRequirement {
+        label: config.model.selected.clone(),
+        already_present: crate::model::ModelCatalog::model_path(&config.model.selected)
+            .map(|path| path.exists())
+            .unwrap_or(false),
+        kind: ModelKind::Cpu(config.model.selected.clone()),
+    }];
+    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
+    requirements.push(ModelRequirement {
+        label: config.model.gpu_model.clone(),
+        already_present: crate::catalog::is_installed(&config.model.gpu_model),
+        kind: ModelKind::Gpu(config.model.gpu_model.clone()),
+    });
+    requirements
+}
+
+/// Shared state a background provisioning thread reports into, polled by the
+/// setup console's render loop (same shape as `console::ConsoleState`'s
+/// microphone level meter, which polls an `Arc<Mutex<f32>>` the same way).
+pub(crate) struct ProvisionHandle {
+    pub progress: Arc<Mutex<(u64, u64)>>,
+    pub result: Arc<Mutex<Option<Result<crate::model::DownloadOutcome, String>>>>,
+}
+
+/// Spawns a background thread that fetches `requirement` and reports its
+/// progress through the returned handle. Runs its own single-threaded tokio
+/// runtime (matching `feedback.rs`'s D-Bus calls) rather than borrowing the
+/// caller's, since the setup console's render loop is synchronous and must
+/// keep polling `ProvisionHandle` while this download is in flight.
+pub(crate) fn provision_model_async(requirement: ModelRequirement) -> ProvisionHandle {
+    let progress = Arc::new(Mutex::new((0u64, 0u64)));
+    let result = Arc::new(Mutex::new(None));
+    let progress_for_thread = progress.clone();
+    let result_for_thread = result.clone();
+    std::thread::spawn(move || {
+        let outcome = fetch_requirement(requirement.kind, progress_for_thread);
+        if let Ok(mut guard) = result_for_thread.lock() {
+            *guard = Some(outcome.map_err(|error| error.to_string()));
+        }
+    });
+    ProvisionHandle { progress, result }
+}
+
+fn fetch_requirement(
+    kind: ModelKind,
+    progress: Arc<Mutex<(u64, u64)>>,
+) -> anyhow::Result<crate::model::DownloadOutcome> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let manager = crate::model::DownloadManager::new()?;
+        let on_progress: crate::model::ProgressCallback = Arc::new(move |downloaded, total| {
+            if let Ok(mut guard) = progress.lock() {
+                *guard = (downloaded, total);
+            }
+        });
+        let (_, outcome) = match kind {
+            ModelKind::Cpu(id) => manager.download(&id, Some(on_progress)).await?,
+            ModelKind::Gpu(id) => {
+                manager
+                    .install_catalog_model(&id, Some(on_progress))
+                    .await?
+            }
+        };
+        Ok(outcome)
+    })
+}
+
+pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static str {
+    match outcome {
+        crate::model::DownloadOutcome::AlreadyInstalled => "already installed",
+        crate::model::DownloadOutcome::Resumed => "resumed and verified",
+        crate::model::DownloadOutcome::Fresh => "downloaded and verified",
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Capabilities {
@@ -403,6 +507,47 @@ fn is_cancel(answer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // `model_requirements` resolves paths through `directories::BaseDirs`,
+    // which reads `XDG_DATA_HOME` - a process-wide env var `cargo test`'s
+    // default parallel test threads would otherwise race on (same shape as
+    // `overlay.rs`'s `WAYLAND_DISPLAY_LOCK` guarding `WAYLAND_DISPLAY`).
+    static XDG_DATA_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn model_requirements_flips_to_present_once_the_file_exists() {
+        let _guard = XDG_DATA_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-model-requirements-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let previous = std::env::var("XDG_DATA_HOME").ok();
+        std::env::set_var("XDG_DATA_HOME", &root);
+
+        let config = Config::default();
+        let requirements = model_requirements(&config);
+        assert_eq!(requirements[0].label, config.model.selected);
+        assert!(!requirements[0].already_present);
+
+        let cpu_path = crate::model::ModelCatalog::model_path(&config.model.selected).unwrap();
+        std::fs::create_dir_all(cpu_path.parent().unwrap()).unwrap();
+        std::fs::write(&cpu_path, b"stub").unwrap();
+        assert!(model_requirements(&config)[0].already_present);
+
+        match previous {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn menu_retries_invalid_input_and_accepts_cancellation() {

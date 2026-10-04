@@ -79,7 +79,9 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
 async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
     let download_manager = crate::model::DownloadManager::new()?;
     if !crate::model::ModelCatalog::model_path(&config.model.selected)?.exists() {
-        download_manager.download(&config.model.selected).await?;
+        download_manager
+            .download(&config.model.selected, None)
+            .await?;
     }
     // The GPU model is intentionally not eagerly provisioned here: doing so
     // would block every daemon startup on a large synchronous download.
