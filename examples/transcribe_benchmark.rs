@@ -11,7 +11,7 @@ use tonguetyped::inference::InferenceEngine;
 #[derive(Parser)]
 #[command(about = "Benchmark cold model loading and repeated warm inference")]
 struct Args {
-    /// Whisper model file
+    /// GGUF model file
     model: PathBuf,
     /// 16 kHz mono WAV input
     wav: PathBuf,
@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let competing_load_warning = competing_load_warning();
-    let samples = transcribe_rs::audio::read_wav_samples(&args.wav)?;
+    let samples = read_wav_samples(&args.wav)?;
     let audio_seconds = samples.len() as f64 / 16_000.0;
 
     let mut engine = InferenceEngine::new(args.model.clone());
@@ -64,9 +64,10 @@ fn main() -> anyhow::Result<()> {
     engine.load()?;
     let load_time = started.elapsed();
 
-    // A GPU build may silently fall back to a different model file than the
-    // one requested on the CLI (see InferenceEngine::active_model_path), so
-    // hash and report whichever file actually backed this run.
+    // Every backend loads the exact same file requested on the CLI (no more
+    // separate CPU/GPU models to conflate - see InferenceEngine::load), but
+    // report it via active_model_path rather than args.model directly so this
+    // stays honest if that ever stops being true.
     let active_model = engine
         .active_model_path()
         .map(PathBuf::from)
@@ -158,16 +159,38 @@ fn host_cpu() -> String {
 
 fn competing_load_warning() -> Option<String> {
     let cpu_warning = cpu_competing_load_warning();
-    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-    let gpu_warning = tonguetyped::inference::gpu_competing_load_warning();
-    #[cfg(not(any(feature = "gpu-vulkan", feature = "gpu-cuda")))]
-    let gpu_warning: Option<String> = None;
+    let accelerator_warning = tonguetyped::inference::accelerator_competing_load_warning();
 
-    match (cpu_warning, gpu_warning) {
-        (Some(cpu), Some(gpu)) => Some(format!("{cpu}; {gpu}")),
+    match (cpu_warning, accelerator_warning) {
+        (Some(cpu), Some(accelerator)) => Some(format!("{cpu}; {accelerator}")),
         (Some(warning), None) | (None, Some(warning)) => Some(warning),
         (None, None) => None,
     }
+}
+
+/// Reads a strict 16 kHz mono 16-bit PCM WAV file into `[-1, 1]` f32 samples -
+/// this benchmark's only audio-decoding need (the production pipeline's own
+/// capture path, `src/audio.rs`, uses cpal/rubato directly and never touches
+/// WAV files at all).
+fn read_wav_samples(path: &Path) -> anyhow::Result<Vec<f32>> {
+    let mut reader = hound::WavReader::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let spec = reader.spec();
+    anyhow::ensure!(
+        spec.channels == 1
+            && spec.sample_rate == 16_000
+            && spec.bits_per_sample == 16
+            && spec.sample_format == hound::SampleFormat::Int,
+        "expected 16 kHz mono 16-bit PCM, found {} channel(s), {} Hz, {}-bit {:?}",
+        spec.channels,
+        spec.sample_rate,
+        spec.bits_per_sample,
+        spec.sample_format,
+    );
+    reader
+        .samples::<i16>()
+        .map(|sample| Ok(sample? as f32 / i16::MAX as f32))
+        .collect()
 }
 
 fn cpu_competing_load_warning() -> Option<String> {

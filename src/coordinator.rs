@@ -364,14 +364,13 @@ impl CoordinatorRuntime for ProductionRuntime {
             };
         }
         let mut lifecycle = self.inference.lock().unwrap();
-        let engine_key = format!("{}\u{0}{}", config.model.selected, config.model.gpu_model);
+        let engine_key = config.model.active_model.clone();
         timings.cold_model_load = !lifecycle.has_model(&engine_key);
         let load_started = Instant::now();
         let engine = match lifecycle.ensure(&engine_key, || {
-            let mut engine = crate::inference::InferenceEngine::with_gpu_model(
-                crate::model::ModelCatalog::model_path(&config.model.selected)?,
-                config.model.gpu_model.clone(),
-            );
+            let mut engine = crate::inference::InferenceEngine::new(crate::catalog::model_path(
+                &config.model.active_model,
+            )?);
             engine.load()?;
             Ok(engine)
         }) {
@@ -387,7 +386,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         if timings.cold_model_load {
             timings.model_load = load_started.elapsed();
         }
-        timings.backend = engine.cached_active_backend_info();
+        timings.backend = engine.active_backend_info();
         let inference_started = Instant::now();
         let result = engine.transcribe(&samples, &config.transcription.language);
         timings.inference = inference_started.elapsed();
@@ -524,11 +523,11 @@ impl Coordinator {
         clock: Arc<dyn Clock>,
         latency_sink: Arc<dyn LatencySink>,
     ) -> anyhow::Result<Self> {
-        // backend_info() memoizes its result (see inference::gpu), but a GPU
-        // build's first call enumerates real devices and is not free - warm
-        // it here, off the hot path, so the first dictation's finish() call
-        // (which reports backend/device on every completed dictation) does
-        // not have a chance of adding that cost to stop-to-idle latency.
+        // backend_info() memoizes its result (see inference.rs), but the
+        // first call enumerates real accelerator devices and is not free -
+        // warm it here, off the hot path, so the first dictation's finish()
+        // call (which reports backend/device on every completed dictation)
+        // does not have a chance of adding that cost to stop-to-idle latency.
         std::thread::spawn(crate::inference::backend_info);
 
         let last_result = if config.history.enabled {
@@ -1093,7 +1092,7 @@ fn reserve_recording(
     inner.last_error = None;
     inner.worker_active = true;
     let timing = Arc::new(Mutex::new(LatencyOperation::new(
-        inner.config.model.selected.clone(),
+        inner.config.model.active_model.clone(),
         clock,
     )));
     inner.active_timing = Some(Arc::clone(&timing));

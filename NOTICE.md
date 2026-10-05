@@ -42,11 +42,3 @@ SOFTWARE.
 
 Commit: 2a412ed858695b9251f3f5a1a20d95b59fa7c498
 License: MIT
-
-### transcribe-rs (github.com/thewh1teagle/transcribe-rs)
-
-License: MIT
-
-### whisper.cpp (github.com/ggerganov/whisper.cpp)
-
-License: MIT

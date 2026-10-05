@@ -4,46 +4,24 @@ use std::sync::{Arc, Mutex};
 
 mod console;
 
-/// A speech model the daemon needs a file for before dictation will work,
-/// and which download call provisions it: the fixed CPU model `setup`'s
-/// "Speech model" step selects, or (only on a build with a GPU feature
-/// compiled in) the GPU catalog model the Vulkan/CUDA backend loads. Missing
-/// either one silently forces CPU inference - see AGENTS.md's GPU inference
-/// backends note - so the console step below fetches both.
+/// The speech model the daemon needs a file for before dictation will work -
+/// the catalog entry `setup`'s "Speech model" step selects, requested on
+/// whichever backend (CPU, or an accelerator) ends up active. Missing it
+/// forces `InferenceEngine::load` to fail outright (no separate CPU-only
+/// fallback file exists anymore - see `src/inference.rs`), so the console
+/// step below always fetches it when absent.
 pub(crate) struct ModelRequirement {
     pub label: String,
     pub already_present: bool,
-    kind: ModelKind,
-}
-
-enum ModelKind {
-    Cpu(String),
-    #[cfg_attr(
-        not(any(feature = "gpu-vulkan", feature = "gpu-cuda")),
-        allow(dead_code)
-    )]
-    Gpu(String),
+    id: String,
 }
 
 pub(crate) fn model_requirements(config: &Config) -> Vec<ModelRequirement> {
-    #[cfg_attr(
-        not(any(feature = "gpu-vulkan", feature = "gpu-cuda")),
-        allow(unused_mut)
-    )]
-    let mut requirements = vec![ModelRequirement {
-        label: config.model.selected.clone(),
-        already_present: crate::model::ModelCatalog::model_path(&config.model.selected)
-            .map(|path| path.exists())
-            .unwrap_or(false),
-        kind: ModelKind::Cpu(config.model.selected.clone()),
-    }];
-    #[cfg(any(feature = "gpu-vulkan", feature = "gpu-cuda"))]
-    requirements.push(ModelRequirement {
-        label: config.model.gpu_model.clone(),
-        already_present: crate::catalog::is_installed(&config.model.gpu_model),
-        kind: ModelKind::Gpu(config.model.gpu_model.clone()),
-    });
-    requirements
+    vec![ModelRequirement {
+        label: config.model.active_model.clone(),
+        already_present: crate::catalog::is_installed(&config.model.active_model),
+        id: config.model.active_model.clone(),
+    }]
 }
 
 /// Shared state a background provisioning thread reports into, polled by the
@@ -65,7 +43,7 @@ pub(crate) fn provision_model_async(requirement: ModelRequirement) -> ProvisionH
     let progress_for_thread = progress.clone();
     let result_for_thread = result.clone();
     std::thread::spawn(move || {
-        let outcome = fetch_requirement(requirement.kind, progress_for_thread);
+        let outcome = fetch_requirement(requirement.id, progress_for_thread);
         if let Ok(mut guard) = result_for_thread.lock() {
             *guard = Some(outcome.map_err(|error| error.to_string()));
         }
@@ -74,7 +52,7 @@ pub(crate) fn provision_model_async(requirement: ModelRequirement) -> ProvisionH
 }
 
 fn fetch_requirement(
-    kind: ModelKind,
+    id: String,
     progress: Arc<Mutex<(u64, u64)>>,
 ) -> anyhow::Result<crate::model::DownloadOutcome> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -87,14 +65,9 @@ fn fetch_requirement(
                 *guard = (downloaded, total);
             }
         });
-        let (_, outcome) = match kind {
-            ModelKind::Cpu(id) => manager.download(&id, Some(on_progress)).await?,
-            ModelKind::Gpu(id) => {
-                manager
-                    .install_catalog_model(&id, Some(on_progress))
-                    .await?
-            }
-        };
+        let (_, outcome) = manager
+            .install_catalog_model(&id, Some(on_progress))
+            .await?;
         Ok(outcome)
     })
 }
@@ -241,16 +214,18 @@ fn configure(
     )?;
 
     ui.section(output, 1, "Speech model")?;
-    let models = crate::model::ModelCatalog::model_names();
-    let model_labels: Vec<String> = models.iter().map(|name| (*name).to_string()).collect();
-    let model_default = models
+    let model_labels: Vec<String> = crate::catalog::ENTRIES
         .iter()
-        .position(|name| *name == config.model.selected)
+        .map(|entry| entry.id.to_string())
+        .collect();
+    let model_default = crate::catalog::ENTRIES
+        .iter()
+        .position(|entry| entry.id == config.model.active_model)
         .unwrap_or(0);
     let Some(model) = choose(input, output, errors, &model_labels, model_default)? else {
         return Ok(SetupOutcome::Cancelled);
     };
-    config.model.selected = models[model].to_string();
+    config.model.active_model = crate::catalog::ENTRIES[model].id.to_string();
 
     ui.section(output, 2, "Microphone")?;
     if capabilities.microphones.len() == 1 {
@@ -364,7 +339,7 @@ fn configure(
 
     config.validate()?;
     writeln!(output, "\nConfiguration ready:")?;
-    writeln!(output, "  Model:       {}", config.model.selected)?;
+    writeln!(output, "  Model:       {}", config.model.active_model)?;
     writeln!(output, "  Microphone:  {}", config.audio.microphone)?;
     writeln!(
         output,
@@ -534,12 +509,12 @@ mod tests {
 
         let config = Config::default();
         let requirements = model_requirements(&config);
-        assert_eq!(requirements[0].label, config.model.selected);
+        assert_eq!(requirements[0].label, config.model.active_model);
         assert!(!requirements[0].already_present);
 
-        let cpu_path = crate::model::ModelCatalog::model_path(&config.model.selected).unwrap();
-        std::fs::create_dir_all(cpu_path.parent().unwrap()).unwrap();
-        std::fs::write(&cpu_path, b"stub").unwrap();
+        let model_path = crate::catalog::model_path(&config.model.active_model).unwrap();
+        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+        std::fs::write(&model_path, b"stub").unwrap();
         assert!(model_requirements(&config)[0].already_present);
 
         match previous {

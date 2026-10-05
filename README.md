@@ -2,7 +2,9 @@
 
 TongueTyped is a Linux dictation application controlled from the terminal or a
 desktop-wide keyboard shortcut. It records microphone audio, transcribes it
-locally with whisper.cpp, and can type the result into the focused application.
+locally with [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
+(GGUF models, CPU or an accelerator), and can type the result into the focused
+application.
 
 ## Requirements
 
@@ -80,8 +82,9 @@ returns to the previous one, and `q` quits without saving. The microphone step
 shows a live input level meter for whichever microphone is currently
 highlighted after navigation settles, so you can compare devices without
 restarting audio capture for every keypress. After the model step, the
-console fetches any selected model file (CPU, and GPU on a GPU-feature
-build) that isn't already installed, with progress shown before continuing.
+console fetches the selected GGUF model file if it isn't already installed,
+with progress shown before continuing - the same file every backend (CPU or
+an accelerator) requests, so there is only ever one model to fetch.
 Piped or non-interactive stdin/stdout (scripts, tests, CI) falls back to the
 original line-based prompts, reading newline-separated answers from stdin
 and leaving model downloads to the daemon or `tonguetyped model install`.
@@ -102,7 +105,7 @@ cargo run -- daemon
 Debug builds install or update the hidden
 `$XDG_DATA_HOME/applications/io.github.cheerfulScumbag.tonguetyped.Devel.desktop`
 entry before requesting shortcut authorization so the desktop portal can
-identify the source build. Starting the daemon downloads the selected Whisper
+identify the source build. Starting the daemon downloads the selected GGUF
 model to `$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG
 variables are unset, the standard user config and data directories are used. The
 desktop portal may ask you to approve the configured shortcut, which defaults to
@@ -180,7 +183,7 @@ tonguetyped last-result    Print the latest transcription
 tonguetyped doctor         Check runtime dependencies
 tonguetyped shortcut-test  Interactively test shortcut authorization and binding
 tonguetyped autostart      Enable or disable desktop-session autostart
-tonguetyped model          Manage the GGUF speech model catalog (GPU backend)
+tonguetyped model          Manage the GGUF speech model catalog
 ```
 
 The daemon listens on `$XDG_RUNTIME_DIR/tonguetyped/control.sock` and refuses to
@@ -214,7 +217,7 @@ file:
 
 ```sh
 cargo run --release --example transcribe_benchmark -- \
-  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
+  "$HOME/.local/share/tonguetyped/models/whisper-small-Q5_K_M.gguf" \
   recording.wav --runs 5
 ```
 
@@ -226,8 +229,8 @@ model, WAV, release profile, and otherwise idle machine. Do not use a result as
 a release threshold when `competing_load_warning` is non-null.
 
 A recovery run on an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used
-the `small-q5_1` model. Its 8.597-second synthetic speech WAV was generated with
-FFmpeg's `flite` source:
+the default `whisper-small-q5_k_m` model. Its 8.597-second synthetic speech WAV
+was generated with FFmpeg's `flite` source:
 
 ```sh
 ffmpeg -f lavfi \
@@ -235,97 +238,71 @@ ffmpeg -f lavfi \
   -ar 16000 -ac 1 recording.wav
 ```
 
-The repository includes a benchmark source compatible with baseline commit
-`a91a123`. Copy it into an archive of that revision, then run both examples with
-the same input, language, timing boundaries, and default model-loading behavior:
+See `data/tt-transcribe-cpp-1/report.md` for the historical
+whisper.cpp/transcribe-rs CPU baseline this project started from, and for
+this consolidation's own before/after evidence (dual-path reproduction, then
+the single transcribe.cpp module on CPU, Vulkan, and CUDA, all producing the
+exact same transcript from the exact same GGUF file).
+
+## Inference backends
+
+One module, `src/inference.rs`, handles every backend - CPU, Vulkan, CUDA,
+ROCm, and Metal - through a single Rust binding for
+[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) (the
+`transcribe-cpp` crate). A plain `cargo build` links transcribe.cpp with no
+accelerator compiled in (CPU only); four optional Cargo features additionally
+compile in one accelerator each:
 
 ```sh
-baseline_dir="$(mktemp -d)"
-git archive a91a1236d26f15f972e7e30089cbb4acbf5f578f | \
-  tar -x -C "$baseline_dir"
-mkdir "$baseline_dir/examples"
-cp examples/transcribe_benchmark_baseline.rs \
-  "$baseline_dir/examples/transcribe_benchmark.rs"
-cargo run --release --manifest-path "$baseline_dir/Cargo.toml" \
-  --example transcribe_benchmark -- \
-  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
-  "$(pwd)/recording.wav"
-rm -rf "$baseline_dir"
-
-cargo run --release --example transcribe_benchmark -- \
-  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
-  recording.wav
+cargo build --release --features gpu-vulkan   # or gpu-cuda, gpu-rocm, gpu-metal
 ```
 
-The release build of baseline commit `a91a123` took 30.917 seconds. The final
-8-thread build, using the same default load parameters, took 19.512 seconds.
-Whisper.cpp reported that flash attention was enabled, no GPU was available,
-and the CPU backend was used. Both runs produced this exact transcript:
-
-```text
-Today I am testing local speech recognition, the microphone records my voice and the computer converts each sentence into written text.
-```
-
-## GPU inference backends
-
-Two optional Cargo features add GPU inference on top of the tested CPU path,
-using the official Rust binding for
-[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
-(the `transcribe-cpp` crate):
-
-```sh
-cargo build --release --features gpu-vulkan   # or --features gpu-cuda
-```
-
-Neither feature is enabled by Cargo's default feature set, so a plain
-`cargo build` never links against Vulkan, CUDA, or transcribe-cpp. The flake's
+`InferenceEngine::load` always requests an explicit backend (never letting the
+library auto-select), trying accelerators in a fixed priority order (CUDA,
+ROCm, Vulkan, Metal) before an unconditional, always-available explicit CPU
+request - every attempt loads the exact same configured GGUF file, so a
+fallback never substitutes a different model or model family. The flake's
 `packages.default` enables `gpu-vulkan`, which gives `nix build` and
-`nix profile install` GPU acceleration on Vulkan-capable systems while keeping
-the tested CPU fallback on systems without a usable GPU or installed GGUF
-model. If both features are enabled, CUDA takes priority. Building `gpu-cuda`
-on NixOS additionally needs
+`nix profile install` accelerated inference on Vulkan-capable systems while
+keeping the tested CPU fallback on systems without a usable GPU or an
+installed GGUF model. Building `gpu-cuda` on NixOS additionally needs
 `cudaPackages.cudatoolkit` and the driver's `/run/opengl-driver/lib` on the
 link path; the flake's devShell and `build.rs` set this up automatically.
 
-When a GPU feature is compiled in, `InferenceEngine::load` tries that backend
-first, against a separately downloaded GGUF model - by default
-`whisper-small-Q5_K_M.gguf` from
-[handy-computer/whisper-small-gguf](https://huggingface.co/handy-computer/whisper-small-gguf),
-chosen to match the CPU path's `small` model at a comparable quantization.
-If the GGUF file is missing, or the backend fails to load or run, it logs a
-warning and falls back to the same tested CPU path used by a plain build -
-this fallback forces `use_gpu: false` explicitly, since whisper-rs otherwise
-opportunistically uses whatever GPU backend it was linked against, which is
-not what "tested CPU fallback" should mean. `tonguetyped doctor` and the
-daemon's startup log report whichever backend is actually active
-(`whisper.cpp/cpu`, `transcribe.cpp/vulkan`, or `transcribe.cpp/cuda`) and its
-device. The GPU model is not eagerly downloaded at daemon startup (that would
-block every launch on a large synchronous fetch); the interactive `tonguetyped
-setup` console fetches it (and the CPU model) if either is missing, or
-provision it directly with `tonguetyped model install <id>` before using the
-GPU path or running the benchmark with a GPU feature - a missing file
-silently falls back to the CPU path.
+If the configured model's GGUF file is missing, or every backend fails to
+load or run it, `InferenceEngine::load` returns an error (no silent partial
+success). `tonguetyped doctor` and the daemon's startup log report whichever
+backend actually ended up active (`transcribe.cpp/cpu`,
+`transcribe.cpp/vulkan`, `transcribe.cpp/cuda`, `transcribe.cpp/rocm`, or
+`transcribe.cpp/metal`) and its device - read directly off the loaded model,
+not guessed from which Cargo features were compiled in.
+`daemon.rs::prepare_dependencies` fetches the configured model synchronously
+at startup if it is missing, matching the historical CPU path's zero-config
+behavior (now also covering
+every accelerator, since they all share the one file). Provision it ahead of
+time with `tonguetyped model install <id>` to avoid that first-launch wait,
+or let `tonguetyped setup` fetch it as part of the interactive flow.
 
 ### GGUF model catalog (`tonguetyped model`)
 
-The GPU backend isn't limited to that one default model. `src/catalog.rs`
-holds a reviewed catalog of every `family = "whisper"` GGUF model published by
-[handy-computer](https://huggingface.co/handy-computer), derived from
-[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)'s release
-`catalog.db` and cross-verified against HuggingFace's own metadata for each
-file (see `data/tt-model-catalog-19/report.md` for the derivation process and
-why other catalog.db families - canary, parakeet, voxtral, moonshine,
-sortformer diarization, and so on - are left out: they're real transcribe.cpp
-models, just not yet integration-tested against this project's single-shot
-usage). Every entry is pinned to a specific commit (not `main`) with an
-expected byte size and SHA-256, so what actually downloads can't drift from
-what was reviewed.
+`src/catalog.rs` holds a reviewed catalog of every `family = "whisper"` GGUF
+model published by [handy-computer](https://huggingface.co/handy-computer),
+derived from transcribe.cpp's release `catalog.db` and cross-verified against
+HuggingFace's own metadata for each file (see
+`data/tt-model-catalog-19/report.md` for the original derivation, and
+`data/tt-transcribe-cpp-1/report.md` for why other catalog.db families -
+canary, parakeet, voxtral, moonshine, sortformer diarization, and so on -
+remain left out even though the CPU path can now load any of them too: their
+output/chunking semantics have not been integration-tested against this
+project's single-shot usage). Every entry is pinned to a specific commit (not
+`main`) with an expected byte size and SHA-256, so what actually downloads
+can't drift from what was reviewed.
 
 ```sh
 tonguetyped model list                          # catalog + install status
 tonguetyped model install whisper-tiny-q5_k_m   # resumable, verified download
 tonguetyped model install whisper-tiny-q5_k_m --use   # and select it
-tonguetyped model use whisper-tiny-q5_k_m       # switch the active GPU model
+tonguetyped model use whisper-tiny-q5_k_m       # switch the active model
 tonguetyped model remove whisper-tiny-q5_k_m    # delete a non-active install
 ```
 
@@ -333,61 +310,7 @@ tonguetyped model remove whisper-tiny-q5_k_m    # delete a non-active install
 when the server supports HTTP range requests, and always re-verifies the full
 file's SHA-256 before making it live - a corrupt or mismatched download is
 deleted rather than left in place. The selected model is stored in
-`model.gpu_model` in `config.toml`; it's ignored by builds without a GPU
-feature enabled, and the CPU model (`model.selected`, still just
-`whisper-small-q5_1`) is unaffected by any of this.
-
-### Benchmark: Vulkan and CUDA vs. the CPU baseline
-
-The same `transcribe_benchmark` example used for the CPU baseline reports
-whichever backend the build and hardware actually select, so it doubles as
-the GPU benchmark - just build it with a GPU feature and it hashes and
-reports the GGUF file it actually ran against
-(`InferenceEngine::active_model_path`), not the CPU model path still passed
-on the CLI:
-
-```sh
-cargo build --release --example transcribe_benchmark --features gpu-vulkan
-./target/release/examples/transcribe_benchmark \
-  "$HOME/.local/share/tonguetyped/models/ggml-small-q5_1.bin" \
-  recording.wav --runs 3
-```
-
-Measured on an AMD Ryzen 7 9700X (8 physical cores) with an NVIDIA GeForce
-RTX 4080 SUPER (16 GB VRAM), using the exact same 8.597-second input WAV as
-the CPU baseline above (SHA-256 `2de0423a...f90c78`):
-
-| Backend | Device | Median inference | Realtime factor | Cold first inference |
-| --- | --- | ---: | ---: | ---: |
-| `whisper.cpp/cpu` | CPU | 18.01 s | 2.10x (slower than realtime) | same as median |
-| `transcribe.cpp/vulkan` | RTX 4080 SUPER | 0.057 s | 0.0066x (~320x faster than CPU) | 0.05-8.2 s (see note) |
-| `transcribe.cpp/cuda` | RTX 4080 SUPER | 0.053 s | 0.0062x (~340x faster than CPU) | 0.09-0.13 s |
-
-Both GPU backends produce the exact same transcript as the CPU path
-(byte-for-byte, verified separately from the benchmark tool, which discards
-transcript text). Full raw JSON reports, including per-run timings and the
-`competing_load_warning` field, are in
-`data/tt-transcribe-cpp-gpu-18/report.md`.
-
-**Vulkan's first-ever inference on a given machine pays a one-time shader
-compilation cost** (observed once at 8.18 s; every run after that, including
-across separate process launches, was 0.05-0.09 s) - the NVIDIA driver
-caches compiled Vulkan pipelines to disk, so this is a single per-machine
-cost, not a per-process or per-dictation one. CUDA's cold start was
-consistently under 0.13 s with no such spike. If a deployment relies on
-`model.idle_unload` with a short timeout on a machine whose shader cache gets
-cleared (e.g. driver updates, cache eviction), Vulkan's reload cost is worth
-being aware of; CUDA does not have this characteristic on the hardware
-tested.
-
-**Competing load, honestly**: this machine runs several concurrent build
-lanes, so most runs above show a non-null `competing_load_warning` (CPU load
-average or GPU free-memory pressure from another process). Every backend's
-*median inference time* was nonetheless stable within a few percent across
-contended and quiet runs (contention mostly costs a slower first/cold run,
-not the steady-state number) - but per the pipeline's own release-threshold
-guidance, none of these numbers should be read as a clean baseline. A truly
-idle run of the CUDA case did occur (`competing_load_warning: null`) and its
-numbers match the contended runs closely, which is the best available
-evidence that the contention here did not meaningfully distort the
-comparison.
+`model.active_model` in `config.toml` and used by every backend alike - there
+is no separate CPU or GPU model anymore. A config written by an older version
+(`model.selected`/`model.gpu_model`) is migrated to `active_model`
+automatically the first time it loads, with no edits required.

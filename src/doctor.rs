@@ -11,8 +11,6 @@ pub struct DoctorReport {
     pub model_error: Option<String>,
     pub model_path: String,
     pub model_id: String,
-    pub gpu_model_id: String,
-    pub gpu_model_installed: bool,
     pub inference_backend: String,
     pub inference_device: String,
     pub helpers_found: Vec<String>,
@@ -36,12 +34,9 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         .into_iter()
         .map(|d| d.name)
         .collect();
-    let model_path = crate::model::ModelCatalog::model_path(&config.model.selected)?;
+    let model_path = crate::catalog::model_path(&config.model.active_model)?;
     let (model_ready, model_error, active_backend) = if model_path.exists() {
-        let mut engine = crate::inference::InferenceEngine::with_gpu_model(
-            model_path.clone(),
-            config.model.gpu_model.clone(),
-        );
+        let mut engine = crate::inference::InferenceEngine::new(model_path.clone());
         match engine.load() {
             Ok(()) => {
                 let backend = engine.active_backend_info();
@@ -71,9 +66,7 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         model_ready,
         model_error,
         model_path: model_path.to_string_lossy().to_string(),
-        model_id: config.model.selected.clone(),
-        gpu_model_id: config.model.gpu_model.clone(),
-        gpu_model_installed: crate::catalog::is_installed(&config.model.gpu_model),
+        model_id: config.model.active_model.clone(),
         inference_backend: backend.backend,
         inference_device: backend.device,
         helpers_found,

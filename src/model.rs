@@ -13,52 +13,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 /// draws its own progress from the callback.
 pub type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
-pub struct ModelCatalog;
-
-impl ModelCatalog {
-    /// Revision (commit sha, not a branch) this project's built-in CPU model is
-    /// pinned to on `ggerganov/whisper.cpp`, so a later push to that repo can't
-    /// silently change what gets downloaded.
-    const MODEL_REVISION: &'static str = "5359861c739e955e79d9a303bcbc70fb988958b1";
-    const MODEL_SIZE_BYTES: u64 = 190_085_487;
-    const MODEL_SHA256: &'static str =
-        "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb";
-
-    pub fn model_names() -> &'static [&'static str] {
-        &["whisper-small-q5_1"]
-    }
-
-    pub fn model_file_name(model_name: &str) -> anyhow::Result<&'static str> {
-        match model_name {
-            "whisper-small-q5_1" => Ok("ggml-small-q5_1.bin"),
-            _ => anyhow::bail!("unsupported model: {model_name}"),
-        }
-    }
-
-    pub fn model_url(model_name: &str) -> anyhow::Result<String> {
-        Ok(format!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/{}/{}",
-            Self::MODEL_REVISION,
-            Self::model_file_name(model_name)?
-        ))
-    }
-
-    fn model_size_bytes(model_name: &str) -> anyhow::Result<u64> {
-        Self::model_file_name(model_name)?;
-        Ok(Self::MODEL_SIZE_BYTES)
-    }
-
-    fn model_sha256(model_name: &str) -> anyhow::Result<&'static str> {
-        Self::model_file_name(model_name)?;
-        Ok(Self::MODEL_SHA256)
-    }
-
-    pub fn model_path(model_name: &str) -> anyhow::Result<PathBuf> {
-        Ok(crate::inference::InferenceEngine::models_dir()?
-            .join(Self::model_file_name(model_name)?))
-    }
-}
-
 pub struct DownloadManager {
     client: reqwest::Client,
 }
@@ -81,28 +35,6 @@ impl DownloadManager {
             .read_timeout(std::time::Duration::from_secs(60))
             .build()?;
         Ok(DownloadManager { client })
-    }
-
-    /// Downloads the project's built-in CPU model (see `ModelCatalog`),
-    /// verifying it against its pinned size and SHA-256 once complete.
-    pub async fn download(
-        &self,
-        model_name: &str,
-        on_progress: Option<ProgressCallback>,
-    ) -> anyhow::Result<(PathBuf, DownloadOutcome)> {
-        let url = ModelCatalog::model_url(model_name)?;
-        let dest_path = ModelCatalog::model_path(model_name)?;
-        let expected_size = ModelCatalog::model_size_bytes(model_name)?;
-        let expected_sha256 = ModelCatalog::model_sha256(model_name)?;
-        self.fetch_verified(
-            &url,
-            &dest_path,
-            expected_size,
-            expected_sha256,
-            model_name,
-            on_progress,
-        )
-        .await
     }
 
     /// Downloads a catalog model (see `crate::catalog`), verifying it against
