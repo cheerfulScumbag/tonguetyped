@@ -137,3 +137,42 @@ up the new default.
 `probe_type_backend()`'s subprocess self-tests were re-run on every single
 dictation's output phase before this, measured at just over 2s in the same real
 `journalctl` latency line referenced above.
+
+Running bare `tonguetyped` (no subcommand) opens the dashboard (`src/tui/`,
+`CLI`'s `command` field is `Option<Commands>` - see `data/tt-tui-dashboard-1/report.md`
+for the SuperDesign process and draft comparison behind its design). `src/cli.rs`
+holds the clap `Cli`/`Commands` definitions as a library module specifically so
+`src/tui/mod.rs`'s home screen can read the first page's command list straight off
+clap's own metadata (`Cli::command().get_subcommands()`) instead of a second,
+driftable copy - it can never disagree with `--help`. `src/commands.rs` is the one
+shared command-implementation layer both `main.rs`'s CLI dispatch and the dashboard
+call into (IPC send/format, model catalog rows, `activate_model`'s
+download+save+reload+confirm composition) - add new shared command logic there, not
+in either caller. The dashboard's own interactive screens (`Model`, `Autostart`) are
+new ratatui screens in `src/tui/`; `setup` is NOT reimplemented there - the dashboard
+suspends its own alternate screen, runs the pre-existing `setup::run_console()`
+(`src/setup.rs`), then resumes, since a terminal tracks one alternate-screen buffer,
+not a stack.
+
+A ratatui app that ever loads an inference model (Doctor, Model-activation) while
+holding raw mode/the alternate screen must keep **two** independent things off the
+live terminal, not just one: (1) `tracing` output - redirect its writer
+(`with_writer(std::io::sink)`) rather than relying on `EnvFilter`, since any
+`tracing::warn!`/`info!` line written straight to stderr lands askew of ratatui's
+cursor-positioned redraws; and (2) `transcribe-cpp`'s underlying C/C++ GGUF loader,
+which logs backend-fallback and load-failure lines straight to the process's real
+stderr **file descriptor**, bypassing `tracing` entirely - suppressing (1) alone does
+not stop this. `src/tui/mod.rs`'s `redirect_stderr_to_devnull`/`restore_stderr`
+(`libc::dup2` fd 2 to `/dev/null`, restored by the same `TerminalGuard` that restores
+raw mode on every exit path including a panic) is the fix; any new interactive screen
+that can trigger a model load inherits this for free by living under `tui::run`, but
+a *new* top-level entry point that also loads models would need the same pattern.
+
+PTY-driven behavior tests for a ratatui screen (`tests/tui_dashboard.rs`, via
+`portable-pty`) must reconstruct the screen with `vt100::Parser`, not by stripping
+ANSI escapes from the raw byte stream and concatenating it: ratatui only rewrites the
+cells that changed between frames and jumps the cursor directly between them, so a
+naive strip-and-concatenate approach silently merges unrelated rows from different
+redraws into one run-on string with no whitespace between them. `vt100::Parser::
+process` plus `.screen().contents()` tracks real cursor/cell state and returns the
+actual current screen text.

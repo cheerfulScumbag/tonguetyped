@@ -1,0 +1,40 @@
+┌Model catalog (MODEL ID / QUANT / SIZE / STATUS)──────────────────────────────────────────────────┐
+│  whisper-large-q6_k               Q6_K        1.2 GiB  -                                         │
+│  whisper-large-q8_0               Q8_0        1.6 GiB  -                                         │
+│  whisper-large-v2-f16             F16         2.9 GiB  -                                         │
+│  whisper-large-v2-f32             F32         5.8 GiB  -                                         │
+│  whisper-large-v2-q4_k_m          Q4_K_M    950.4 MiB  -                                         │
+│  whisper-large-v2-q5_k_m          Q5_K_M      1.1 GiB  -                                         │
+│  whisper-large-v2-q6_k            Q6_K        1.2 GiB  -                                         │
+│  whisper-large-v2-q8_0            Q8_0        1.6 GiB  -                                         │
+│  whisper-large-v3-f16             F16         2.9 GiB  -                                         │
+│  whisper-large-v3-q4_k_m          Q4_K_M    951.1 MiB  -                                         │
+│  whisper-large-v3-q5_k_m          Q5_K_M      1.1 GiB  -                                         │
+│  whisper-large-v3-q6_k            Q6_K        1.2 GiB  -                                         │
+│  whisper-large-v3-q8_0            Q8_0        1.6 GiB  -                                         │
+│  whisper-large-v3-turbo-f16       F16         1.5 GiB  -                                         │
+│  whisper-large-v3-turbo-q4_k_m    Q4_K_M    511.2 MiB  -                                         │
+│  whisper-large-v3-turbo-q5_k_m    Q5_K_M    590.9 MiB  -                                         │
+│  whisper-large-v3-turbo-q6_k      Q6_K      660.5 MiB  -                                         │
+│  whisper-large-v3-turbo-q8_0      Q8_0      845.3 MiB  -                                         │
+│  whisper-medium-f16               F16         1.4 GiB  -                                         │
+│  whisper-medium-f32               F32         2.8 GiB  -                                         │
+│  whisper-medium-q4_k_m            Q4_K_M    480.7 MiB  -                                         │
+│  whisper-medium-q5_k_m            Q5_K_M    555.7 MiB  -                                         │
+│  whisper-medium-q6_k              Q6_K      618.0 MiB  -                                         │
+│  whisper-medium-q8_0              Q8_0      793.0 MiB  -                                         │
+│  whisper-medium.en-f16            F16         1.4 GiB  -                                         │
+│  whisper-medium.en-f32            F32         2.8 GiB  -                                         │
+│  whisper-medium.en-q4_k_m         Q4_K_M    480.7 MiB  -                                         │
+│  whisper-medium.en-q5_k_m         Q5_K_M    555.7 MiB  -                                         │
+│  whisper-medium.en-q6_k           Q6_K      617.9 MiB  -                                         │
+│  whisper-medium.en-q8_0           Q8_0      792.9 MiB  -                                         │
+│  whisper-small-f16                F16       470.1 MiB  -                                         │
+│  whisper-small-f32                F32       924.0 MiB  -                                         │
+│  whisper-small-q4_k_m             Q4_K_M    163.7 MiB  -                                         │
+│> whisper-small-q5_k_m             Q5_K_M    184.8 MiB  active                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+↑/↓ choose  Enter activate  Esc back  q quit

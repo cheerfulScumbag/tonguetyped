@@ -1,0 +1,32 @@
+  ████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗
+  ╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗
+     ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║
+     ██║   ██║   ██║██║╚██╗██║██║   ██║██║   ██║██╔══╝     ██║     ╚██╔╝  ██╔═══╝ ██╔══╝  ██║  ██║
+     ██║   ╚██████╔╝██║ ╚████║╚██████╔╝╚██████╔╝███████╗   ██║      ██║   ██║     ███████╗██████╔╝
+     ╚═╝    ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚═╝     ╚══════╝╚═════╝
+
+                                ░▒▓  S P E A K .  T Y P E .  R E P E A T .  ▓▒░
+Daemon: not running   Model: whisper-small-q5_k_m
+┌Commands──────────────────────────────────────────────────────────────────────────────────────────┐
+│> setup          Configure TongueTyped interactively                                              │
+│  daemon         Start the daemon process                                                         │
+│  start          Start a new recording                                                            │
+│  stop           Stop the current recording                                                       │
+│  toggle         Toggle recording on/off                                                          │
+│  cancel         Cancel current recording or processing                                           │
+│  status         Get daemon status                                                                │
+│  reload         Reload daemon configuration                                                      │
+│  last-result    Return the most recent transcription                                             │
+│  doctor         Run system diagnostics                                                           │
+│  shortcut-test  Interactively validate desktop shortcut authorization and binding                │
+│  autostart      Manage desktop-session autostart                                                 │
+│  model          Manage the GGUF speech model catalog used for inference                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+↑/↓ navigate  Enter select  q quit

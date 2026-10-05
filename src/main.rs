@@ -1,185 +1,66 @@
-use clap::{Parser, Subcommand};
-use tokio::io::AsyncWriteExt;
-use tonguetyped::{activation, autostart, catalog, config, daemon, doctor, ipc, model, setup};
-
-#[derive(Parser)]
-#[command(name = "tonguetyped", version, about = "Linux dictation application")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Configure TongueTyped interactively
-    Setup,
-    /// Start the daemon process
-    Daemon,
-    /// Start a new recording
-    Start,
-    /// Stop the current recording
-    Stop,
-    /// Toggle recording on/off
-    Toggle,
-    /// Cancel current recording or processing
-    Cancel,
-    /// Get daemon status
-    Status,
-    /// Reload daemon configuration
-    Reload,
-    /// Return the most recent transcription
-    LastResult,
-    /// Run system diagnostics
-    Doctor {
-        /// Run explicit typing test
-        #[arg(long)]
-        test_type: bool,
-    },
-    /// Interactively validate desktop shortcut authorization and binding
-    ShortcutTest,
-    /// Manage desktop-session autostart
-    Autostart {
-        #[command(subcommand)]
-        command: AutostartCommand,
-    },
-    /// Manage the GGUF speech model catalog used for inference
-    Model {
-        #[command(subcommand)]
-        command: ModelCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum ModelCommand {
-    /// List catalog models and their local installation status
-    List,
-    /// Download a catalog model (resumable; verified against a pinned SHA-256)
-    Install {
-        /// Catalog model id, e.g. "whisper-small-q5_k_m" (see `model list`)
-        id: String,
-        /// Also select the downloaded model as the active inference model
-        #[arg(long = "use")]
-        use_after_install: bool,
-    },
-    /// Delete a locally installed catalog model
-    Remove { id: String },
-    /// Select which installed catalog model the inference engine loads
-    Use { id: String },
-}
-
-#[derive(Subcommand)]
-enum AutostartCommand {
-    /// Start TongueTyped automatically when the desktop session starts
-    Enable,
-    /// Stop starting TongueTyped automatically
-    Disable,
-}
+use clap::Parser;
+use tonguetyped::cli::{AutostartCommand, Cli, Commands, ModelCommand};
+use tonguetyped::{
+    activation, autostart, catalog, commands, config, daemon, doctor, ipc, model, setup, tui,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
 
+    // The dashboard (no subcommand) puts the terminal in raw mode on the
+    // alternate screen and owns every byte written to it via ratatui's own
+    // cursor-positioned redraws; a `tracing::warn!` line (e.g. inference
+    // trying the next backend while loading a model from the Doctor or
+    // Model screen) written straight to the same stderr would land askew of
+    // whatever ratatui just drew and visibly corrupt the display. Every
+    // other subcommand still logs to stderr exactly as before.
+    if cli.command.is_none() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_filter())
+            .with_writer(std::io::sink)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_filter())
+            .init();
+    }
+
     match cli.command {
-        Commands::Setup => setup::run()?,
-        Commands::Daemon => {
+        None => tui::run().await?,
+        Some(Commands::Setup) => setup::run()?,
+        Some(Commands::Daemon) => {
             let config = config::Config::load()?;
             daemon::run_daemon(config).await?;
         }
-        Commands::Start => {
+        Some(Commands::Start) => {
             send_command(ipc::Request::Start).await?;
         }
-        Commands::Stop => {
+        Some(Commands::Stop) => {
             send_command(ipc::Request::Stop).await?;
         }
-        Commands::Toggle => {
+        Some(Commands::Toggle) => {
             send_command(ipc::Request::Toggle).await?;
         }
-        Commands::Cancel => {
+        Some(Commands::Cancel) => {
             send_command(ipc::Request::Cancel).await?;
         }
-        Commands::Status => {
+        Some(Commands::Status) => {
             send_command(ipc::Request::Status).await?;
         }
-        Commands::Doctor { test_type } => {
+        Some(Commands::Doctor { test_type }) => {
             if test_type {
                 let config = config::Config::load()?;
                 doctor::typing_test(&config)?;
             } else {
                 let config = config::Config::load()?;
                 let report = doctor::run_doctor(&config).await?;
-                println!("compositor:     {}", report.compositor);
-                println!(
-                    "overlay:        {}",
-                    if report.layer_shell_overlay_available {
-                        "layer-shell available"
-                    } else {
-                        "layer-shell unavailable (falls back to OSD/notification)"
-                    }
-                );
-                println!(
-                    "audio:          {}",
-                    if report.audio_available {
-                        "available"
-                    } else {
-                        "unavailable"
-                    }
-                );
-                println!("audio devices:  {}", report.audio_devices.join(", "));
-                println!(
-                    "model:          {}",
-                    if report.model_ready {
-                        "ready"
-                    } else if report.model_error.is_some() {
-                        "invalid"
-                    } else {
-                        "not found"
-                    }
-                );
-                println!("model id:       {}", report.model_id);
-                println!("model path:     {}", report.model_path);
-                println!("backend:        {}", report.inference_backend);
-                println!("device:         {}", report.inference_device);
-                if let Some(error) = report.model_error {
-                    println!("model error:    {error}");
-                }
-                println!(
-                    "helpers:        {}",
-                    if report.helpers_found.is_empty() {
-                        "none".to_string()
-                    } else {
-                        report.helpers_found.join(", ")
-                    }
-                );
-                println!(
-                    "output method:  {}",
-                    if report.output_method_available {
-                        "available"
-                    } else {
-                        "unavailable (none mode only)"
-                    }
-                );
-                println!(
-                    "shortcut portal: {}",
-                    match report.shortcut_status {
-                        None => "not tested (run `tonguetyped shortcut-test`)",
-                        Some(ipc::ShortcutStatus::Initializing) => "initializing",
-                        Some(ipc::ShortcutStatus::Available) => "available",
-                        Some(ipc::ShortcutStatus::Failed) => "unavailable",
-                    }
-                );
-                if let Some(error) = report.shortcut_portal_error {
-                    println!("shortcut error:  {error}");
+                for output in commands::format_doctor_lines(&report) {
+                    println!("{}", output.text);
                 }
             }
         }
-        Commands::ShortcutTest => {
+        Some(Commands::ShortcutTest) => {
             let config = config::Config::load()?;
             if let Some(error) = activation::test_shortcut_binding(&config.activation.keybind).await
             {
@@ -187,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("shortcut binding available");
         }
-        Commands::Autostart { command } => match command {
+        Some(Commands::Autostart { command }) => match command {
             AutostartCommand::Enable => {
                 autostart::update(true)?;
                 println!("autostart enabled");
@@ -197,12 +78,17 @@ async fn main() -> anyhow::Result<()> {
                 println!("autostart disabled");
             }
         },
-        Commands::Reload => send_command(ipc::Request::ReloadConfig).await?,
-        Commands::LastResult => send_command(ipc::Request::GetLastResult).await?,
-        Commands::Model { command } => run_model_command(command).await?,
+        Some(Commands::Reload) => send_command(ipc::Request::ReloadConfig).await?,
+        Some(Commands::LastResult) => send_command(ipc::Request::GetLastResult).await?,
+        Some(Commands::Model { command }) => run_model_command(command).await?,
     }
 
     Ok(())
+}
+
+fn tracing_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
 async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
@@ -224,7 +110,7 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                     "{:<32} {:<10} {:>10}  {:<11}  {}",
                     entry.id,
                     entry.quant,
-                    human_size(entry.size_bytes),
+                    commands::human_size(entry.size_bytes),
                     status,
                     entry.license_spdx,
                 );
@@ -251,7 +137,8 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                 }
             }
             if use_after_install {
-                select_model(&id)?;
+                commands::select_model(&id)?;
+                println!("selected {id} as the active inference model");
             }
         }
         ModelCommand::Remove { id } => {
@@ -277,95 +164,20 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
             if !catalog::is_installed(&id) {
                 anyhow::bail!("{id} is not installed; run `tonguetyped model install {id}` first");
             }
-            select_model(&id)?;
+            commands::select_model(&id)?;
+            println!("selected {id} as the active inference model");
         }
     }
     Ok(())
-}
-
-fn select_model(id: &str) -> anyhow::Result<()> {
-    let mut config = config::Config::load()?;
-    config.model.active_model = id.to_string();
-    config.save()?;
-    println!("selected {id} as the active inference model");
-    Ok(())
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{size:.1} {}", UNITS[unit])
-    }
 }
 
 async fn send_command(request: ipc::Request) -> anyhow::Result<()> {
-    let sock_path = daemon::socket_path()?;
-
-    if !sock_path.exists() {
-        anyhow::bail!(
-            "daemon is not running (no socket at {})",
-            sock_path.display()
-        );
+    let response = commands::send_ipc(request).await?;
+    if let ipc::Response::Error { message } = &response {
+        anyhow::bail!(message.clone());
     }
-
-    let stream = tokio::net::UnixStream::connect(&sock_path).await?;
-    let (reader, mut writer) = stream.into_split();
-
-    let frame = ipc::encode_frame(&request)?;
-    writer.write_all(frame.as_bytes()).await?;
-
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut line = String::new();
-    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line).await?;
-
-    let response: ipc::Response = ipc::decode_frame(&line)?;
-
-    match response {
-        ipc::Response::Ok => println!("ok"),
-        ipc::Response::Busy => println!("busy"),
-        ipc::Response::RecordingStarted => println!("recording started"),
-        ipc::Response::RecordingStopped => println!("recording stopped"),
-        ipc::Response::Cancelled => println!("cancelled"),
-        ipc::Response::Error { message } => {
-            anyhow::bail!(message);
-        }
-        ipc::Response::Status {
-            state,
-            activation_mode,
-            operation_error,
-            shortcut_status,
-            activation_error,
-        } => {
-            println!("state:            {}", state);
-            println!("activation mode:  {}", activation_mode);
-            println!(
-                "shortcut status:  {}",
-                match shortcut_status {
-                    ipc::ShortcutStatus::Initializing => "initializing",
-                    ipc::ShortcutStatus::Available => "available",
-                    ipc::ShortcutStatus::Failed => "failed",
-                }
-            );
-            if let Some(error) = operation_error {
-                println!("last error:       {}", error);
-            }
-            if let Some(error) = activation_error {
-                println!("shortcut error:   {}", error);
-            }
-        }
-        ipc::Response::LastResult { text, timestamp } => {
-            println!("result:   {}", text);
-            println!("time:     {}", timestamp);
-        }
+    for output in commands::format_response_lines(&response) {
+        println!("{}", output.text);
     }
-
     Ok(())
 }

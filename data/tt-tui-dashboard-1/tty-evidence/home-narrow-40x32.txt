@@ -1,0 +1,32 @@
+              TONGUETYPED
+          Speak. Type. Repeat.
+Daemon: not running   Model: whisper-sma
+┌Commands──────────────────────────────┐
+│> setup          Configure TongueTyped│
+│  daemon         Start the daemon proc│
+│  start          Start a new recording│
+│  stop           Stop the current reco│
+│  toggle         Toggle recording on/o│
+│  cancel         Cancel current record│
+│  status         Get daemon status    │
+│  reload         Reload daemon configu│
+│  last-result    Return the most recen│
+│  doctor         Run system diagnostic│
+│  shortcut-test  Interactively validat│
+│  autostart      Manage desktop-sessio│
+│  model          Manage the GGUF speec│
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘
+↑/↓ navigate  Enter select  q quit
