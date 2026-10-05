@@ -100,6 +100,15 @@
         # unavailable. CUDA remains an explicit developer build.
         buildFeatures = ["gpu-vulkan"];
 
+        # `tests/tui_dashboard.rs`'s `pty_*`-prefixed tests allocate a real
+        # pseudo-terminal and spawn the built binary into it
+        # (`portable-pty`); the Nix build sandbox's `checkPhase` has no
+        # usable pty/tty subsystem for that nested spawn (fails with ENOENT
+        # even though the binary itself builds fine and `openpty` succeeds).
+        # `nix develop -c cargo test` and plain `cargo test` both run them
+        # normally and are the real coverage for that file.
+        cargoTestFlags = ["--" "--skip" "pty_"];
+
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.glibc.dev}/include";
         CMAKE_POLICY_VERSION_MINIMUM = "3.5";

@@ -28,10 +28,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
+libc = "0.2"
 enigo = "0.3"
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
 ratatui = "0.30.2"
-crossterm = "0.29.0"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
 smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
 
 [features]
@@ -51,3 +52,5 @@ gpu-metal = ["transcribe-cpp/metal"]
 
 [dev-dependencies]
 hound = "3"
+portable-pty = "0.9"
+vt100 = "0.15"

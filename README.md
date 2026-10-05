@@ -166,6 +166,14 @@ layer-shell overlay, Plasma's OSD, nor a desktop notification service can be
 reached. Recording and terminal commands continue to work. TongueTyped does
 not inject text or move focus when it reports state.
 
+## Dashboard
+
+Running `tonguetyped` with no subcommand opens an interactive terminal dashboard
+listing every command below, plus screens for configuration, model download and
+activation, and autostart - all built on the same underlying commands as the CLI.
+Every subcommand remains directly invocable on its own, and `tonguetyped --help`
+still lists them all.
+
 ## Commands
 
 The CLI provides these commands:

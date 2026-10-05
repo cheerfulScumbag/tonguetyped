@@ -157,6 +157,16 @@ pub(crate) enum SetupOutcome {
     Cancelled,
 }
 
+/// Runs the interactive Ratatui setup console directly (`src/setup/console.rs`),
+/// bypassing the `stdin`/`stdout`-is-a-terminal branch in `run()` below since
+/// the dashboard (`crate::tui`) already knows it is attached to a real
+/// terminal when it offers "setup" as an action - this is the same console
+/// code `tonguetyped setup` uses, reused rather than reimplemented.
+pub(crate) fn run_console() -> anyhow::Result<SetupOutcome> {
+    let capabilities = Capabilities::discover()?;
+    console::run(capabilities)
+}
+
 pub fn run() -> anyhow::Result<()> {
     let capabilities = Capabilities::discover()?;
     let stdin = io::stdin();

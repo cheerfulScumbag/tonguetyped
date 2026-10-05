@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TongueTyped setup - current terminal console (BEFORE, do not redesign)</title>
+<style>
+  /*
+    FAITHFUL REPRODUCTION ONLY. This file renders what `tonguetyped setup`
+    already shows today in a real terminal (src/setup/console.rs), approximated
+    in HTML/CSS as a fixed-size terminal-emulator grid. It is the "before"
+    state for SuperDesign's pixel-perfect reproduction step. Do NOT add
+    anything here that the Rust console does not already render: no centering,
+    no new colors, no icons, no extra chrome. The dashboard redesign happens in
+    separate SuperDesign drafts branched FROM a project created with this file
+    as the baseline, never by editing this file toward the new design.
+
+    Terminal approximation: 100 cols x 30 rows, monospace, default terminal
+    background/foreground, with the 4 semantic ANSI colors the console
+    actually uses (cyan/green/red/yellow) per .superdesign/design-system.md.
+    Ratatui's default Block border glyphs (BorderType::Plain: ─ │ ┌ ┐ └ ┘) are
+    reproduced literally as text, not CSS borders, since that's what the
+    terminal actually draws.
+  */
+  :root {
+    --bg: #0c0c0c;
+    --fg: #d4d4d4;
+    --cyan: #29e6e6;
+    --green: #2ecc71;
+    --red: #ff5c57;
+    --yellow: #f3f99d;
+    --col-width: 9.6px;
+    --row-height: 20px;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .terminal {
+    width: calc(100 * var(--col-width));
+    margin: 24px auto;
+    background: var(--bg);
+    font-family: "DejaVu Sans Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: var(--row-height);
+    white-space: pre;
+    padding: 8px 10px;
+    box-sizing: content-box;
+  }
+  .cyan-bold { color: var(--cyan); font-weight: bold; }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .yellow { color: var(--yellow); }
+  .dim-row { color: var(--fg); }
+  .selected-row { color: var(--cyan); font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="terminal">
+<span class="cyan-bold">████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗</span>
+<span class="cyan-bold">╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗</span>
+<span class="cyan-bold">   ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║</span>
+<span class="cyan-bold">   ██║   ██║   ██║██║╚██╗██║██║   ██║██║   ██║██╔══╝     ██║     ╚██╔╝  ██╔═══╝ ██╔══╝  ██║  ██║</span>
+<span class="cyan-bold">   ██║   ╚██████╔╝██║ ╚████║╚██████╔╝╚██████╔╝███████╗   ██║      ██║   ██║     ███████╗██████╔╝</span>
+<span class="cyan-bold">   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚═╝     ╚══════╝╚═════╝</span>
+<span>                                                                                                   </span>
+<span class="cyan-bold">                              ░▒▓  S P E A K .  T Y P E .  R E P E A T .  ▓▒░</span>
+<span>Step 1 of 7: Speech model                                                                         </span>
+<span>┌Speech model──────────────────────────────────────────────────────────────────────────────────┐</span>
+<span>│<span class="selected-row">&gt; whisper-small-q5_k_m                                                                         </span>│</span>
+<span>│  whisper-small-q4_k_m                                                                          │</span>
+<span>│  whisper-small-q6_k                                                                            │</span>
+<span>│  whisper-small-q8_0                                                                            │</span>
+<span>│  whisper-small-f16                                                                             │</span>
+<span>│  whisper-small-f32                                                                             │</span>
+<span>│  whisper-small.en-q5_k_m                                                                       │</span>
+<span>│  whisper-small.en-q4_k_m                                                                       │</span>
+<span>│  whisper-base-q5_k_m                                                                           │</span>
+<span>│  whisper-base-q4_k_m                                                                           │</span>
+<span>│  whisper-tiny-q5_k_m                                                                           │</span>
+<span>│  whisper-tiny-q4_k_m                                                                           │</span>
+<span>│  whisper-medium-q5_k_m                                                                         │</span>
+<span>│  whisper-large-v3-q5_k_m                                                                       │</span>
+<span>│  whisper-large-v3-turbo-q5_k_m                                                                 │</span>
+<span>│  breeze-asr-25-q5_k_m                                                                          │</span>
+<span>└──────────────────────────────────────────────────────────────────────────────────────────────┘</span>
+<span>                                                                                                   </span>
+<span>↑/↓ choose  Enter continue  Esc back  q quit                                                     </span>
+</div>
+</body>
+</html>
