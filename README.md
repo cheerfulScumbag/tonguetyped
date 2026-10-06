@@ -150,11 +150,11 @@ or a specific output name from `tonguetyped doctor`). `zwlr_layer_shell_v1` is
 a wlroots-originated protocol; it is available on wlroots-based compositors
 (code-reviewed against Mango, but not live-validated) and on modern KWin
 (validated against KDE Plasma 6.7+), but not on X11 sessions or older/other
-compositors that never advertise it. Where it is unavailable, TongueTyped falls back to Plasma's
-native OSD on KDE, then a transient freedesktop notification -- in that
-fallback tier, the desktop environment controls placement and monitor
-selection, so `overlay.position`/`overlay.monitor` have no effect. Run
-`tonguetyped doctor` to see which tier is active.
+compositors that never advertise it. Where it is unavailable, TongueTyped
+falls back to Plasma's native OSD on KDE, then a transient freedesktop
+notification - in that fallback tier, the desktop environment controls
+placement and monitor selection, so `overlay.position`/`overlay.monitor` have
+no effect. Run `tonguetyped doctor` to see which tier is active.
 
 Sound feedback uses the desktop sound theme through `canberra-gtk-play` and
 accepts a volume from `0.0` through `1.0`. The Nix package includes this helper;
@@ -217,6 +217,21 @@ idle. For hold-mode activation, the total begins when the key is released, while
 audio finalization begins when TongueTyped sends the stop signal after its
 50-millisecond auto-repeat check. Disabled or unreached phases are zero. Latency
 events contain no transcript text or audio.
+
+A load is cold on the daemon's first dictation, and again whenever the model has
+been unloaded from memory since the last one. By default the daemon unloads the
+model after 15 minutes of inactivity, so the next dictation after a quiet period
+pays that cold-load cost again:
+
+```toml
+[model.idle_unload]
+policy = "after_idle"       # "never", "after_transcription", or "after_idle"
+timeout_minutes = 15
+```
+
+Set `policy` to `"after_transcription"` to free the memory after every dictation,
+or `"never"` to keep the model loaded for the daemon's entire lifetime.
+`timeout_minutes` only applies to `"after_idle"`.
 
 ## Transcription benchmark
 
