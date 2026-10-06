@@ -208,8 +208,11 @@ fn pty_bare_invocation_opens_the_dashboard_with_full_command_coverage_on_a_norma
     // The pre-change baseline (see .superdesign/replica_html_template and
     // this task's report) was a clap "missing subcommand" usage error on
     // stderr with exit code 2 - bare invocation must now instead render the
-    // dashboard: the centered logo and every one of the 11 dashboard commands on
-    // one screen, no pagination.
+    // dashboard: the centered logo and every one of the 11 dashboard-listed
+    // commands on one screen, no pagination. `start`/`stop` (single-shot
+    // recording start/stop) are real CLI subcommands but are intentionally
+    // hidden from the dashboard home list - `toggle`/`cancel` are the
+    // dashboard's recording controls.
     let screen = session.wait_for("Commands", Duration::from_secs(5));
     assert!(
         screen.contains("████████╗"),
@@ -356,6 +359,58 @@ fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_erro
         !back_home.contains("daemon is not running"),
         "returning to Home should clear the prior result screen:\n{back_home}"
     );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_daemon_home_item_opens_a_start_stop_restart_screen_instead_of_starting_immediately() {
+    let sandbox = Sandbox::new("daemon-screen");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("Commands", Duration::from_secs(5));
+
+    // "daemon" is already selected by default (second item). Selecting it
+    // must open a sub-screen offering Start/Stop/Restart, not immediately
+    // launch the daemon the way the old single-action binding did.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    let screen = session.wait_for("Restart", Duration::from_secs(3));
+    assert!(
+        screen.contains("Start") && screen.contains("Stop") && screen.contains("Restart"),
+        "daemon screen should list all three actions:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Daemon: running"),
+        "opening the daemon screen must not start anything by itself:\n{screen}"
+    );
+
+    // Esc from the daemon screen with no action run yet must return to Home
+    // without side effects.
+    session.send(KEY_ESC);
+    session.wait_for("> daemon", Duration::from_secs(3));
+
+    // Reopen the daemon screen (selection resets to "Start"), move down once
+    // to select "Stop", and run it. No daemon is running in this sandbox, so
+    // this must surface the same actionable error the CLI's `daemon stop`
+    // would, not hang or silently do nothing.
+    session.send(KEY_ENTER);
+    session.wait_for("Restart", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    let selected = session.wait_for("> Stop", Duration::from_secs(3));
+    assert!(
+        selected.contains("> Stop"),
+        "expected Stop selected:\n{selected}"
+    );
+    session.send(KEY_ENTER);
+    let result = session.wait_for("daemon is not running", Duration::from_secs(5));
+    assert!(
+        result.contains("Daemon"),
+        "expected the Daemon action's title:\n{result}"
+    );
+
+    // Esc from the result screen returns to Home.
+    session.send(KEY_ESC);
+    session.wait_for("> daemon", Duration::from_secs(3));
 
     session.quit_and_wait();
 }

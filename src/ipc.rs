@@ -18,6 +18,7 @@ pub enum Request {
     Status,
     ReloadConfig,
     GetLastResult,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

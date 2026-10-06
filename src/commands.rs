@@ -67,6 +67,50 @@ pub fn spawn_daemon() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Sends a graceful shutdown request to the running daemon and waits for its
+/// control socket to disappear, so callers (`tonguetyped daemon stop`,
+/// `restart_daemon` below) only return once the old process has actually
+/// exited rather than racing a `restart`'s subsequent `spawn_daemon` against
+/// it. Fails immediately, without hanging, when no daemon is running.
+pub async fn stop_daemon() -> anyhow::Result<()> {
+    let sock_path = crate::daemon::socket_path()?;
+    if !sock_path.exists() {
+        anyhow::bail!(
+            "daemon is not running (no socket at {})",
+            sock_path.display()
+        );
+    }
+
+    match send_ipc(Request::Shutdown).await {
+        Ok(Response::Ok) => {}
+        Ok(Response::Error { message }) => {
+            anyhow::bail!("daemon refused shutdown request: {message}")
+        }
+        Ok(other) => anyhow::bail!("unexpected daemon response to shutdown: {other:?}"),
+        Err(error) => anyhow::bail!("failed to reach daemon: {error}"),
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while sock_path.exists() {
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("daemon did not exit within 5s of the shutdown request");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+/// Stops the running daemon (if any) and waits for its socket to clear
+/// before launching a fresh one via `spawn_daemon` - the same detached
+/// background launch the dashboard uses, so `daemon restart` returns once
+/// the new daemon is underway instead of blocking in the foreground.
+pub async fn restart_daemon() -> anyhow::Result<()> {
+    if daemon_socket_exists() {
+        stop_daemon().await?;
+    }
+    spawn_daemon()
+}
+
 pub struct ModelRow {
     pub id: &'static str,
     pub quant: &'static str,

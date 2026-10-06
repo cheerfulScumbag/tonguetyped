@@ -148,11 +148,11 @@ driftable copy - it can never disagree with `--help`. `src/commands.rs` is the o
 shared command-implementation layer both `main.rs`'s CLI dispatch and the dashboard
 call into (IPC send/format, model catalog rows, `activate_model`'s
 download+save+reload+confirm composition) - add new shared command logic there, not
-in either caller. The dashboard's own interactive screens (`Model`, `Autostart`) are
-new ratatui screens in `src/tui/`; `setup` is NOT reimplemented there - the dashboard
-suspends its own alternate screen, runs the pre-existing `setup::run_console()`
-(`src/setup.rs`), then resumes, since a terminal tracks one alternate-screen buffer,
-not a stack.
+in either caller. The dashboard's own interactive screens (`Model`, `Autostart`,
+`Daemon`) are new ratatui screens in `src/tui/`; `setup` is NOT reimplemented
+there - the dashboard suspends its own alternate screen, runs the pre-existing
+`setup::run_console()` (`src/setup.rs`), then resumes, since a terminal tracks
+one alternate-screen buffer, not a stack.
 
 A ratatui app that ever loads an inference model (Doctor, Model-activation) while
 holding raw mode/the alternate screen must keep **two** independent things off the
@@ -208,3 +208,28 @@ doesn't have). Each `Style` can request a different Wayland surface size
 `position`/`monitor`, that size is fixed at first-ever overlay creation for the
 daemon's lifetime, so a style change that affects surface shape needs a daemon
 restart to take visual effect, exactly like a position/monitor change already does.
+
+`tonguetyped daemon` (`src/cli.rs`'s `Commands::Daemon { command: Option<DaemonCommand> }`)
+keeps bare invocation meaning exactly what it always has (foreground start, used
+unchanged by `flake.nix`'s autostart entry) - `stop`/`restart` are a nested
+`DaemonCommand`, not new top-level `Commands` variants, so they don't appear as
+separate dashboard home items (`src/tui/mod.rs` only lists top-level subcommands).
+Selecting "Daemon" there instead opens a small `Screen::Daemon` sub-screen
+(`src/tui/screens.rs`'s `DaemonScreen`) listing Start/Stop/Restart, the same
+three operations the CLI exposes, so the dashboard is never missing a way to
+stop or restart a daemon it can start. `Request::Shutdown` (`src/ipc.rs`,
+handled in `daemon::dispatch`) cancels any in-flight recording/processing the same
+way a client `cancel` would (not a hard kill), then `daemon::run_daemon`'s accept
+loop (`tokio::select!` against a `tokio::sync::Notify`) stops taking new
+connections, releases the instance lock, and only then removes the control
+socket - in that order, since `commands::stop_daemon` treats the socket's
+disappearance as proof the old process (and its lock) is gone, and
+`restart_daemon` chains straight into `spawn_daemon` right after. `commands::
+stop_daemon` polls for the socket to actually disappear after sending
+`Shutdown` (so it fails fast with a clear error when no daemon is running,
+instead of hanging) and `restart_daemon` chains that into the existing
+`spawn_daemon` (the same detached background launch the dashboard already
+used) rather than blocking in the foreground. The dashboard's `start`/`stop`
+home items (single-shot recording start/stop) stay hidden from the home list
+too - `toggle` and `cancel` are the dashboard's recording controls, while
+`start`/`stop` remain reachable only as CLI commands.

@@ -14,6 +14,19 @@ fn install_default_model_stub(data_home: &std::path::Path) {
     .unwrap();
 }
 
+/// Polls for the control socket to appear, the same way every daemon-startup
+/// test here already waited inline before this helper existed.
+fn wait_for_socket(socket: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not open its control socket"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 struct Daemon(Child);
 
 impl Drop for Daemon {
@@ -300,6 +313,180 @@ fn doctor_reports_the_actually_configured_model_id_not_the_default() {
     assert!(output.status.success());
     assert!(stdout.contains(&format!("model id:       {non_default_id}")));
     assert!(stdout.contains(entry.filename));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn daemon_stop_gracefully_shuts_down_and_removes_socket() {
+    let root = std::env::temp_dir().join(format!("tt-daemon-stop-{}", std::process::id()));
+    let config_home = root.join("config");
+    let data_home = root.join("data");
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
+    std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    std::fs::write(
+        config_home.join("tonguetyped/config.toml"),
+        "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
+    )
+    .unwrap();
+    install_default_model_stub(&data_home);
+
+    let binary = env!("CARGO_BIN_EXE_tonguetyped");
+    let child = Command::new(binary)
+        .arg("daemon")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut daemon = Daemon(child);
+    let socket = runtime_dir.join("tonguetyped/control.sock");
+    wait_for_socket(&socket);
+
+    let stop = Command::new(binary)
+        .args(["daemon", "stop"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .unwrap();
+    assert!(
+        stop.status.success(),
+        "daemon stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(
+        !socket.exists(),
+        "control socket was not removed after stop"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            assert!(status.success(), "daemon did not exit cleanly: {status}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon process did not exit after `daemon stop`"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn daemon_stop_without_a_running_daemon_fails_clearly_and_does_not_hang() {
+    let root = std::env::temp_dir().join(format!("tt-daemon-stop-missing-{}", std::process::id()));
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
+        .args(["daemon", "stop"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("daemon is not running"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn daemon_restart_stops_the_old_process_and_starts_a_new_one() {
+    let root = std::env::temp_dir().join(format!("tt-daemon-restart-{}", std::process::id()));
+    let config_home = root.join("config");
+    let data_home = root.join("data");
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
+    std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    std::fs::write(
+        config_home.join("tonguetyped/config.toml"),
+        "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
+    )
+    .unwrap();
+    install_default_model_stub(&data_home);
+
+    let binary = env!("CARGO_BIN_EXE_tonguetyped");
+    let child = Command::new(binary)
+        .arg("daemon")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = Daemon(child);
+    let socket = runtime_dir.join("tonguetyped/control.sock");
+    wait_for_socket(&socket);
+
+    let restart = Command::new(binary)
+        .args(["daemon", "restart"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .output()
+        .unwrap();
+    assert!(
+        restart.status.success(),
+        "daemon restart failed: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+
+    // The original process must have actually exited, not merely dropped its
+    // socket momentarily between the old process removing it and the new one
+    // rebinding.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = first.0.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "old daemon did not exit cleanly: {status}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "old daemon process did not exit after `daemon restart`"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // `restart` launches the replacement detached and returns before it
+    // necessarily finishes (re)binding, so confirm the new daemon is up by
+    // waiting for the socket and then successfully talking to it.
+    wait_for_socket(&socket);
+    let status = Command::new(binary)
+        .arg("status")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+
+    // The replacement is a detached grandchild, not `first`'s child, so it
+    // must be stopped explicitly rather than relying on any Drop guard here.
+    let stop = Command::new(binary)
+        .args(["daemon", "stop"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .unwrap();
+    assert!(stop.status.success());
 
     std::fs::remove_dir_all(root).unwrap();
 }

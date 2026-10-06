@@ -76,6 +76,47 @@ impl ModelScreen {
     }
 }
 
+pub(super) const DAEMON_ACTIONS: [&str; 3] = ["Start", "Stop", "Restart"];
+
+pub(super) struct DaemonScreen {
+    pub selected: usize,
+}
+
+impl DaemonScreen {
+    pub(super) fn new() -> Self {
+        Self { selected: 0 }
+    }
+
+    pub(super) fn move_selection(&mut self, delta: i32) {
+        let len = DAEMON_ACTIONS.len() as i32;
+        let next = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
+        self.selected = next;
+    }
+
+    pub(super) fn selected_action(&self) -> &'static str {
+        DAEMON_ACTIONS[self.selected]
+    }
+
+    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+        let lines: Vec<Line> = DAEMON_ACTIONS
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let marker = if index == self.selected { "> " } else { "  " };
+                let style = if index == self.selected {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(format!("{marker}{label}"), style))
+            })
+            .collect();
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Daemon"))
+    }
+}
+
 pub(super) struct AutostartScreen {
     pub selected: usize,
     pub result: Option<Result<(), String>>,

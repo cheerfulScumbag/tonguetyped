@@ -40,6 +40,7 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
 
     let coordinator = Arc::new(Coordinator::new(config)?);
     let listener = UnixListener::bind(&sock_path)?;
+    let shutdown = Arc::new(tokio::sync::Notify::new());
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let activation = coordinator.clone();
     let activation_status = coordinator.clone();
@@ -66,14 +67,29 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     tracing::info!("daemon listening on {}", sock_path.display());
 
     loop {
-        let (stream, _addr) = listener.accept().await?;
-        let coord = coordinator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, coord).await {
-                tracing::error!("connection error: {}", e);
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _addr) = accepted?;
+                let coord = coordinator.clone();
+                let shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, coord, shutdown).await {
+                        tracing::error!("connection error: {}", e);
+                    }
+                });
             }
-        });
+            _ = shutdown.notified() => break,
+        }
     }
+
+    tracing::info!("daemon shutting down");
+    // Release the instance lock before removing the socket: `stop_daemon`
+    // treats socket-absence as proof the process (and its lock) is gone, so
+    // a `restart` racing a `spawn_daemon` against a still-held lock is only
+    // ruled out if the lock is actually free by the time the socket is.
+    drop(_lock);
+    std::fs::remove_file(&sock_path).ok();
+    Ok(())
 }
 
 async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
@@ -125,6 +141,7 @@ fn acquire_instance_lock_at(
 async fn handle_connection(
     stream: UnixStream,
     coordinator: Arc<Coordinator>,
+    shutdown: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -149,9 +166,15 @@ async fn handle_connection(
             }
         };
 
+        let is_shutdown = matches!(request, Request::Shutdown);
         let response = dispatch(&coordinator, request).await;
         let frame = encode_frame(&response)?;
         writer.write_all(frame.as_bytes()).await?;
+        writer.flush().await?;
+        if is_shutdown {
+            shutdown.notify_one();
+            break;
+        }
     }
 
     Ok(())
@@ -189,6 +212,14 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
                 };
             }
         },
+        Request::Shutdown => {
+            // Cancel rather than kill: any in-flight recording/processing is
+            // torn down the same way a client-issued `cancel` would, instead
+            // of leaving it to die mid-dictation when the process exits.
+            // `cancel()` itself already handles the idle case as a no-op.
+            let _ = coordinator.handle_command(CoordinatorCommand::Cancel).await;
+            return Response::Ok;
+        }
         Request::GetLastResult => {
             let result = coordinator.get_last_result();
             match result {
