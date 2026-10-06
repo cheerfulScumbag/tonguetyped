@@ -186,11 +186,9 @@ const KEY_DOWN: &[u8] = b"\x1b[B";
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 
-const ALL_COMMAND_NAMES: [&str; 13] = [
+const ALL_COMMAND_NAMES: [&str; 11] = [
     "setup",
     "daemon",
-    "start",
-    "stop",
     "toggle",
     "cancel",
     "status",
@@ -210,7 +208,7 @@ fn pty_bare_invocation_opens_the_dashboard_with_full_command_coverage_on_a_norma
     // The pre-change baseline (see .superdesign/replica_html_template and
     // this task's report) was a clap "missing subcommand" usage error on
     // stderr with exit code 2 - bare invocation must now instead render the
-    // dashboard: the centered logo and every one of the 13 real commands on
+    // dashboard: the centered logo and every one of the 11 dashboard commands on
     // one screen, no pagination.
     let screen = session.wait_for("Commands", Duration::from_secs(5));
     assert!(
@@ -221,6 +219,15 @@ fn pty_bare_invocation_opens_the_dashboard_with_full_command_coverage_on_a_norma
         assert!(
             screen.contains(name),
             "home screen is missing command {name:?}; got:\n{screen}"
+        );
+    }
+    for hidden in [
+        "start          Start a new recording",
+        "stop           Stop the current recording",
+    ] {
+        assert!(
+            !screen.contains(hidden),
+            "home screen must omit {hidden:?}; got:\n{screen}"
         );
     }
     assert!(
@@ -267,7 +274,7 @@ fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_ho
 
     session.send(KEY_DOWN);
     session.send(KEY_DOWN);
-    let after_down = session.wait_for("> start", Duration::from_secs(3));
+    let after_down = session.wait_for("> toggle", Duration::from_secs(3));
     assert!(
         !after_down.contains("> setup") && !after_down.contains("> daemon"),
         "only one row should carry the selection marker:\n{after_down}"
@@ -326,11 +333,11 @@ fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_erro
     let mut session = Session::spawn(&sandbox, 100, 32);
     session.wait_for("Commands", Duration::from_secs(5));
 
-    // Navigate to "status" (index 6: setup, daemon, start, stop, toggle,
-    // cancel, status) and select it. No daemon is running in this sandbox,
-    // so the dashboard must show a visible, actionable error - not hang,
-    // not crash, not silently do nothing.
-    for _ in 0..6 {
+    // Navigate to "status" (index 4: setup, daemon, toggle, cancel, status)
+    // and select it. No daemon is running in this sandbox, so the dashboard
+    // must show a visible, actionable error - not hang, not crash, not
+    // silently do nothing.
+    for _ in 0..4 {
         session.send(KEY_DOWN);
     }
     session.send(KEY_ENTER);
@@ -365,7 +372,7 @@ fn pty_model_screen_lists_the_catalog_and_activation_reports_confirmed_failure_f
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Commands", Duration::from_secs(5));
 
-    for _ in 0..12 {
+    for _ in 0..10 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> model", Duration::from_secs(3));
