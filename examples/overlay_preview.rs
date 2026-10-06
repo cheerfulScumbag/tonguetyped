@@ -4,9 +4,12 @@
 //! a screenshot script) can confirm placement and appearance on a given
 //! compositor, without needing a microphone or a downloaded Whisper model.
 //! Run with `cargo run --example overlay_preview -- top-left`.
-//! Pass a state name (recording/transcribing/success/cancelled/error) as a
-//! second argument to hold on just that one state for 30s, e.g. for
-//! screenshotting: `cargo run --example overlay_preview -- top-right recording`.
+//! Pass a state name (recording/transcribing/success/cancelled/error/
+//! streaming) as a second argument to hold on just that one state for 30s,
+//! e.g. for screenshotting: `cargo run --example overlay_preview -- top-right
+//! recording`. "streaming" holds the Recording phase with
+//! `overlay.streaming_indicator` enabled, to preview the live-capture
+//! waveform look instead of the default pulse.
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -21,10 +24,11 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "top-right".to_string());
     let hold = std::env::args().nth(2);
-    let config = OverlayConfig {
+    let mut config = OverlayConfig {
         enabled: true,
         position,
         monitor: "active".to_string(),
+        streaming_indicator: false,
     };
 
     if !tonguetyped::overlay::probe_available() {
@@ -37,6 +41,10 @@ fn main() {
     if let Some(name) = hold {
         let event = match name.as_str() {
             "recording" => FeedbackEvent::Recording,
+            "streaming" => {
+                config.streaming_indicator = true;
+                FeedbackEvent::Recording
+            }
             "transcribing" => FeedbackEvent::Processing,
             "success" => FeedbackEvent::Success,
             "cancelled" => FeedbackEvent::Cancelled,

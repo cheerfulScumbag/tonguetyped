@@ -170,6 +170,7 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         phase: None,
         deadline: None,
         anim_start: Instant::now(),
+        streaming_indicator: false,
         ticking: false,
         ticking_animated: false,
         timer_generation: 0,
@@ -233,6 +234,7 @@ struct State {
     phase: Option<Phase>,
     deadline: Option<Instant>,
     anim_start: Instant,
+    streaming_indicator: bool,
     ticking: bool,
     ticking_animated: bool,
     timer_generation: u64,
@@ -245,6 +247,7 @@ impl State {
         self.phase = Some(phase);
         self.deadline = phase.dwell().map(|dwell| Instant::now() + dwell);
         self.anim_start = Instant::now();
+        self.streaming_indicator = command.config.streaming_indicator;
 
         if self.layer.is_none() {
             self.create_layer(&command.config);
@@ -364,7 +367,7 @@ impl State {
             height,
         };
         let t = animation_fraction(self.phase, self.anim_start);
-        paint(&mut canvas, self.phase, t);
+        paint(&mut canvas, self.phase, t, self.streaming_indicator);
 
         layer
             .wl_surface()
@@ -397,6 +400,32 @@ fn anchor_for(position: &str) -> Anchor {
         "bottom" => Anchor::BOTTOM,
         "center" => Anchor::empty(),
         _ => Anchor::TOP | Anchor::RIGHT,
+    }
+}
+
+/// The `overlay.streaming_indicator` look for `Phase::Recording`: a small
+/// multi-bar waveform in place of the single pulsing dot, standing in for
+/// Handy's reactive live-capture waveform (see `OverlayConfig::
+/// streaming_indicator`'s doc comment for why this is synthetic animation
+/// rather than real microphone-reactive bars - there is no live audio-level
+/// feed wired to this actor, only the elapsed-time fraction every other phase
+/// already animates from).
+fn paint_streaming_waveform(canvas: &mut Canvas, cx: f32, cy: f32, disc_radius: f32, t: f32) {
+    use std::f32::consts::TAU;
+    const BAR_COUNT: usize = 5;
+    const FREQUENCIES: [f32; BAR_COUNT] = [1.0, 1.6, 2.3, 1.4, 1.9];
+    const PHASE_OFFSETS: [f32; BAR_COUNT] = [0.0, 0.5, 0.15, 0.8, 0.35];
+
+    let baseline_y = cy + disc_radius * 0.55;
+    let bar_width = disc_radius * 0.34;
+    let gap = disc_radius * 0.12;
+    let total_width = BAR_COUNT as f32 * bar_width + (BAR_COUNT - 1) as f32 * gap;
+    let mut x = cx - total_width / 2.0 + bar_width / 2.0;
+    for i in 0..BAR_COUNT {
+        let wave = 0.5 + 0.5 * ((t + PHASE_OFFSETS[i]) * TAU * FREQUENCIES[i]).sin();
+        let height = disc_radius * (0.22 + 0.78 * wave);
+        fill_bar(canvas, x, baseline_y, bar_width, height, GLYPH_COLOR);
+        x += bar_width + gap;
     }
 }
 
@@ -590,6 +619,28 @@ fn fill_square(canvas: &mut Canvas, cx: f32, cy: f32, half: f32, rgb: (u8, u8, u
     }
 }
 
+/// Fills a vertical bar of `width` centered on `cx`, growing upward from
+/// `baseline_y` by `height` - the building block for the streaming-indicator
+/// waveform (see `paint`'s `Phase::Recording` branch).
+fn fill_bar(
+    canvas: &mut Canvas,
+    cx: f32,
+    baseline_y: f32,
+    width: f32,
+    height: f32,
+    rgb: (u8, u8, u8),
+) {
+    let min_x = (cx - width / 2.0).round().max(0.0) as i32;
+    let max_x = (cx + width / 2.0).round().min(canvas.width as f32) as i32;
+    let min_y = (baseline_y - height).round().max(0.0) as i32;
+    let max_y = baseline_y.round().min(canvas.height as f32) as i32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            canvas.blend(x, y, rgb, 1.0);
+        }
+    }
+}
+
 fn stroke_line(
     canvas: &mut Canvas,
     x0: f32,
@@ -658,7 +709,7 @@ fn stroke_arc(
     }
 }
 
-fn paint(canvas: &mut Canvas, phase: Option<Phase>, t: f32) {
+fn paint(canvas: &mut Canvas, phase: Option<Phase>, t: f32, streaming_indicator: bool) {
     canvas.pixels.fill(0);
     let Some(phase) = phase else { return };
 
@@ -667,6 +718,10 @@ fn paint(canvas: &mut Canvas, phase: Option<Phase>, t: f32) {
     let disc_radius = canvas.width.min(canvas.height) as f32 * 0.42;
 
     match phase {
+        Phase::Recording if streaming_indicator => {
+            fill_circle(canvas, cx, cy, disc_radius, RECORDING_COLOR);
+            paint_streaming_waveform(canvas, cx, cy, disc_radius, t);
+        }
         Phase::Recording => {
             fill_circle(canvas, cx, cy, disc_radius, RECORDING_COLOR);
             let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
@@ -843,7 +898,7 @@ mod tests {
                     width: BADGE,
                     height: BADGE,
                 };
-                paint(&mut canvas, Some(phase), 0.0);
+                paint(&mut canvas, Some(phase), 0.0, false);
             }
             assert!(
                 pixels.iter().any(|&byte| byte != 0),
@@ -866,8 +921,34 @@ mod tests {
                 width: BADGE,
                 height: BADGE,
             };
-            paint(&mut canvas, None, 0.0);
+            paint(&mut canvas, None, 0.0, false);
         }
         assert!(pixels.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn streaming_indicator_paints_a_different_recording_glyph_than_the_default_pulse() {
+        let mut default_pixels = vec![0u8; (BADGE * BADGE * 4) as usize];
+        let mut streaming_pixels = vec![0u8; (BADGE * BADGE * 4) as usize];
+        {
+            let mut canvas = Canvas {
+                pixels: &mut default_pixels,
+                width: BADGE,
+                height: BADGE,
+            };
+            paint(&mut canvas, Some(Phase::Recording), 0.25, false);
+        }
+        {
+            let mut canvas = Canvas {
+                pixels: &mut streaming_pixels,
+                width: BADGE,
+                height: BADGE,
+            };
+            paint(&mut canvas, Some(Phase::Recording), 0.25, true);
+        }
+        assert_ne!(
+            default_pixels, streaming_pixels,
+            "streaming_indicator should visually differ from the default pulse"
+        );
     }
 }

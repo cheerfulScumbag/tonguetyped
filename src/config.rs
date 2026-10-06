@@ -324,6 +324,18 @@ pub struct OverlayConfig {
     pub position: String,
     #[serde(default = "default_overlay_monitor")]
     pub monitor: String,
+    // Handy (github.com/cjpais/Handy) distinguishes a minimal recording pill
+    // from a busier "Live" panel with a reactive waveform once streaming
+    // transcription is active. TongueTyped has no streaming inference backend
+    // to drive real partial-transcript text (see AGENTS.md's inference
+    // section - `Session::run` is single-shot), so this is the feasible
+    // equivalent within the existing pixel-badge overlay: an opt-in, busier
+    // multi-bar animated treatment of the Recording phase in place of the
+    // plain pulsing dot, signaling "actively capturing" the same way Handy's
+    // live panel does, without implying live transcript text that doesn't
+    // exist here.
+    #[serde(default = "default_false")]
+    pub streaming_indicator: bool,
 }
 
 impl Default for OverlayConfig {
@@ -332,6 +344,7 @@ impl Default for OverlayConfig {
             enabled: true,
             position: default_overlay_position(),
             monitor: default_overlay_monitor(),
+            streaming_indicator: false,
         }
     }
 }
@@ -793,6 +806,7 @@ mod tests {
     fn feedback_settings_default_the_overlay_on_and_sounds_off() {
         let mut config = Config::default();
         assert!(config.overlay.enabled);
+        assert!(!config.overlay.streaming_indicator);
         assert!(!config.audio.feedback_sounds);
 
         config.audio.feedback_sounds = true;
@@ -808,5 +822,15 @@ mod tests {
         assert!(config.validate().is_err());
         config.audio.feedback_volume = 1.01;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn streaming_indicator_defaults_off_and_round_trips_through_toml() {
+        let config: Config = toml::from_str("[overlay]\nenabled = true\n").unwrap();
+        assert!(!config.overlay.streaming_indicator);
+
+        let config: Config =
+            toml::from_str("[overlay]\nenabled = true\nstreaming_indicator = true\n").unwrap();
+        assert!(config.overlay.streaming_indicator);
     }
 }
