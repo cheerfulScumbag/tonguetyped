@@ -9,8 +9,8 @@
 //! doc comment).
 //!
 //! The command list on the first page is derived from `crate::cli::Cli`'s
-//! clap metadata (`Cli::command().get_subcommands()`), not a hand-maintained
-//! copy, so it can never drift from what `--help` prints.
+//! clap metadata (`Cli::command().get_subcommands()`), with the directional
+//! recording commands intentionally omitted in favor of Toggle.
 
 mod logo;
 mod screens;
@@ -142,14 +142,14 @@ struct HomeItem {
     about: String,
 }
 
-/// The dashboard's first-page command list, derived from the exact same
-/// clap metadata `--help` renders - see this module's doc comment. The
-/// implicit `help` meta-subcommand clap adds is excluded; it has no useful
-/// standalone dashboard action.
+/// The dashboard's first-page command list comes from clap metadata, except
+/// Start and Stop are intentionally omitted because Toggle covers both
+/// recording actions here. The implicit `help` meta-subcommand is also
+/// excluded because it has no useful standalone dashboard action.
 fn home_items() -> Vec<HomeItem> {
     Cli::command()
         .get_subcommands()
-        .filter(|command| command.get_name() != "help")
+        .filter(|command| !matches!(command.get_name(), "help" | "start" | "stop"))
         .map(|command| HomeItem {
             name: command.get_name().to_string(),
             about: command
@@ -775,15 +775,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn home_items_cover_every_real_cli_command_in_declared_order_excluding_help() {
+    fn home_items_exclude_directional_recording_commands() {
         let names: Vec<String> = home_items().into_iter().map(|item| item.name).collect();
         assert_eq!(
             names,
             vec![
                 "setup",
                 "daemon",
-                "start",
-                "stop",
                 "toggle",
                 "cancel",
                 "status",
