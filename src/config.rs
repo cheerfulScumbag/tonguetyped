@@ -336,6 +336,12 @@ pub struct OverlayConfig {
     // exist here.
     #[serde(default = "default_false")]
     pub streaming_indicator: bool,
+    // Three captain-approved looks from the superdesign review (see
+    // data/tt-tui-overlay-settings-menu-ce - `badge`, `minimal`, `pill`);
+    // `src/overlay.rs::style_for` parses this, falling back to `badge` for an
+    // unrecognized value exactly like `anchor_for` falls back on `position`.
+    #[serde(default = "default_overlay_style")]
+    pub style: String,
 }
 
 impl Default for OverlayConfig {
@@ -345,6 +351,7 @@ impl Default for OverlayConfig {
             position: default_overlay_position(),
             monitor: default_overlay_monitor(),
             streaming_indicator: false,
+            style: default_overlay_style(),
         }
     }
 }
@@ -446,6 +453,10 @@ fn default_overlay_position() -> String {
 
 fn default_overlay_monitor() -> String {
     "active".to_string()
+}
+
+fn default_overlay_style() -> String {
+    "badge".to_string()
 }
 
 /// Rewrites a config file's pre-consolidation `[model]` table - the GPU-only
@@ -832,5 +843,15 @@ mod tests {
         let config: Config =
             toml::from_str("[overlay]\nenabled = true\nstreaming_indicator = true\n").unwrap();
         assert!(config.overlay.streaming_indicator);
+    }
+
+    #[test]
+    fn overlay_style_defaults_to_badge_and_round_trips_through_toml() {
+        let config = Config::default();
+        assert_eq!(config.overlay.style, "badge");
+
+        let config: Config =
+            toml::from_str("[overlay]\nenabled = true\nstyle = \"pill\"\n").unwrap();
+        assert_eq!(config.overlay.style, "pill");
     }
 }

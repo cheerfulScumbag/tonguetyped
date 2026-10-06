@@ -9,7 +9,10 @@
 //! e.g. for screenshotting: `cargo run --example overlay_preview -- top-right
 //! recording`. "streaming" holds the Recording phase with
 //! `overlay.streaming_indicator` enabled, to preview the live-capture
-//! waveform look instead of the default pulse.
+//! waveform look instead of the default pulse. Pass a style name
+//! (badge/minimal/pill) as a third argument to preview one of the other two
+//! `overlay.style` looks, e.g. `cargo run --example overlay_preview --
+//! top-right recording pill`.
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -24,11 +27,15 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "top-right".to_string());
     let hold = std::env::args().nth(2);
+    let style = std::env::args()
+        .nth(3)
+        .unwrap_or_else(|| "badge".to_string());
     let mut config = OverlayConfig {
         enabled: true,
         position,
         monitor: "active".to_string(),
         streaming_indicator: false,
+        style,
     };
 
     if !tonguetyped::overlay::probe_available() {

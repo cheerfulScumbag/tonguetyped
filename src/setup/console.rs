@@ -50,6 +50,11 @@ const OVERLAY_STREAMING_LABELS: [&str; 2] = [
     "Simple pulse",
     "Streaming waveform (live-capture indicator)",
 ];
+// Matches `OverlayConfig::style`'s accepted values 1:1 (`overlay::style_for`'s
+// match arms) - these three were the captain-approved options from the
+// superdesign review (data/tt-tui-overlay-settings-menu-ce).
+const OVERLAY_STYLE_VALUES: [&str; 3] = ["badge", "minimal", "pill"];
+const OVERLAY_STYLE_LABELS: [&str; 3] = ["Badge", "Minimal", "Pill"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepKind {
@@ -63,6 +68,7 @@ enum StepKind {
     Startup,
     OverlayEnabled,
     OverlayPosition,
+    OverlayStyle,
     OverlayStreaming,
     Confirm,
 }
@@ -114,6 +120,7 @@ struct ConsoleState {
     startup_selection: usize,
     overlay_enabled_selection: usize,
     overlay_position_selection: usize,
+    overlay_style_selection: usize,
     overlay_streaming_selection: usize,
     shortcut_input: String,
     error: Option<String>,
@@ -157,6 +164,10 @@ impl ConsoleState {
             .iter()
             .position(|value| *value == config.overlay.position)
             .unwrap_or(2);
+        let overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == config.overlay.style)
+            .unwrap_or(0);
         let overlay_streaming_selection = usize::from(config.overlay.streaming_indicator);
         let shortcut_input = config.activation.keybind.clone();
 
@@ -175,6 +186,7 @@ impl ConsoleState {
             startup_selection,
             overlay_enabled_selection,
             overlay_position_selection,
+            overlay_style_selection,
             overlay_streaming_selection,
             shortcut_input,
             error: None,
@@ -310,6 +322,7 @@ impl ConsoleState {
             StepKind::Startup => STARTUP_LABELS.len(),
             StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
             StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
+            StepKind::OverlayStyle => OVERLAY_STYLE_VALUES.len(),
             StepKind::OverlayStreaming => OVERLAY_STREAMING_LABELS.len(),
             StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => 0,
         }
@@ -325,6 +338,7 @@ impl ConsoleState {
             StepKind::Startup => &mut self.startup_selection,
             StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
             StepKind::OverlayPosition => &mut self.overlay_position_selection,
+            StepKind::OverlayStyle => &mut self.overlay_style_selection,
             StepKind::OverlayStreaming => &mut self.overlay_streaming_selection,
             StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => {
                 unreachable!("no list selection for this step")
@@ -365,6 +379,7 @@ impl ConsoleState {
         steps.push(OverlayEnabled);
         if self.overlay_options_shown() {
             steps.push(OverlayPosition);
+            steps.push(OverlayStyle);
             steps.push(OverlayStreaming);
         }
         steps.push(Confirm);
@@ -443,6 +458,10 @@ impl ConsoleState {
             StepKind::OverlayPosition => {
                 self.config.overlay.position =
                     OVERLAY_POSITION_VALUES[self.overlay_position_selection].to_string();
+            }
+            StepKind::OverlayStyle => {
+                self.config.overlay.style =
+                    OVERLAY_STYLE_VALUES[self.overlay_style_selection].to_string();
             }
             StepKind::OverlayStreaming => {
                 self.config.overlay.streaming_indicator = self.overlay_streaming_selection == 1;
@@ -583,6 +602,7 @@ impl ConsoleState {
             StepKind::Startup => "Startup",
             StepKind::OverlayEnabled => "Overlay",
             StepKind::OverlayPosition => "Overlay position",
+            StepKind::OverlayStyle => "Overlay style",
             StepKind::OverlayStreaming => "Overlay streaming",
             StepKind::Confirm => "Review",
         }
@@ -716,6 +736,15 @@ impl ConsoleState {
                 list_paragraph(
                     &OVERLAY_POSITION_VALUES.map(String::from),
                     self.overlay_position_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::OverlayStyle => frame.render_widget(
+                list_paragraph(
+                    &OVERLAY_STYLE_LABELS.map(String::from),
+                    self.overlay_style_selection,
                     self.step_title(),
                     area.height,
                 ),
@@ -877,8 +906,9 @@ impl ConsoleState {
                 "Overlay:     {}",
                 if self.config.overlay.enabled {
                     format!(
-                        "enabled, {}, {}",
+                        "enabled, {}, {} style, {}",
                         self.config.overlay.position,
+                        self.config.overlay.style,
                         if self.config.overlay.streaming_indicator {
                             "streaming waveform"
                         } else {
@@ -1049,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn enabling_the_overlay_walks_through_position_and_streaming_before_confirm() {
+    fn enabling_the_overlay_walks_through_position_style_and_streaming_before_confirm() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::OverlayEnabled;
         state.overlay_enabled_selection = 1;
@@ -1062,6 +1092,14 @@ mod tests {
             .unwrap();
         state.advance().unwrap();
         assert_eq!(state.config.overlay.position, "bottom-left");
+        assert_eq!(state.step, StepKind::OverlayStyle);
+
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "pill")
+            .unwrap();
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.style, "pill");
         assert_eq!(state.step, StepKind::OverlayStreaming);
 
         state.overlay_streaming_selection = 1;
