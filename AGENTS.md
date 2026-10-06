@@ -200,8 +200,8 @@ elapsed-time fraction every other phase already animates from), not a real
 microphone-reactive one: there is no live audio-level feed wired from the
 coordinator's recording stream into the overlay actor, and wiring one would mean
 changing the `CoordinatorRuntime::record` trait signature - out of scope for what
-this is (see `data/tt-tui-overlay-settings-menu-ce` for the research into how the
-Handy dictation app's real streaming-transcription overlay inspired this, and why a
+this is (the Handy dictation app's real streaming-transcription overlay inspired
+this - reviewed as Superdesign mockups and approved by the captain - and why a
 literal equivalent isn't buildable without a streaming inference backend this project
 doesn't have). Each `Style` can request a different Wayland surface size
 (`overlay::surface_size_for`; only `Pill` departs from the square badge) - like

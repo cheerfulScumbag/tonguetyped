@@ -51,8 +51,8 @@ const OVERLAY_STREAMING_LABELS: [&str; 2] = [
     "Streaming waveform (live-capture indicator)",
 ];
 // Matches `OverlayConfig::style`'s accepted values 1:1 (`overlay::style_for`'s
-// match arms) - these three were the captain-approved options from the
-// superdesign review (data/tt-tui-overlay-settings-menu-ce).
+// match arms) - these three were reviewed as Superdesign mockups and
+// approved by the captain.
 const OVERLAY_STYLE_VALUES: [&str; 3] = ["badge", "minimal", "pill"];
 const OVERLAY_STYLE_LABELS: [&str; 3] = ["Badge", "Minimal", "Pill"];
 
