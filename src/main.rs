@@ -1,5 +1,5 @@
 use clap::Parser;
-use tonguetyped::cli::{AutostartCommand, Cli, Commands, ModelCommand};
+use tonguetyped::cli::{AutostartCommand, Cli, Commands, DaemonCommand, ModelCommand};
 use tonguetyped::{
     activation, autostart, catalog, commands, config, daemon, doctor, ipc, model, setup, tui,
 };
@@ -29,9 +29,21 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         None => tui::run().await?,
         Some(Commands::Setup) => setup::run()?,
-        Some(Commands::Daemon) => {
+        Some(Commands::Daemon { command: None }) => {
             let config = config::Config::load()?;
             daemon::run_daemon(config).await?;
+        }
+        Some(Commands::Daemon {
+            command: Some(DaemonCommand::Stop),
+        }) => {
+            commands::stop_daemon().await?;
+            println!("daemon stopped");
+        }
+        Some(Commands::Daemon {
+            command: Some(DaemonCommand::Restart),
+        }) => {
+            commands::restart_daemon().await?;
+            println!("daemon restarted");
         }
         Some(Commands::Start) => {
             send_command(ipc::Request::Start).await?;

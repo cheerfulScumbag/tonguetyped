@@ -21,7 +21,10 @@ pub enum Commands {
     /// Configure TongueTyped interactively
     Setup,
     /// Start the daemon process
-    Daemon,
+    Daemon {
+        #[command(subcommand)]
+        command: Option<DaemonCommand>,
+    },
     /// Start a new recording
     Start,
     /// Stop the current recording
@@ -72,6 +75,14 @@ pub enum ModelCommand {
     Remove { id: String },
     /// Select which installed catalog model the inference engine loads
     Use { id: String },
+}
+
+#[derive(Subcommand, Clone, Copy)]
+pub enum DaemonCommand {
+    /// Gracefully stop the running daemon
+    Stop,
+    /// Stop the running daemon, then start a fresh one
+    Restart,
 }
 
 #[derive(Subcommand, Clone, Copy)]

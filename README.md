@@ -185,6 +185,8 @@ The CLI provides these commands:
 
 ```text
 tonguetyped daemon         Start the daemon
+tonguetyped daemon stop    Gracefully stop the running daemon
+tonguetyped daemon restart Stop the running daemon, then start a fresh one
 tonguetyped setup          Configure TongueTyped interactively
 tonguetyped start          Start recording
 tonguetyped stop           Stop and transcribe the recording

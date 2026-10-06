@@ -647,6 +647,35 @@ async fn feedback_tracks_successful_state_transitions_once() {
 }
 
 #[tokio::test]
+async fn shutdown_cancels_in_flight_recording_and_reports_ok() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    assert!(matches!(
+        dispatch(&coordinator, Request::Shutdown).await,
+        Response::Ok
+    ));
+    wait_for_worker_completion(&runtime, owner_count).await;
+    wait_for_state(&coordinator, "idle").await;
+}
+
+#[tokio::test]
+async fn shutdown_while_idle_still_reports_ok() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime, 2);
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Shutdown).await,
+        Response::Ok
+    ));
+}
+
+#[tokio::test]
 async fn feedback_distinguishes_cancellation_from_worker_failure() {
     let runtime = Arc::new(TestRuntime::default());
     let feedback = Arc::new(RecordingFeedback::default());
