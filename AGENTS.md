@@ -213,14 +213,23 @@ restart to take visual effect, exactly like a position/monitor change already do
 keeps bare invocation meaning exactly what it always has (foreground start, used
 unchanged by `flake.nix`'s autostart entry) - `stop`/`restart` are a nested
 `DaemonCommand`, not new top-level `Commands` variants, so they don't appear as
-separate dashboard home items (`src/tui/mod.rs` only lists top-level subcommands);
-selecting "Daemon" there still starts it. `Request::Shutdown` (`src/ipc.rs`,
+separate dashboard home items (`src/tui/mod.rs` only lists top-level subcommands).
+Selecting "Daemon" there instead opens a small `Screen::Daemon` sub-screen
+(`src/tui/screens.rs`'s `DaemonScreen`) listing Start/Stop/Restart, the same
+three operations the CLI exposes, so the dashboard is never missing a way to
+stop or restart a daemon it can start. `Request::Shutdown` (`src/ipc.rs`,
 handled in `daemon::dispatch`) cancels any in-flight recording/processing the same
 way a client `cancel` would (not a hard kill), then `daemon::run_daemon`'s accept
 loop (`tokio::select!` against a `tokio::sync::Notify`) stops taking new
-connections, removes the control socket, and returns. `commands::stop_daemon`
-polls for the socket to actually disappear after sending `Shutdown` (so it fails
-fast with a clear error when no daemon is running, instead of hanging) and
-`restart_daemon` chains that into the existing `spawn_daemon` (the same detached
-background launch the dashboard already used) rather than blocking in the
-foreground.
+connections, releases the instance lock, and only then removes the control
+socket - in that order, since `commands::stop_daemon` treats the socket's
+disappearance as proof the old process (and its lock) is gone, and
+`restart_daemon` chains straight into `spawn_daemon` right after. `commands::
+stop_daemon` polls for the socket to actually disappear after sending
+`Shutdown` (so it fails fast with a clear error when no daemon is running,
+instead of hanging) and `restart_daemon` chains that into the existing
+`spawn_daemon` (the same detached background launch the dashboard already
+used) rather than blocking in the foreground. The dashboard's `start`/`stop`
+home items (single-shot recording start/stop) stay hidden from the home list
+too - `toggle` and `cancel` are the dashboard's recording controls, while
+`start`/`stop` remain reachable only as CLI commands.

@@ -142,10 +142,13 @@ struct HomeItem {
     about: String,
 }
 
-/// The dashboard's first-page command list comes from clap metadata, except
-/// Start and Stop are intentionally omitted because Toggle covers both
-/// recording actions here. The implicit `help` meta-subcommand is also
-/// excluded because it has no useful standalone dashboard action.
+/// The dashboard's first-page command list, derived from the exact same
+/// clap metadata `--help` renders - see this module's doc comment. The
+/// implicit `help` meta-subcommand clap adds is excluded; it has no useful
+/// standalone dashboard action. `start`/`stop` (single-shot recording
+/// start/stop) are also excluded: the dashboard offers `toggle` and
+/// `cancel` for recording control, and `start`/`stop` remain reachable only
+/// as the public CLI commands documented in `--help`.
 fn home_items() -> Vec<HomeItem> {
     Cli::command()
         .get_subcommands()
@@ -168,6 +171,7 @@ enum Screen {
     },
     Model(screens::ModelScreen),
     Autostart(screens::AutostartScreen),
+    Daemon(screens::DaemonScreen),
 }
 
 struct PendingAction {
@@ -278,6 +282,7 @@ impl App {
             Screen::Info { .. } => self.handle_info_key(key),
             Screen::Model(_) => self.handle_model_key(key),
             Screen::Autostart(_) => self.handle_autostart_key(key),
+            Screen::Daemon(_) => self.handle_daemon_key(key),
         }
         Ok(())
     }
@@ -374,6 +379,34 @@ impl App {
         }
     }
 
+    fn handle_daemon_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::Daemon(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::Daemon(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter if self.pending.is_none() => {
+                if let Screen::Daemon(screen) = &self.screen {
+                    match screen.selected_action() {
+                        "Start" => self.spawn_pending("Daemon", daemon_task(), None),
+                        "Stop" => self.spawn_pending("Daemon", daemon_stop_task(), None),
+                        "Restart" => self.spawn_pending("Daemon", daemon_restart_task(), None),
+                        other => unreachable!("daemon screen has no handler for {other:?}"),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn dispatch_home_action(
         &mut self,
         name: &str,
@@ -381,9 +414,7 @@ impl App {
     ) -> anyhow::Result<()> {
         match name {
             "setup" => self.run_setup_console(terminal)?,
-            "daemon" => self.spawn_pending("Daemon", daemon_task(), None),
-            "start" => self.spawn_ipc_pending("Start", ipc::Request::Start),
-            "stop" => self.spawn_ipc_pending("Stop", ipc::Request::Stop),
+            "daemon" => self.screen = Screen::Daemon(screens::DaemonScreen::new()),
             "toggle" => self.spawn_ipc_pending("Toggle", ipc::Request::Toggle),
             "cancel" => self.spawn_ipc_pending("Cancel", ipc::Request::Cancel),
             "status" => self.spawn_ipc_pending("Status", ipc::Request::Status),
@@ -474,6 +505,7 @@ impl App {
             Screen::Info { title, lines } => render_info(frame, area, title, lines),
             Screen::Model(screen) => self.render_model(frame, area, screen),
             Screen::Autostart(screen) => self.render_autostart(frame, area, screen),
+            Screen::Daemon(screen) => self.render_daemon(frame, area, screen),
         }
     }
 
@@ -598,6 +630,30 @@ impl App {
         );
     }
 
+    fn render_daemon(&self, frame: &mut Frame, area: Rect, screen: &screens::DaemonScreen) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(4),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        let status = match &self.pending {
+            Some(pending) => Line::from(Span::styled(
+                format!("Working: {}...", pending.title),
+                Style::default().fg(Color::Yellow),
+            )),
+            None => Line::from(""),
+        };
+        frame.render_widget(Paragraph::new(status), chunks[1]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter run  Esc back  q quit"),
+            chunks[2],
+        );
+    }
+
     fn render_autostart(&self, frame: &mut Frame, area: Rect, screen: &screens::AutostartScreen) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -698,12 +754,47 @@ async fn daemon_task() -> Vec<OutputLine> {
             is_error: true,
         }];
     }
+    wait_for_daemon_ready("started").await
+}
+
+/// Gracefully stops the running daemon, mirroring `tonguetyped daemon stop`.
+async fn daemon_stop_task() -> Vec<OutputLine> {
+    match commands::stop_daemon().await {
+        Ok(()) => vec![OutputLine {
+            text: "daemon stopped".to_string(),
+            is_error: false,
+        }],
+        Err(error) => vec![OutputLine {
+            text: error.to_string(),
+            is_error: true,
+        }],
+    }
+}
+
+/// Stops the running daemon (if any) and launches a fresh one, mirroring
+/// `tonguetyped daemon restart`. `commands::restart_daemon` already waits for
+/// the old instance lock to be released before spawning the replacement, so
+/// this only needs to wait for the new instance to come up.
+async fn daemon_restart_task() -> Vec<OutputLine> {
+    if let Err(error) = commands::restart_daemon().await {
+        return vec![OutputLine {
+            text: format!("failed to restart daemon: {error}"),
+            is_error: true,
+        }];
+    }
+    wait_for_daemon_ready("restarted").await
+}
+
+/// Polls for the daemon's control socket to come up and answer a status
+/// request, bounded to 30s - shared by the start and restart actions, which
+/// both launch a fresh daemon process and need to wait for it the same way.
+async fn wait_for_daemon_ready(verb: &str) -> Vec<OutputLine> {
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(300)).await;
         if commands::daemon_socket_exists() {
             if let Ok(response) = commands::send_ipc(ipc::Request::Status).await {
                 let mut lines = vec![OutputLine {
-                    text: "daemon started".to_string(),
+                    text: format!("daemon {verb}"),
                     is_error: false,
                 }];
                 lines.extend(commands::format_response_lines(&response));
@@ -775,7 +866,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn home_items_exclude_directional_recording_commands() {
+    fn home_items_cover_every_real_cli_command_in_declared_order_excluding_help_start_stop() {
         let names: Vec<String> = home_items().into_iter().map(|item| item.name).collect();
         assert_eq!(
             names,

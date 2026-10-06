@@ -83,6 +83,11 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     }
 
     tracing::info!("daemon shutting down");
+    // Release the instance lock before removing the socket: `stop_daemon`
+    // treats socket-absence as proof the process (and its lock) is gone, so
+    // a `restart` racing a `spawn_daemon` against a still-held lock is only
+    // ruled out if the lock is actually free by the time the socket is.
+    drop(_lock);
     std::fs::remove_file(&sock_path).ok();
     Ok(())
 }
