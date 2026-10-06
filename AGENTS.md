@@ -148,11 +148,11 @@ driftable copy - it can never disagree with `--help`. `src/commands.rs` is the o
 shared command-implementation layer both `main.rs`'s CLI dispatch and the dashboard
 call into (IPC send/format, model catalog rows, `activate_model`'s
 download+save+reload+confirm composition) - add new shared command logic there, not
-in either caller. The dashboard's own interactive screens (`Model`, `Autostart`) are
-new ratatui screens in `src/tui/`; `setup` is NOT reimplemented there - the dashboard
-suspends its own alternate screen, runs the pre-existing `setup::run_console()`
-(`src/setup.rs`), then resumes, since a terminal tracks one alternate-screen buffer,
-not a stack.
+in either caller. The dashboard's own interactive screens (`Model`, `Autostart`,
+`Daemon`) are new ratatui screens in `src/tui/`; `setup` is NOT reimplemented
+there - the dashboard suspends its own alternate screen, runs the pre-existing
+`setup::run_console()` (`src/setup.rs`), then resumes, since a terminal tracks
+one alternate-screen buffer, not a stack.
 
 A ratatui app that ever loads an inference model (Doctor, Model-activation) while
 holding raw mode/the alternate screen must keep **two** independent things off the

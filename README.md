@@ -174,10 +174,12 @@ not inject text or move focus when it reports state.
 ## Dashboard
 
 Running `tonguetyped` with no subcommand opens an interactive terminal dashboard
-listing every command below except `start` and `stop` (covered by `toggle`),
-plus screens for configuration, model download and activation, and autostart -
-all built on the same underlying commands as the CLI. Every subcommand remains
-directly invocable on its own, and `tonguetyped --help` still lists them all.
+listing most commands below, plus screens for configuration, daemon start/stop/
+restart, model download and activation, and autostart - all built on the same
+underlying commands as the CLI. `start` and `stop` are omitted from the
+dashboard's list in favor of `toggle` and `cancel` for recording control, but
+every subcommand remains directly invocable on its own, and `tonguetyped --help`
+still lists them all.
 
 ## Commands
 
