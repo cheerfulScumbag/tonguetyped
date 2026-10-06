@@ -2,6 +2,23 @@
 name = "tonguetyped"
 version = "0.1.0"
 edition = "2021"
+description = "Local Linux dictation controlled from the terminal or a desktop-wide keyboard shortcut"
+repository = "https://github.com/cheerfulScumbag/tonguetyped"
+
+[package.metadata.deb]
+maintainer = "cheerfulScumbag <164391367+cheerfulScumbag@users.noreply.github.com>"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+
+[package.metadata.deb.variants.gpu-vulkan]
+name = "tonguetyped-gpu-vulkan"
+
+[package.metadata.deb.variants.gpu-cuda]
+name = "tonguetyped-gpu-cuda"
+
+[package.metadata.deb.variants.gpu-rocm]
+name = "tonguetyped-gpu-rocm"
 
 [[bin]]
 name = "tonguetyped"
