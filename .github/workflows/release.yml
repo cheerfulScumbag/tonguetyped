@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.variant }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: default
+            feature: ""
+            package_variant: ""
+            suffix: ""
+          - variant: gpu-vulkan
+            feature: gpu-vulkan
+            package_variant: gpu-vulkan
+            suffix: -gpu-vulkan
+          - variant: gpu-cuda
+            feature: gpu-cuda
+            package_variant: gpu-cuda
+            suffix: -gpu-cuda
+          - variant: gpu-rocm
+            feature: gpu-rocm
+            package_variant: gpu-rocm
+            suffix: -gpu-rocm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev pkg-config
+      - name: Install Vulkan build dependencies
+        if: matrix.feature == 'gpu-vulkan'
+        run: sudo apt-get install -y glslc libvulkan-dev
+      - name: Install CUDA toolkit
+        if: matrix.feature == 'gpu-cuda'
+        uses: Jimver/cuda-toolkit@v0.2.27
+        with:
+          cuda: 12.6.3
+      - name: Configure CUDA linker paths
+        if: matrix.feature == 'gpu-cuda'
+        run: |
+          cuda_root="${CUDA_PATH:-/usr/local/cuda}"
+          if [ ! -e "$cuda_root/lib" ]; then
+            sudo ln -s "$cuda_root/lib64" "$cuda_root/lib"
+          fi
+          sudo mkdir -p /run/opengl-driver/lib
+          sudo ln -sfn "$cuda_root/targets/x86_64-linux/lib/stubs/libcuda.so" /run/opengl-driver/lib/libcuda.so
+          echo "CUDAToolkit_ROOT=$cuda_root" >> "$GITHUB_ENV"
+      - name: Install ROCm development toolchain
+        if: matrix.feature == 'gpu-rocm'
+        run: |
+          wget -q https://repo.radeon.com/amdgpu-install/6.4/ubuntu/jammy/amdgpu-install_6.4.60400-1_all.deb
+          sudo apt-get install -y ./amdgpu-install_6.4.60400-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y rocm-dev rocm-llvm-dev
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build release binary
+        env:
+          TRANSCRIBE_CMAKE_ARGS: ${{ matrix.feature == 'gpu-rocm' && '-DAMDGPU_TARGETS=gfx803;gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1201' || '' }}
+        run: |
+          if [ -n "${{ matrix.feature }}" ]; then
+            cargo build --locked --release --features "${{ matrix.feature }}"
+          else
+            cargo build --locked --release
+          fi
+      - name: Package Debian archive and binary
+        env:
+          PACKAGE_VARIANT: ${{ matrix.package_variant }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          mkdir -p release-assets
+          if [ -n "$PACKAGE_VARIANT" ]; then
+            cargo deb --locked --no-build --variant "$PACKAGE_VARIANT" --deb-version "$version"
+          else
+            cargo deb --locked --no-build --deb-version "$version"
+          fi
+          cp target/debian/*.deb release-assets/
+          cp target/release/tonguetyped "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64${{ matrix.suffix }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.variant }}
+          path: release-assets/
+          if-no-files-found: error
+
+  macos-metal:
+    name: macOS gpu-metal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Metal release binary
+        run: cargo build --locked --release --features gpu-metal
+      - name: Archive Metal binary
+        run: |
+          mkdir -p release-assets
+          tar -C target/release -czf "release-assets/tonguetyped-${RELEASE_TAG}-macos-aarch64-gpu-metal.tar.gz" tonguetyped
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-gpu-metal
+          path: release-assets/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [linux, macos-metal]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --generate-notes --title "$RELEASE_TAG"
+          fi
