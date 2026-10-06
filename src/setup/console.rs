@@ -32,6 +32,29 @@ const ACTIVATION_LABELS: [&str; 2] = [
     "Press once to start and again to stop",
 ];
 const STARTUP_LABELS: [&str; 2] = ["Start manually", "Start TongueTyped when you sign in"];
+const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
+const OVERLAY_POSITION_VALUES: [&str; 7] = [
+    "top-left",
+    "top",
+    "top-right",
+    "center",
+    "bottom-left",
+    "bottom",
+    "bottom-right",
+];
+// Mirrors Handy's (github.com/cjpais/Handy) distinction between a minimal
+// recording pill and a busier "Live" panel with a reactive waveform once
+// streaming transcription is active - see `OverlayConfig::streaming_indicator`
+// for why this is a synthetic animation rather than a true audio-reactive one.
+const OVERLAY_STREAMING_LABELS: [&str; 2] = [
+    "Simple pulse",
+    "Streaming waveform (live-capture indicator)",
+];
+// Matches `OverlayConfig::style`'s accepted values 1:1 (`overlay::style_for`'s
+// match arms) - these three were reviewed as Superdesign mockups and
+// approved by the captain.
+const OVERLAY_STYLE_VALUES: [&str; 3] = ["badge", "minimal", "pill"];
+const OVERLAY_STYLE_LABELS: [&str; 3] = ["Badge", "Minimal", "Pill"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepKind {
@@ -43,6 +66,10 @@ enum StepKind {
     Output,
     OutputBackend,
     Startup,
+    OverlayEnabled,
+    OverlayPosition,
+    OverlayStyle,
+    OverlayStreaming,
     Confirm,
 }
 
@@ -91,6 +118,10 @@ struct ConsoleState {
     backend_values: Vec<String>,
     backend_selection: usize,
     startup_selection: usize,
+    overlay_enabled_selection: usize,
+    overlay_position_selection: usize,
+    overlay_style_selection: usize,
+    overlay_streaming_selection: usize,
     shortcut_input: String,
     error: Option<String>,
     mic_level: Arc<Mutex<f32>>,
@@ -128,6 +159,16 @@ impl ConsoleState {
             .position(|backend| backend == &config.output.typing_backend)
             .unwrap_or(0);
         let startup_selection = usize::from(config.startup.autostart);
+        let overlay_enabled_selection = usize::from(config.overlay.enabled);
+        let overlay_position_selection = OVERLAY_POSITION_VALUES
+            .iter()
+            .position(|value| *value == config.overlay.position)
+            .unwrap_or(2);
+        let overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == config.overlay.style)
+            .unwrap_or(0);
+        let overlay_streaming_selection = usize::from(config.overlay.streaming_indicator);
         let shortcut_input = config.activation.keybind.clone();
 
         Self {
@@ -143,6 +184,10 @@ impl ConsoleState {
             backend_values,
             backend_selection,
             startup_selection,
+            overlay_enabled_selection,
+            overlay_position_selection,
+            overlay_style_selection,
+            overlay_streaming_selection,
             shortcut_input,
             error: None,
             mic_level: Arc::new(Mutex::new(0.0)),
@@ -275,6 +320,10 @@ impl ConsoleState {
             StepKind::Output => self.output_labels.len(),
             StepKind::OutputBackend => self.backend_values.len(),
             StepKind::Startup => STARTUP_LABELS.len(),
+            StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
+            StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
+            StepKind::OverlayStyle => OVERLAY_STYLE_VALUES.len(),
+            StepKind::OverlayStreaming => OVERLAY_STREAMING_LABELS.len(),
             StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => 0,
         }
     }
@@ -287,6 +336,10 @@ impl ConsoleState {
             StepKind::Output => &mut self.output_selection,
             StepKind::OutputBackend => &mut self.backend_selection,
             StepKind::Startup => &mut self.startup_selection,
+            StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
+            StepKind::OverlayPosition => &mut self.overlay_position_selection,
+            StepKind::OverlayStyle => &mut self.overlay_style_selection,
+            StepKind::OverlayStreaming => &mut self.overlay_streaming_selection,
             StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => {
                 unreachable!("no list selection for this step")
             }
@@ -297,58 +350,52 @@ impl ConsoleState {
         self.output_selection == 1 && !self.capabilities.typing_backends.is_empty()
     }
 
-    fn next_step(&self) -> Option<StepKind> {
+    /// The overlay's position/streaming sub-steps are only worth configuring
+    /// once the overlay itself is enabled - mirrors `has_backend_step`'s
+    /// pattern of skipping a sub-step whose parent choice ruled it out.
+    fn overlay_options_shown(&self) -> bool {
+        self.overlay_enabled_selection == 1
+    }
+
+    /// The full ordered list of steps this run would actually visit, given
+    /// the current conditional choices (model download queue, output
+    /// backend, overlay enabled). Deriving `next_step`/`prev_step`/
+    /// `step_index`/`step_total` from one sequence keeps them from drifting
+    /// out of sync as conditional steps are added.
+    fn step_sequence(&self) -> Vec<StepKind> {
         use StepKind::*;
-        Some(match self.step {
-            Model => {
-                if self.downloading_needed {
-                    Downloading
-                } else {
-                    Microphone
-                }
-            }
-            Downloading => Microphone,
-            Microphone => Activation,
-            Activation => Shortcut,
-            Shortcut => Output,
-            Output => {
-                if self.has_backend_step() {
-                    OutputBackend
-                } else {
-                    Startup
-                }
-            }
-            OutputBackend => Startup,
-            Startup => Confirm,
-            Confirm => return None,
-        })
+        let mut steps = vec![Model];
+        if self.downloading_needed {
+            steps.push(Downloading);
+        }
+        steps.push(Microphone);
+        steps.push(Activation);
+        steps.push(Shortcut);
+        steps.push(Output);
+        if self.has_backend_step() {
+            steps.push(OutputBackend);
+        }
+        steps.push(Startup);
+        steps.push(OverlayEnabled);
+        if self.overlay_options_shown() {
+            steps.push(OverlayPosition);
+            steps.push(OverlayStyle);
+            steps.push(OverlayStreaming);
+        }
+        steps.push(Confirm);
+        steps
+    }
+
+    fn next_step(&self) -> Option<StepKind> {
+        let sequence = self.step_sequence();
+        let index = sequence.iter().position(|step| *step == self.step)?;
+        sequence.get(index + 1).copied()
     }
 
     fn prev_step(&self) -> Option<StepKind> {
-        use StepKind::*;
-        Some(match self.step {
-            Model => return None,
-            Downloading => Model,
-            Microphone => {
-                if self.downloading_needed {
-                    Downloading
-                } else {
-                    Model
-                }
-            }
-            Activation => Microphone,
-            Shortcut => Activation,
-            Output => Shortcut,
-            OutputBackend => Output,
-            Startup => {
-                if self.has_backend_step() {
-                    OutputBackend
-                } else {
-                    Output
-                }
-            }
-            Confirm => Startup,
-        })
+        let sequence = self.step_sequence();
+        let index = sequence.iter().position(|step| *step == self.step)?;
+        index.checked_sub(1).and_then(|i| sequence.get(i).copied())
     }
 
     fn advance(&mut self) -> anyhow::Result<ControlFlow> {
@@ -404,6 +451,20 @@ impl ConsoleState {
             StepKind::Startup => {
                 self.config.startup.autostart = self.startup_selection == 1;
                 self.config.validate()?;
+            }
+            StepKind::OverlayEnabled => {
+                self.config.overlay.enabled = self.overlay_enabled_selection == 1;
+            }
+            StepKind::OverlayPosition => {
+                self.config.overlay.position =
+                    OVERLAY_POSITION_VALUES[self.overlay_position_selection].to_string();
+            }
+            StepKind::OverlayStyle => {
+                self.config.overlay.style =
+                    OVERLAY_STYLE_VALUES[self.overlay_style_selection].to_string();
+            }
+            StepKind::OverlayStreaming => {
+                self.config.overlay.streaming_indicator = self.overlay_streaming_selection == 1;
             }
             StepKind::Downloading => {}
             StepKind::Confirm => unreachable!("confirm handled separately"),
@@ -539,44 +600,25 @@ impl ConsoleState {
             StepKind::Output => "Transcript output",
             StepKind::OutputBackend => "Typing backend",
             StepKind::Startup => "Startup",
+            StepKind::OverlayEnabled => "Overlay",
+            StepKind::OverlayPosition => "Overlay position",
+            StepKind::OverlayStyle => "Overlay style",
+            StepKind::OverlayStreaming => "Overlay streaming",
             StepKind::Confirm => "Review",
         }
     }
 
     fn step_index(&self) -> usize {
-        let offset = usize::from(self.downloading_needed);
-        match self.step {
-            StepKind::Model => 1,
-            StepKind::Downloading => 2,
-            StepKind::Microphone => 2 + offset,
-            StepKind::Activation => 3 + offset,
-            StepKind::Shortcut => 4 + offset,
-            StepKind::Output => 5 + offset,
-            StepKind::OutputBackend => 6 + offset,
-            StepKind::Startup => {
-                if self.has_backend_step() {
-                    7 + offset
-                } else {
-                    6 + offset
-                }
-            }
-            StepKind::Confirm => {
-                if self.has_backend_step() {
-                    8 + offset
-                } else {
-                    7 + offset
-                }
-            }
-        }
+        let sequence = self.step_sequence();
+        sequence
+            .iter()
+            .position(|step| *step == self.step)
+            .map(|index| index + 1)
+            .unwrap_or(1)
     }
 
     fn step_total(&self) -> usize {
-        let offset = usize::from(self.downloading_needed);
-        if self.has_backend_step() {
-            8 + offset
-        } else {
-            7 + offset
-        }
+        self.step_sequence().len()
     }
 
     fn render(&self, frame: &mut Frame) {
@@ -676,6 +718,42 @@ impl ConsoleState {
                 list_paragraph(
                     &STARTUP_LABELS.map(String::from),
                     self.startup_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::OverlayEnabled => frame.render_widget(
+                list_paragraph(
+                    &OVERLAY_ENABLED_LABELS.map(String::from),
+                    self.overlay_enabled_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::OverlayPosition => frame.render_widget(
+                list_paragraph(
+                    &OVERLAY_POSITION_VALUES.map(String::from),
+                    self.overlay_position_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::OverlayStyle => frame.render_widget(
+                list_paragraph(
+                    &OVERLAY_STYLE_LABELS.map(String::from),
+                    self.overlay_style_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::OverlayStreaming => frame.render_widget(
+                list_paragraph(
+                    &OVERLAY_STREAMING_LABELS.map(String::from),
+                    self.overlay_streaming_selection,
                     self.step_title(),
                     area.height,
                 ),
@@ -824,6 +902,23 @@ impl ConsoleState {
                     "no"
                 }
             )),
+            Line::from(format!(
+                "Overlay:     {}",
+                if self.config.overlay.enabled {
+                    format!(
+                        "enabled, {}, {} style, {}",
+                        self.config.overlay.position,
+                        self.config.overlay.style,
+                        if self.config.overlay.streaming_indicator {
+                            "streaming waveform"
+                        } else {
+                            "simple pulse"
+                        }
+                    )
+                } else {
+                    "disabled".to_string()
+                }
+            )),
             Line::from(""),
             Line::from("Write this configuration?"),
         ];
@@ -966,6 +1061,65 @@ mod tests {
             StepKind::Microphone,
             "a failed download is non-fatal - the user can still continue setup"
         );
+    }
+
+    #[test]
+    fn overlay_steps_are_skipped_when_the_overlay_is_disabled() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::OverlayEnabled;
+        state.overlay_enabled_selection = 0;
+
+        state.advance().unwrap();
+        assert!(!state.config.overlay.enabled);
+        assert_eq!(
+            state.step,
+            StepKind::Confirm,
+            "disabling the overlay should skip straight to Confirm, not Position/Streaming"
+        );
+    }
+
+    #[test]
+    fn enabling_the_overlay_walks_through_position_style_and_streaming_before_confirm() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::OverlayEnabled;
+        state.overlay_enabled_selection = 1;
+        state.advance().unwrap();
+        assert_eq!(state.step, StepKind::OverlayPosition);
+
+        state.overlay_position_selection = OVERLAY_POSITION_VALUES
+            .iter()
+            .position(|value| *value == "bottom-left")
+            .unwrap();
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.position, "bottom-left");
+        assert_eq!(state.step, StepKind::OverlayStyle);
+
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "pill")
+            .unwrap();
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.style, "pill");
+        assert_eq!(state.step, StepKind::OverlayStreaming);
+
+        state.overlay_streaming_selection = 1;
+        state.advance().unwrap();
+        assert!(state.config.overlay.streaming_indicator);
+        assert_eq!(state.step, StepKind::Confirm);
+    }
+
+    #[test]
+    fn retreating_from_confirm_returns_to_streaming_when_overlay_is_enabled_and_to_overlay_enabled_otherwise(
+    ) {
+        let mut enabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        enabled_state.step = StepKind::Confirm;
+        enabled_state.overlay_enabled_selection = 1;
+        assert_eq!(enabled_state.prev_step(), Some(StepKind::OverlayStreaming));
+
+        let mut disabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        disabled_state.step = StepKind::Confirm;
+        disabled_state.overlay_enabled_selection = 0;
+        assert_eq!(disabled_state.prev_step(), Some(StepKind::OverlayEnabled));
     }
 
     #[test]

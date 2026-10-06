@@ -176,3 +176,35 @@ naive strip-and-concatenate approach silently merges unrelated rows from differe
 redraws into one run-on string with no whitespace between them. `vt100::Parser::
 process` plus `.screen().contents()` tracks real cursor/cell state and returns the
 actual current screen text.
+
+The setup console's step wizard (`src/setup/console.rs`) derives
+`next_step`/`prev_step`/`step_index`/`step_total` from one `step_sequence()` method
+that builds the actual ordered list of steps for the current conditional state
+(download queue, output backend, overlay enabled), rather than four separately
+hand-maintained arithmetic functions - add a new conditional step there, not as a
+fourth place to keep in sync. Overlay settings (enable/disable, position, style,
+streaming indicator) live in this console only, not the bare-invocation dashboard
+(`src/tui/`); the dashboard reaches them by suspending itself and running
+`setup::run_console()`, same as every other setup-console entry. The legacy
+line-based `configure()` flow in `setup.rs` (kept for scripted/piped `tonguetyped
+setup`, see `tests/setup_cli.rs`) has never prompted for overlay settings at all -
+it leaves whatever `Config::reload()` loaded untouched - so it needed no changes
+when overlay got its console step.
+
+`OverlayConfig::style` (`badge`/`minimal`/`pill`) and `streaming_indicator` (bool)
+follow `position`/`monitor`'s existing convention of plain, unvalidated strings/bools
+with a tolerant-fallback parser in `src/overlay.rs` (`style_for`, `anchor_for`) rather
+than a strict `serde` enum - an unrecognized `style` value falls back to `Badge`.
+`streaming_indicator` is a *synthetic* busier waveform animation (driven by the same
+elapsed-time fraction every other phase already animates from), not a real
+microphone-reactive one: there is no live audio-level feed wired from the
+coordinator's recording stream into the overlay actor, and wiring one would mean
+changing the `CoordinatorRuntime::record` trait signature - out of scope for what
+this is (the Handy dictation app's real streaming-transcription overlay inspired
+this - reviewed as Superdesign mockups and approved by the captain - and why a
+literal equivalent isn't buildable without a streaming inference backend this project
+doesn't have). Each `Style` can request a different Wayland surface size
+(`overlay::surface_size_for`; only `Pill` departs from the square badge) - like
+`position`/`monitor`, that size is fixed at first-ever overlay creation for the
+daemon's lifetime, so a style change that affects surface shape needs a daemon
+restart to take visual effect, exactly like a position/monitor change already does.

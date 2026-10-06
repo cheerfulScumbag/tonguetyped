@@ -170,6 +170,8 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         phase: None,
         deadline: None,
         anim_start: Instant::now(),
+        streaming_indicator: false,
+        style: Style::Badge,
         ticking: false,
         ticking_animated: false,
         timer_generation: 0,
@@ -233,6 +235,8 @@ struct State {
     phase: Option<Phase>,
     deadline: Option<Instant>,
     anim_start: Instant,
+    streaming_indicator: bool,
+    style: Style,
     ticking: bool,
     ticking_animated: bool,
     timer_generation: u64,
@@ -245,6 +249,8 @@ impl State {
         self.phase = Some(phase);
         self.deadline = phase.dwell().map(|dwell| Instant::now() + dwell);
         self.anim_start = Instant::now();
+        self.streaming_indicator = command.config.streaming_indicator;
+        self.style = style_for(&command.config.style);
 
         if self.layer.is_none() {
             self.create_layer(&command.config);
@@ -269,9 +275,10 @@ impl State {
             Some("tonguetyped-overlay"),
             output.as_ref(),
         );
+        let (width, height) = surface_size_for(self.style);
         layer.set_anchor(anchor_for(&config.position));
         layer.set_margin(MARGIN, MARGIN, MARGIN, MARGIN);
-        layer.set_size(BADGE, BADGE);
+        layer.set_size(width, height);
         layer.set_exclusive_zone(0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         if let Ok(region) = Region::new(&self.compositor) {
@@ -280,8 +287,8 @@ impl State {
             layer.set_input_region(Some(region.wl_region()));
         }
         layer.commit();
-        self.width = BADGE;
-        self.height = BADGE;
+        self.width = width;
+        self.height = height;
         self.layer = Some(layer);
     }
 
@@ -364,7 +371,13 @@ impl State {
             height,
         };
         let t = animation_fraction(self.phase, self.anim_start);
-        paint(&mut canvas, self.phase, t);
+        paint(
+            &mut canvas,
+            self.phase,
+            t,
+            self.streaming_indicator,
+            self.style,
+        );
 
         layer
             .wl_surface()
@@ -397,6 +410,41 @@ fn anchor_for(position: &str) -> Anchor {
         "bottom" => Anchor::BOTTOM,
         "center" => Anchor::empty(),
         _ => Anchor::TOP | Anchor::RIGHT,
+    }
+}
+
+/// The `overlay.streaming_indicator` look for `Phase::Recording`: a small
+/// multi-bar waveform in place of the single pulsing dot, standing in for
+/// Handy's reactive live-capture waveform (see `OverlayConfig::
+/// streaming_indicator`'s doc comment for why this is synthetic animation
+/// rather than real microphone-reactive bars - there is no live audio-level
+/// feed wired to this actor, only the elapsed-time fraction every other phase
+/// already animates from). Shared by every `Style` - each passes its own
+/// available width/height/color so the same five-bar motion reads correctly
+/// whether it sits inside a round badge or a wide pill.
+fn paint_waveform_bars(
+    canvas: &mut Canvas,
+    cx: f32,
+    baseline_y: f32,
+    available_width: f32,
+    max_bar_height: f32,
+    rgb: (u8, u8, u8),
+    t: f32,
+) {
+    use std::f32::consts::TAU;
+    const BAR_COUNT: usize = 5;
+    const FREQUENCIES: [f32; BAR_COUNT] = [1.0, 1.6, 2.3, 1.4, 1.9];
+    const PHASE_OFFSETS: [f32; BAR_COUNT] = [0.0, 0.5, 0.15, 0.8, 0.35];
+
+    let gap = available_width * 0.08;
+    let bar_width = (available_width - (BAR_COUNT - 1) as f32 * gap) / BAR_COUNT as f32;
+    let total_width = BAR_COUNT as f32 * bar_width + (BAR_COUNT - 1) as f32 * gap;
+    let mut x = cx - total_width / 2.0 + bar_width / 2.0;
+    for i in 0..BAR_COUNT {
+        let wave = 0.5 + 0.5 * ((t + PHASE_OFFSETS[i]) * TAU * FREQUENCIES[i]).sin();
+        let height = max_bar_height * (0.22 + 0.78 * wave);
+        fill_bar(canvas, x, baseline_y, bar_width, height, rgb);
+        x += bar_width + gap;
     }
 }
 
@@ -578,11 +626,67 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, rgb: (u8, u8,
     }
 }
 
+/// Fills a capsule ("stadium") shape - a rectangle of `2*half_width` by
+/// `2*half_height` with semicircular ends of radius `half_height` - the
+/// `Style::Pill` badge shape. Degenerates to a circle when
+/// `half_width == half_height`, via the same "distance from the nearest
+/// point on a line segment" trick `stroke_line` uses, but filled solid
+/// within `half_height` of that segment rather than stroked.
+fn fill_capsule(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    half_width: f32,
+    half_height: f32,
+    rgb: (u8, u8, u8),
+) {
+    let radius = half_height;
+    let half_segment = (half_width - half_height).max(0.0);
+    let (x0, x1) = (cx - half_segment, cx + half_segment);
+    let span = radius + 1.0;
+    let min_x = (cx - half_width - 1.0).floor().max(0.0) as i32;
+    let max_x = (cx + half_width + 1.0).ceil().min(canvas.width as f32) as i32;
+    let min_y = (cy - span).floor().max(0.0) as i32;
+    let max_y = (cy + span).ceil().min(canvas.height as f32) as i32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let proj_x = px.clamp(x0, x1);
+            let dist = ((px - proj_x).powi(2) + (py - cy).powi(2)).sqrt();
+            let coverage = (radius + 0.5 - dist).clamp(0.0, 1.0);
+            canvas.blend(x, y, rgb, coverage);
+        }
+    }
+}
+
 fn fill_square(canvas: &mut Canvas, cx: f32, cy: f32, half: f32, rgb: (u8, u8, u8)) {
     let min_x = (cx - half).round().max(0.0) as i32;
     let max_x = (cx + half).round().min(canvas.width as f32) as i32;
     let min_y = (cy - half).round().max(0.0) as i32;
     let max_y = (cy + half).round().min(canvas.height as f32) as i32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            canvas.blend(x, y, rgb, 1.0);
+        }
+    }
+}
+
+/// Fills a vertical bar of `width` centered on `cx`, growing upward from
+/// `baseline_y` by `height` - the building block for the streaming-indicator
+/// waveform (see `paint`'s `Phase::Recording` branch).
+fn fill_bar(
+    canvas: &mut Canvas,
+    cx: f32,
+    baseline_y: f32,
+    width: f32,
+    height: f32,
+    rgb: (u8, u8, u8),
+) {
+    let min_x = (cx - width / 2.0).round().max(0.0) as i32;
+    let max_x = (cx + width / 2.0).round().min(canvas.width as f32) as i32;
+    let min_y = (baseline_y - height).round().max(0.0) as i32;
+    let max_y = baseline_y.round().min(canvas.height as f32) as i32;
     for y in min_y..max_y {
         for x in min_x..max_x {
             canvas.blend(x, y, rgb, 1.0);
@@ -658,17 +762,118 @@ fn stroke_arc(
     }
 }
 
-fn paint(canvas: &mut Canvas, phase: Option<Phase>, t: f32) {
+/// Three selectable looks (captain-approved from the superdesign mockups -
+/// see `OverlayConfig::style`): `Badge` is the original solid-disc-and-glyph
+/// treatment, `Minimal` strips it to a thin outline ring with a small glyph,
+/// and `Pill` reshapes the badge into a capsule with room for a wider
+/// waveform. Every style reskins all five phases consistently, per the
+/// design review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Style {
+    Badge,
+    Minimal,
+    Pill,
+}
+
+/// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
+/// value - the same tolerant-fallback shape `anchor_for` uses for `position`.
+fn style_for(name: &str) -> Style {
+    match name {
+        "minimal" => Style::Minimal,
+        "pill" => Style::Pill,
+        _ => Style::Badge,
+    }
+}
+
+/// The layer-shell surface size to request for a style - only `Pill` departs
+/// from the square badge, widening to hold its capsule shape and waveform.
+fn surface_size_for(style: Style) -> (u32, u32) {
+    match style {
+        Style::Badge | Style::Minimal => (BADGE, BADGE),
+        Style::Pill => (BADGE * 5 / 4, BADGE * 5 / 8),
+    }
+}
+
+fn glyph_checkmark(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    thickness: f32,
+    rgb: (u8, u8, u8),
+) {
+    stroke_line(
+        canvas,
+        cx - s * 0.9,
+        cy + s * 0.05,
+        cx - s * 0.15,
+        cy + s * 0.75,
+        thickness,
+        rgb,
+    );
+    stroke_line(
+        canvas,
+        cx - s * 0.15,
+        cy + s * 0.75,
+        cx + s * 1.0,
+        cy - s * 0.65,
+        thickness,
+        rgb,
+    );
+}
+
+fn glyph_cross(canvas: &mut Canvas, cx: f32, cy: f32, s: f32, thickness: f32, rgb: (u8, u8, u8)) {
+    stroke_line(canvas, cx - s, cy - s, cx + s, cy + s, thickness, rgb);
+    stroke_line(canvas, cx - s, cy + s, cx + s, cy - s, thickness, rgb);
+}
+
+fn phase_color(phase: Phase) -> (u8, u8, u8) {
+    match phase {
+        Phase::Recording => RECORDING_COLOR,
+        Phase::Transcribing => TRANSCRIBING_COLOR,
+        Phase::Success => SUCCESS_COLOR,
+        Phase::Cancelled => CANCELLED_COLOR,
+        Phase::Error => ERROR_COLOR,
+    }
+}
+
+fn paint(
+    canvas: &mut Canvas,
+    phase: Option<Phase>,
+    t: f32,
+    streaming_indicator: bool,
+    style: Style,
+) {
     canvas.pixels.fill(0);
     let Some(phase) = phase else { return };
+    match style {
+        Style::Badge => paint_badge(canvas, phase, t, streaming_indicator),
+        Style::Minimal => paint_minimal(canvas, phase, t, streaming_indicator),
+        Style::Pill => paint_pill(canvas, phase, t, streaming_indicator),
+    }
+}
 
+fn paint_badge(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let disc_radius = canvas.width.min(canvas.height) as f32 * 0.42;
+    let color = phase_color(phase);
 
     match phase {
+        Phase::Recording if streaming_indicator => {
+            fill_circle(canvas, cx, cy, disc_radius, color);
+            paint_waveform_bars(
+                canvas,
+                cx,
+                cy + disc_radius * 0.55,
+                disc_radius * 2.18,
+                disc_radius,
+                GLYPH_COLOR,
+                t,
+            );
+        }
         Phase::Recording => {
-            fill_circle(canvas, cx, cy, disc_radius, RECORDING_COLOR);
+            fill_circle(canvas, cx, cy, disc_radius, color);
             let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
             fill_circle(
                 canvas,
@@ -679,7 +884,7 @@ fn paint(canvas: &mut Canvas, phase: Option<Phase>, t: f32) {
             );
         }
         Phase::Transcribing => {
-            fill_circle(canvas, cx, cy, disc_radius, TRANSCRIBING_COLOR);
+            fill_circle(canvas, cx, cy, disc_radius, color);
             let angle = t * std::f32::consts::TAU;
             stroke_arc(
                 canvas,
@@ -692,52 +897,171 @@ fn paint(canvas: &mut Canvas, phase: Option<Phase>, t: f32) {
             );
         }
         Phase::Success => {
-            fill_circle(canvas, cx, cy, disc_radius, SUCCESS_COLOR);
-            let s = disc_radius * 0.5;
-            let thickness = disc_radius * 0.18;
-            stroke_line(
+            fill_circle(canvas, cx, cy, disc_radius, color);
+            glyph_checkmark(
                 canvas,
-                cx - s * 0.9,
-                cy + s * 0.05,
-                cx - s * 0.15,
-                cy + s * 0.75,
-                thickness,
-                GLYPH_COLOR,
-            );
-            stroke_line(
-                canvas,
-                cx - s * 0.15,
-                cy + s * 0.75,
-                cx + s * 1.0,
-                cy - s * 0.65,
-                thickness,
+                cx,
+                cy,
+                disc_radius * 0.5,
+                disc_radius * 0.18,
                 GLYPH_COLOR,
             );
         }
         Phase::Cancelled => {
-            fill_circle(canvas, cx, cy, disc_radius, CANCELLED_COLOR);
+            fill_circle(canvas, cx, cy, disc_radius, color);
             fill_square(canvas, cx, cy, disc_radius * 0.38, GLYPH_COLOR);
         }
         Phase::Error => {
-            fill_circle(canvas, cx, cy, disc_radius, ERROR_COLOR);
-            let s = disc_radius * 0.5;
-            let thickness = disc_radius * 0.18;
-            stroke_line(
+            fill_circle(canvas, cx, cy, disc_radius, color);
+            glyph_cross(
                 canvas,
-                cx - s,
-                cy - s,
-                cx + s,
-                cy + s,
-                thickness,
+                cx,
+                cy,
+                disc_radius * 0.5,
+                disc_radius * 0.18,
                 GLYPH_COLOR,
             );
-            stroke_line(
+        }
+    }
+}
+
+/// A thin outline ring with a small centered, phase-colored glyph - the
+/// lowest-visual-weight style, with no filled background to rest a
+/// contrasting white glyph against.
+fn paint_minimal(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+    let cx = canvas.width as f32 / 2.0;
+    let cy = canvas.height as f32 / 2.0;
+    let ring_radius = canvas.width.min(canvas.height) as f32 * 0.34;
+    let ring_thickness = ring_radius * 0.14;
+    let color = phase_color(phase);
+    stroke_arc(
+        canvas,
+        cx,
+        cy,
+        ring_radius,
+        ring_thickness,
+        (0.0, std::f32::consts::TAU),
+        color,
+    );
+
+    match phase {
+        Phase::Recording if streaming_indicator => {
+            paint_waveform_bars(
                 canvas,
-                cx - s,
-                cy + s,
-                cx + s,
-                cy - s,
-                thickness,
+                cx,
+                cy + ring_radius * 0.5,
+                ring_radius * 1.5,
+                ring_radius * 0.9,
+                color,
+                t,
+            );
+        }
+        Phase::Recording => {
+            let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
+            fill_circle(canvas, cx, cy, ring_radius * (0.28 + 0.12 * pulse), color);
+        }
+        Phase::Transcribing => {
+            let angle = t * std::f32::consts::TAU;
+            stroke_arc(
+                canvas,
+                cx,
+                cy,
+                ring_radius * 0.5,
+                ring_radius * 0.18,
+                (angle, std::f32::consts::PI * 1.2),
+                color,
+            );
+        }
+        Phase::Success => {
+            glyph_checkmark(
+                canvas,
+                cx,
+                cy,
+                ring_radius * 0.42,
+                ring_radius * 0.16,
+                color,
+            );
+        }
+        Phase::Cancelled => {
+            fill_square(canvas, cx, cy, ring_radius * 0.3, color);
+        }
+        Phase::Error => {
+            glyph_cross(
+                canvas,
+                cx,
+                cy,
+                ring_radius * 0.42,
+                ring_radius * 0.16,
+                color,
+            );
+        }
+    }
+}
+
+/// A capsule ("pill") badge, solid-filled like `Badge` but wider than tall -
+/// the extra width gives the streaming waveform more room to read.
+fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+    let cx = canvas.width as f32 / 2.0;
+    let cy = canvas.height as f32 / 2.0;
+    let half_width = canvas.width as f32 * 0.46;
+    let half_height = canvas.height as f32 * 0.42;
+    let color = phase_color(phase);
+    fill_capsule(canvas, cx, cy, half_width, half_height, color);
+
+    match phase {
+        Phase::Recording if streaming_indicator => {
+            paint_waveform_bars(
+                canvas,
+                cx,
+                cy + half_height * 0.6,
+                half_width * 1.5,
+                half_height * 1.3,
+                GLYPH_COLOR,
+                t,
+            );
+        }
+        Phase::Recording => {
+            let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
+            fill_circle(
+                canvas,
+                cx,
+                cy,
+                half_height * (0.4 + 0.14 * pulse),
+                GLYPH_COLOR,
+            );
+        }
+        Phase::Transcribing => {
+            let angle = t * std::f32::consts::TAU;
+            stroke_arc(
+                canvas,
+                cx,
+                cy,
+                half_height * 0.6,
+                half_height * 0.22,
+                (angle, std::f32::consts::PI * 1.2),
+                GLYPH_COLOR,
+            );
+        }
+        Phase::Success => {
+            glyph_checkmark(
+                canvas,
+                cx,
+                cy,
+                half_height * 0.55,
+                half_height * 0.2,
+                GLYPH_COLOR,
+            );
+        }
+        Phase::Cancelled => {
+            fill_square(canvas, cx, cy, half_height * 0.4, GLYPH_COLOR);
+        }
+        Phase::Error => {
+            glyph_cross(
+                canvas,
+                cx,
+                cy,
+                half_height * 0.55,
+                half_height * 0.2,
                 GLYPH_COLOR,
             );
         }
@@ -826,48 +1150,97 @@ mod tests {
         );
     }
 
+    const ALL_STYLES: [Style; 3] = [Style::Badge, Style::Minimal, Style::Pill];
+
+    fn paint_to_pixels(
+        phase: Option<Phase>,
+        t: f32,
+        streaming_indicator: bool,
+        style: Style,
+    ) -> Vec<u8> {
+        let (width, height) = surface_size_for(style);
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        {
+            let mut canvas = Canvas {
+                pixels: &mut pixels,
+                width,
+                height,
+            };
+            paint(&mut canvas, phase, t, streaming_indicator, style);
+        }
+        pixels
+    }
+
     #[test]
-    fn every_phase_paints_distinguishable_pixels() {
-        let mut seen = Vec::new();
-        for phase in [
-            Phase::Recording,
-            Phase::Transcribing,
-            Phase::Success,
-            Phase::Cancelled,
-            Phase::Error,
-        ] {
-            let mut pixels = vec![0u8; (BADGE * BADGE * 4) as usize];
-            {
-                let mut canvas = Canvas {
-                    pixels: &mut pixels,
-                    width: BADGE,
-                    height: BADGE,
-                };
-                paint(&mut canvas, Some(phase), 0.0);
+    fn every_phase_paints_distinguishable_pixels_in_every_style() {
+        for style in ALL_STYLES {
+            let mut seen = Vec::new();
+            for phase in [
+                Phase::Recording,
+                Phase::Transcribing,
+                Phase::Success,
+                Phase::Cancelled,
+                Phase::Error,
+            ] {
+                let pixels = paint_to_pixels(Some(phase), 0.0, false, style);
+                assert!(
+                    pixels.iter().any(|&byte| byte != 0),
+                    "{style:?}/{phase:?} painted nothing"
+                );
+                assert!(
+                    !seen.contains(&pixels),
+                    "{style:?}/{phase:?} is pixel-identical to an earlier phase in the same style"
+                );
+                seen.push(pixels);
             }
-            assert!(
-                pixels.iter().any(|&byte| byte != 0),
-                "{phase:?} painted nothing"
-            );
-            assert!(
-                !seen.contains(&pixels),
-                "{phase:?} is pixel-identical to an earlier phase"
-            );
-            seen.push(pixels);
         }
     }
 
     #[test]
-    fn idle_paint_is_fully_transparent() {
-        let mut pixels = vec![1u8; (BADGE * BADGE * 4) as usize];
-        {
-            let mut canvas = Canvas {
-                pixels: &mut pixels,
-                width: BADGE,
-                height: BADGE,
-            };
-            paint(&mut canvas, None, 0.0);
+    fn idle_paint_is_fully_transparent_in_every_style() {
+        for style in ALL_STYLES {
+            let pixels = paint_to_pixels(None, 0.0, false, style);
+            assert!(pixels.iter().all(|&byte| byte == 0), "{style:?}");
         }
-        assert!(pixels.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn streaming_indicator_paints_a_different_recording_glyph_than_the_default_pulse_in_every_style(
+    ) {
+        for style in ALL_STYLES {
+            let default_pixels = paint_to_pixels(Some(Phase::Recording), 0.25, false, style);
+            let streaming_pixels = paint_to_pixels(Some(Phase::Recording), 0.25, true, style);
+            assert_ne!(
+                default_pixels, streaming_pixels,
+                "{style:?}: streaming_indicator should visually differ from the default pulse"
+            );
+        }
+    }
+
+    #[test]
+    fn every_style_paints_visually_distinct_recording_pixels() {
+        // Each style has its own surface dimensions (`surface_size_for`), so
+        // compare via pixel content rather than raw byte-equality across
+        // differently-sized buffers.
+        let badge = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Badge);
+        let minimal = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Minimal);
+        let pill = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Pill);
+        assert_ne!(
+            badge.len(),
+            pill.len(),
+            "Pill should use a differently-sized surface"
+        );
+        assert_ne!(
+            badge, minimal,
+            "Badge and Minimal should look different at the same size"
+        );
+    }
+
+    #[test]
+    fn style_for_recognizes_every_configured_value_and_falls_back_to_badge() {
+        assert_eq!(style_for("badge"), Style::Badge);
+        assert_eq!(style_for("minimal"), Style::Minimal);
+        assert_eq!(style_for("pill"), Style::Pill);
+        assert_eq!(style_for("nonsense"), Style::Badge);
     }
 }
