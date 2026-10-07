@@ -233,3 +233,14 @@ used) rather than blocking in the foreground. The dashboard's `start`/`stop`
 home items (single-shot recording start/stop) stay hidden from the home list
 too - `toggle` and `cancel` are the dashboard's recording controls, while
 `start`/`stop` remain reachable only as CLI commands.
+
+A daemon killed outside its own graceful shutdown (so the control socket never
+gets unlinked) leaves a stale socket *file* behind - `commands::
+daemon_socket_exists` (and the private `socket_is_alive` it and `stop_daemon`
+share) treats that as "not running" by attempting a connect, the same
+liveness probe `daemon::acquire_instance_lock_at` already performs before a
+fresh daemon binds the socket, and removes the stale file on a failed
+connect. `Path::exists()` alone is not enough: `stop_daemon`/`restart_daemon`
+used to treat the leftover file as proof a daemon was running and tried (and
+failed) to send it `Shutdown`, surfacing a raw connection-refused error
+instead of proceeding straight to `spawn_daemon`.
