@@ -39,12 +39,31 @@ pub async fn send_ipc(request: Request) -> anyhow::Result<Response> {
     ipc::decode_frame(&line)
 }
 
-/// Whether the daemon appears to be running, judged the same way `send_ipc`
-/// does (control socket present) - cheap, synchronous, no connection made.
+/// Whether a daemon is actually listening on the control socket - not just
+/// whether the socket *file* is present. A daemon that dies without reaching
+/// its own graceful shutdown path (the one that removes the socket as its
+/// last step, see `daemon::run_daemon`) leaves that file behind, so a bare
+/// `Path::exists()` would mistake a dead daemon's leftovers for a live one.
+/// Probes the same way `daemon::acquire_instance_lock_at` already does
+/// before a fresh daemon binds the socket: a failed connect means nothing is
+/// listening, so the stale file is removed here too, rather than left for
+/// every other caller (`stop_daemon`/`restart_daemon` below included) to
+/// trip over again.
 pub fn daemon_socket_exists() -> bool {
     crate::daemon::socket_path()
-        .map(|path| path.exists())
+        .map(|path| socket_is_alive(&path))
         .unwrap_or(false)
+}
+
+fn socket_is_alive(sock_path: &std::path::Path) -> bool {
+    if !sock_path.exists() {
+        return false;
+    }
+    if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
+        return true;
+    }
+    let _ = std::fs::remove_file(sock_path);
+    false
 }
 
 /// Launches `tonguetyped daemon` as a detached child process and returns
@@ -71,10 +90,16 @@ pub fn spawn_daemon() -> anyhow::Result<()> {
 /// control socket to disappear, so callers (`tonguetyped daemon stop`,
 /// `restart_daemon` below) only return once the old process has actually
 /// exited rather than racing a `restart`'s subsequent `spawn_daemon` against
-/// it. Fails immediately, without hanging, when no daemon is running.
+/// it. Fails immediately, without hanging, when no daemon is running -
+/// including when a stale socket file is left over from one that already
+/// died, rather than attempting (and failing) a connection to it.
 pub async fn stop_daemon() -> anyhow::Result<()> {
     let sock_path = crate::daemon::socket_path()?;
-    if !sock_path.exists() {
+    stop_daemon_at(&sock_path).await
+}
+
+async fn stop_daemon_at(sock_path: &std::path::Path) -> anyhow::Result<()> {
+    if !socket_is_alive(sock_path) {
         anyhow::bail!(
             "daemon is not running (no socket at {})",
             sock_path.display()
@@ -103,7 +128,11 @@ pub async fn stop_daemon() -> anyhow::Result<()> {
 /// Stops the running daemon (if any) and waits for its socket to clear
 /// before launching a fresh one via `spawn_daemon` - the same detached
 /// background launch the dashboard uses, so `daemon restart` returns once
-/// the new daemon is underway instead of blocking in the foreground.
+/// the new daemon is underway instead of blocking in the foreground. A
+/// stale socket file with nothing listening behind it (`daemon_socket_exists`
+/// returns `false` and removes it) is treated as no daemon running, so this
+/// proceeds straight to `spawn_daemon` instead of calling `stop_daemon`
+/// against a connection that was always going to refuse.
 pub async fn restart_daemon() -> anyhow::Result<()> {
     if daemon_socket_exists() {
         stop_daemon().await?;
@@ -362,4 +391,101 @@ pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
         lines.push(error_line(format!("shortcut error:  {error}")));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "tonguetyped-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// Leaves a control socket *file* on disk with nothing listening behind
+    /// it - exactly what remains when a daemon process dies without going
+    /// through its own graceful shutdown (which normally unlinks the socket
+    /// as its last step). Binding a `UnixListener` and dropping it does not
+    /// unlink the file, which is what makes this scenario reproducible
+    /// without spawning a real daemon process.
+    fn leave_stale_socket(path: &std::path::Path) {
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+    }
+
+    #[test]
+    fn stale_socket_is_not_treated_as_alive_and_is_cleaned_up() {
+        let root = unique_temp_dir("stale-socket");
+        std::fs::create_dir_all(&root).unwrap();
+        let sock_path = root.join("control.sock");
+        leave_stale_socket(&sock_path);
+        assert!(sock_path.exists());
+
+        assert!(!socket_is_alive(&sock_path));
+        assert!(
+            !sock_path.exists(),
+            "stale socket file should have been removed"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_socket_is_treated_as_alive() {
+        let root = unique_temp_dir("live-socket");
+        std::fs::create_dir_all(&root).unwrap();
+        let sock_path = root.join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+
+        assert!(socket_is_alive(&sock_path));
+        assert!(sock_path.exists());
+
+        drop(listener);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Regression test for the bug this module's `daemon_socket_exists`/
+    /// `stop_daemon` fix: a stale socket left behind by a dead daemon used
+    /// to be indistinguishable from a live one (`Path::exists()` alone),
+    /// so `restart_daemon`'s `if daemon_socket_exists() { stop_daemon()... }`
+    /// guard would call `stop_daemon`, which tried to send `Shutdown` over
+    /// the dead socket and failed with a raw connection-refused error -
+    /// surfacing as "failed to restart daemon: failed to reach daemon:
+    /// Connection refused" instead of proceeding to `spawn_daemon`.
+    /// `stop_daemon_at` is tested directly (rather than through
+    /// `restart_daemon`/`spawn_daemon`, which re-execs the current binary -
+    /// the test binary itself here, not `tonguetyped`) to construct the
+    /// scenario directly, the same way `daemon::acquire_instance_lock_at`'s
+    /// tests do.
+    #[tokio::test]
+    async fn stop_daemon_reports_not_running_for_a_stale_socket() {
+        let root = unique_temp_dir("stale-socket-stop");
+        std::fs::create_dir_all(&root).unwrap();
+        let sock_path = root.join("control.sock");
+        leave_stale_socket(&sock_path);
+
+        let error = stop_daemon_at(&sock_path).await.unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("daemon is not running"),
+            "expected a \"daemon is not running\" message, got: {message}"
+        );
+        assert!(
+            !message.contains("Connection refused"),
+            "stale socket must not surface a raw connection-refused error, got: {message}"
+        );
+
+        // `socket_is_alive` already removed the stale file as a side effect
+        // of the liveness probe above, which is what lets a subsequent
+        // `restart_daemon` skip `stop_daemon` entirely and proceed straight
+        // to `spawn_daemon` instead of bailing out on it.
+        assert!(!sock_path.exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
