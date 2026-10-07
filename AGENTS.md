@@ -234,22 +234,13 @@ home items (single-shot recording start/stop) stay hidden from the home list
 too - `toggle` and `cancel` are the dashboard's recording controls, while
 `start`/`stop` remain reachable only as CLI commands.
 
-The XDG GlobalShortcuts portal's `BindShortcuts.preferred_trigger` (the hint
-`src/activation.rs`'s `bind_activation_shortcut` passes to `bind_shortcuts`)
-is only honored the very first time a given shortcut id is ever bound for
-this app - every later bind keeps whatever trigger the desktop already has
-on file, silently ignoring a changed hint. The only portal method that can
-actually change an already-bound shortcut's trigger is
-`GlobalShortcuts::configure_shortcuts`, which opens the desktop's own native
-"press your new shortcut" dialog; it requires a session with at least one
-shortcut already bound, and itself returns immediately without waiting for
-the dialog, so the caller must subscribe to `receive_shortcuts_changed()`
-*before* calling it (not after) to avoid missing the signal.
-`activation::reconfigure_shortcut` does this and is the only way the Setup
-console's Shortcut step (Ctrl+R) can really change the binding; a background
-thread (`setup::reconfigure_shortcut_async`, same bridge shape as
-`provision_model_async`) runs it since the console's render loop is
-synchronous. `activation::test_shortcut_binding` (CLI `shortcut-test`,
-dashboard) similarly binds and then actually waits on `receive_activated()`
-for a real press (bounded, `SHORTCUT_PRESS_TIMEOUT`) rather than treating a
-successful `bind_shortcuts` call alone as proof the shortcut works.
+A daemon killed outside its own graceful shutdown (so the control socket never
+gets unlinked) leaves a stale socket *file* behind - `commands::
+daemon_socket_exists` (and the private `socket_is_alive` it and `stop_daemon`
+share) treats that as "not running" by attempting a connect, the same
+liveness probe `daemon::acquire_instance_lock_at` already performs before a
+fresh daemon binds the socket, and removes the stale file on a failed
+connect. `Path::exists()` alone is not enough: `stop_daemon`/`restart_daemon`
+used to treat the leftover file as proof a daemon was running and tried (and
+failed) to send it `Shutdown`, surfacing a raw connection-refused error
+instead of proceeding straight to `spawn_daemon`.
