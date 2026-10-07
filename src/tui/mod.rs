@@ -32,9 +32,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::{Frame, Terminal};
+use std::cell::Cell;
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 type Backend = CrosstermBackend<io::Stdout>;
@@ -187,7 +188,17 @@ struct App {
     home_selected: usize,
     pending: Option<PendingAction>,
     should_quit: bool,
+    daemon_status_cache: Cell<Option<(bool, Instant)>>,
 }
+
+/// How often the home screen's status strip re-probes daemon liveness.
+/// `status_strip_line` renders on every tick of `run_loop`'s 66ms ticker, but
+/// the probe it displays (`commands::daemon_socket_exists`) opens a real
+/// `UnixStream` connection against the daemon's control socket - re-running
+/// that on every redraw would make the daemon's accept loop spawn a task per
+/// frame purely to paint a status string, so the cached result is reused
+/// until it goes stale.
+const DAEMON_STATUS_REFRESH: Duration = Duration::from_secs(1);
 
 impl App {
     fn new(config: Config) -> Self {
@@ -198,6 +209,7 @@ impl App {
             home_selected: 0,
             pending: None,
             should_quit: false,
+            daemon_status_cache: Cell::new(None),
         }
     }
 
@@ -535,8 +547,21 @@ impl App {
         frame.render_widget(Paragraph::new(footer), chunks[3]);
     }
 
+    fn daemon_running_cached(&self) -> bool {
+        let now = Instant::now();
+        if let Some((running, checked_at)) = self.daemon_status_cache.get() {
+            if now.duration_since(checked_at) < DAEMON_STATUS_REFRESH {
+                return running;
+            }
+        }
+        let running = commands::daemon_socket_exists();
+        self.daemon_status_cache.set(Some((running, now)));
+        running
+    }
+
     fn status_strip_line(&self) -> Line<'static> {
-        let (daemon_text, daemon_color) = if commands::daemon_socket_exists() {
+        let daemon_running = self.daemon_running_cached();
+        let (daemon_text, daemon_color) = if daemon_running {
             ("running", Color::Green)
         } else {
             ("not running", Color::Red)
