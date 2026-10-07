@@ -1,11 +1,21 @@
 use crate::coordinator::Coordinator;
 use anyhow::Context;
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
+use ashpd::desktop::Session;
 use futures_util::StreamExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 const SHORTCUT_ID: &str = "activation";
+// A press is a single keystroke - the user either does it within a few
+// seconds or the configured combo doesn't reach this app at all (wrong
+// combo, grabbed by something else, desktop shortcut portal unavailable).
+const SHORTCUT_PRESS_TIMEOUT: Duration = Duration::from_secs(15);
+// `ConfigureShortcuts` opens the desktop's own native dialog and hands
+// control to the user for as long as it takes them to press the new combo -
+// generous on purpose, unlike the single-keystroke timeout above.
+const SHORTCUT_RECONFIGURE_TIMEOUT: Duration = Duration::from_secs(120);
 const INSTALLED_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped";
 const DEVELOPMENT_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped.Devel";
 const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
@@ -52,30 +62,129 @@ async fn register_host_app() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn test_shortcut_binding(keybind: &str) -> Option<String> {
-    async {
-        register_host_app().await?;
-        let portal = GlobalShortcuts::new().await?;
-        let session = portal.create_session().await?;
-        let trigger = portal_trigger(keybind)?;
-        let shortcut = NewShortcut::new(SHORTCUT_ID, "Start or stop dictation")
-            .preferred_trigger(Some(trigger.as_str()));
-        let response = portal
-            .bind_shortcuts(&session, &[shortcut], None)
-            .await?
-            .response()?;
-        if !response
-            .shortcuts()
-            .iter()
-            .any(|shortcut| shortcut.id() == SHORTCUT_ID)
-        {
-            anyhow::bail!("global shortcuts portal did not bind activation key");
+/// Binds the "activation" shortcut on an already-created session, using
+/// `keybind` as the portal's `preferred_trigger` hint. Per the XDG
+/// GlobalShortcuts portal spec, that hint is only honored the very first
+/// time this app ever binds this shortcut id - every later call keeps
+/// whatever trigger the desktop already has on file for it, regardless of
+/// what's passed here. Shared by `listen()`, `test_shortcut_binding()`, and
+/// `reconfigure_shortcut()`, all three of which need a bound shortcut before
+/// they can listen for presses or open the native reconfigure dialog.
+async fn bind_activation_shortcut<'a>(
+    portal: &GlobalShortcuts<'a>,
+    session: &Session<'a, GlobalShortcuts<'a>>,
+    keybind: &str,
+) -> anyhow::Result<String> {
+    let trigger = portal_trigger(keybind)?;
+    let shortcut = NewShortcut::new(SHORTCUT_ID, "Start or stop dictation")
+        .preferred_trigger(Some(trigger.as_str()));
+    let response = portal
+        .bind_shortcuts(session, &[shortcut], None)
+        .await?
+        .response()?;
+    response
+        .shortcuts()
+        .iter()
+        .find(|shortcut| shortcut.id() == SHORTCUT_ID)
+        .map(|shortcut| shortcut.trigger_description().to_string())
+        .ok_or_else(|| anyhow::anyhow!("global shortcuts portal did not bind activation key"))
+}
+
+pub enum ShortcutTestOutcome {
+    /// The configured shortcut was actually pressed and observed via the
+    /// portal's `Activated` signal - not just accepted by `BindShortcuts`.
+    Pressed,
+    TimedOut,
+}
+
+/// Binds the shortcut and then actually listens for it to be pressed (via
+/// the same `receive_activated()` stream `listen()` uses), instead of only
+/// checking that `bind_shortcuts` accepted the registration. The old
+/// behavior reported "shortcut binding available" for any syntactically
+/// valid keybind without ever confirming a press reached the app.
+pub async fn test_shortcut_binding(keybind: &str) -> Result<ShortcutTestOutcome, String> {
+    test_shortcut_binding_inner(keybind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn test_shortcut_binding_inner(keybind: &str) -> anyhow::Result<ShortcutTestOutcome> {
+    register_host_app().await?;
+    let portal = GlobalShortcuts::new().await?;
+    let session = portal.create_session().await?;
+    bind_activation_shortcut(&portal, &session, keybind).await?;
+
+    let mut activated = portal.receive_activated().await?;
+    let wait_for_press = async {
+        loop {
+            let Some(event) = activated.next().await else {
+                anyhow::bail!("global shortcuts event stream closed");
+            };
+            if event.shortcut_id() == SHORTCUT_ID {
+                return Ok(());
+            }
         }
-        Ok::<(), anyhow::Error>(())
+    };
+    match tokio::time::timeout(SHORTCUT_PRESS_TIMEOUT, wait_for_press).await {
+        Ok(result) => result.map(|()| ShortcutTestOutcome::Pressed),
+        Err(_) => Ok(ShortcutTestOutcome::TimedOut),
     }
-    .await
-    .err()
-    .map(|error| error.to_string())
+}
+
+pub struct ReconfigureOutcome {
+    /// The portal's human-readable description of whatever trigger is now
+    /// actually bound - not the string the user typed, which the desktop is
+    /// free to ignore once the shortcut has been bound once (see
+    /// `bind_activation_shortcut`'s doc comment).
+    pub trigger_description: String,
+}
+
+/// Opens the desktop's own native "press your new shortcut" dialog
+/// (`GlobalShortcuts::configure_shortcuts`) so the user can actually change
+/// an already-bound shortcut's trigger, then reports back whatever trigger
+/// is really bound afterwards. `preferred_trigger` (what `bind_shortcuts`
+/// alone relies on) cannot do this once a shortcut has ever been bound
+/// before - see the diagnosis in `bind_activation_shortcut`'s doc comment.
+pub async fn reconfigure_shortcut(keybind: &str) -> Result<ReconfigureOutcome, String> {
+    reconfigure_shortcut_inner(keybind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn reconfigure_shortcut_inner(keybind: &str) -> anyhow::Result<ReconfigureOutcome> {
+    register_host_app().await?;
+    let portal = GlobalShortcuts::new().await?;
+    let session = portal.create_session().await?;
+    // `ConfigureShortcuts` requires a session that has already bound at
+    // least one shortcut - this is that bind. Its `preferred_trigger` only
+    // matters if this is the very first time "activation" has ever been
+    // bound for this app; otherwise it's a no-op and the dialog below is
+    // what actually changes the trigger.
+    bind_activation_shortcut(&portal, &session, keybind).await?;
+
+    // Subscribe before opening the dialog, not after: the dialog can close
+    // (and emit ShortcutsChanged) at any point once ConfigureShortcuts is
+    // called, and that call itself returns immediately without waiting for
+    // the dialog - subscribing afterwards could miss the signal entirely.
+    let mut changed = portal.receive_shortcuts_changed().await?;
+    portal.configure_shortcuts(&session, None, None).await?;
+
+    let wait_for_change = async {
+        loop {
+            let Some(event) = changed.next().await else {
+                anyhow::bail!("global shortcuts event stream closed");
+            };
+            if let Some(shortcut) = event.shortcuts().iter().find(|s| s.id() == SHORTCUT_ID) {
+                return Ok(shortcut.trigger_description().to_string());
+            }
+        }
+    };
+    let trigger_description = tokio::time::timeout(SHORTCUT_RECONFIGURE_TIMEOUT, wait_for_change)
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for the shortcut dialog"))??;
+    Ok(ReconfigureOutcome {
+        trigger_description,
+    })
 }
 
 pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
@@ -128,19 +237,8 @@ pub async fn listen(
         }
     };
     let session = portal.create_session().await?;
-    let trigger = portal_trigger(&keybind)?;
-    let shortcut = NewShortcut::new(SHORTCUT_ID, "Start or stop dictation")
-        .preferred_trigger(Some(trigger.as_str()));
-    let response = portal
-        .bind_shortcuts(&session, &[shortcut], None)
-        .await?
-        .response()?;
-    if !response
-        .shortcuts()
-        .iter()
-        .any(|shortcut| shortcut.id() == SHORTCUT_ID)
-    {
-        let message = "global shortcuts portal did not bind activation key".to_string();
+    if let Err(error) = bind_activation_shortcut(&portal, &session, &keybind).await {
+        let message = error.to_string();
         let _ = ready.send(Err(message.clone()));
         anyhow::bail!(message);
     }

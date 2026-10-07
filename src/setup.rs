@@ -72,6 +72,42 @@ fn fetch_requirement(
     })
 }
 
+/// Shared state a background shortcut-reconfigure thread reports into,
+/// polled by the setup console's render loop - same shape as
+/// `ProvisionHandle` above and `console::ConsoleState`'s microphone level
+/// meter, needed for the same reason: the console's render loop is
+/// synchronous and must keep drawing while the portal's native "press your
+/// new shortcut" dialog (`activation::reconfigure_shortcut`) is open.
+pub(crate) struct ReconfigureHandle {
+    pub result: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+/// Spawns a background thread that drives `activation::reconfigure_shortcut`
+/// to completion and reports its outcome through the returned handle. Runs
+/// its own single-threaded tokio runtime, same as `fetch_requirement` below,
+/// rather than borrowing the caller's (the console has none to borrow).
+pub(crate) fn reconfigure_shortcut_async(keybind: String) -> ReconfigureHandle {
+    let result = Arc::new(Mutex::new(None));
+    let result_for_thread = result.clone();
+    std::thread::spawn(move || {
+        let outcome = run_reconfigure(keybind);
+        if let Ok(mut guard) = result_for_thread.lock() {
+            *guard = Some(outcome);
+        }
+    });
+    ReconfigureHandle { result }
+}
+
+fn run_reconfigure(keybind: String) -> Result<String, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime
+        .block_on(crate::activation::reconfigure_shortcut(&keybind))
+        .map(|outcome| outcome.trigger_description)
+}
+
 pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static str {
     match outcome {
         crate::model::DownloadOutcome::AlreadyInstalled => "already installed",

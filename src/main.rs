@@ -74,11 +74,21 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::ShortcutTest) => {
             let config = config::Config::load()?;
-            if let Some(error) = activation::test_shortcut_binding(&config.activation.keybind).await
-            {
-                anyhow::bail!("shortcut binding test failed: {error}");
+            println!("Press your shortcut now...");
+            match activation::test_shortcut_binding(&config.activation.keybind).await {
+                Ok(activation::ShortcutTestOutcome::Pressed) => {
+                    println!("Shortcut press detected - the binding works.");
+                }
+                Ok(activation::ShortcutTestOutcome::TimedOut) => {
+                    anyhow::bail!(
+                        "no shortcut press detected within 15s; check the configured \
+                         shortcut and your desktop's shortcut settings"
+                    );
+                }
+                Err(error) => {
+                    anyhow::bail!("shortcut binding test failed: {error}");
+                }
             }
-            println!("shortcut binding available");
         }
         Some(Commands::Autostart { command }) => match command {
             AutostartCommand::Enable => {
