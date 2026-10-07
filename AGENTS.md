@@ -233,3 +233,23 @@ used) rather than blocking in the foreground. The dashboard's `start`/`stop`
 home items (single-shot recording start/stop) stay hidden from the home list
 too - `toggle` and `cancel` are the dashboard's recording controls, while
 `start`/`stop` remain reachable only as CLI commands.
+
+The XDG GlobalShortcuts portal's `BindShortcuts.preferred_trigger` (the hint
+`src/activation.rs`'s `bind_activation_shortcut` passes to `bind_shortcuts`)
+is only honored the very first time a given shortcut id is ever bound for
+this app - every later bind keeps whatever trigger the desktop already has
+on file, silently ignoring a changed hint. The only portal method that can
+actually change an already-bound shortcut's trigger is
+`GlobalShortcuts::configure_shortcuts`, which opens the desktop's own native
+"press your new shortcut" dialog; it requires a session with at least one
+shortcut already bound, and itself returns immediately without waiting for
+the dialog, so the caller must subscribe to `receive_shortcuts_changed()`
+*before* calling it (not after) to avoid missing the signal.
+`activation::reconfigure_shortcut` does this and is the only way the Setup
+console's Shortcut step (Ctrl+R) can really change the binding; a background
+thread (`setup::reconfigure_shortcut_async`, same bridge shape as
+`provision_model_async`) runs it since the console's render loop is
+synchronous. `activation::test_shortcut_binding` (CLI `shortcut-test`,
+dashboard) similarly binds and then actually waits on `receive_activated()`
+for a real press (bounded, `SHORTCUT_PRESS_TIMEOUT`) rather than treating a
+successful `bind_shortcuts` call alone as proof the shortcut works.
