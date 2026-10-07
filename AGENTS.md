@@ -244,3 +244,29 @@ connect. `Path::exists()` alone is not enough: `stop_daemon`/`restart_daemon`
 used to treat the leftover file as proof a daemon was running and tried (and
 failed) to send it `Shutdown`, surfacing a raw connection-refused error
 instead of proceeding straight to `spawn_daemon`.
+
+## Release
+
+`.github/workflows/release.yml` builds Linux (.deb variants + plain binary),
+an Arch package, and macOS (Apple Silicon + Intel) assets on a `v*` tag, then
+publishes a GitHub release. The `arch` job builds the AUR `tonguetyped-bin`
+package (root `PKGBUILD`, a "-bin" style package repackaging the already-built
+default-variant Linux binary, the same one `cargo-deb` repackages for the
+.deb - not rebuilt from source) inside an `archlinux:latest` container, since
+GitHub-hosted runners are Ubuntu and `makepkg` needs a real Arch environment;
+`options=('!debug')` is required there, or `makepkg` emits a useless
+`tonguetyped-bin-debug` split package from a binary that already shipped
+stripped. The root `PKGBUILD` is a template only - `pkgver`/`sha256sums` are
+resolved per-release by the `arch` job, not hand-edited here. The
+`aur-publish` job pushes the resolved PKGBUILD/.SRCINFO to
+`ssh://aur@aur.archlinux.org/tonguetyped-bin.git` using the
+`AUR_SSH_PRIVATE_KEY` repo secret; it runs after the `publish` job (not
+alongside it) because the PKGBUILD's `source` URL points at that release's
+now-live GitHub asset, and it skips cleanly (not a failure) when the secret
+is absent, so the rest of the release never depends on it. The macOS job
+builds both `aarch64` (macos-14, Apple Silicon) and `x86_64` (Intel) legs
+natively rather than cross-compiling, since transcribe-cpp's cmake build is
+more reliable built natively per-arch; GitHub retired the old `macos-13`
+Intel runner image on 2025-12-04, so the Intel leg uses `macos-15-intel`
+(GitHub's current native x86_64 macOS runner label) - re-check GitHub's
+runner-images deprecation notices before assuming that label still exists.

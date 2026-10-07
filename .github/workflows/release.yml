@@ -109,8 +109,22 @@ jobs:
           if-no-files-found: error
 
   macos-metal:
-    name: macOS gpu-metal
-    runs-on: macos-14
+    name: macOS gpu-metal (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            # Apple Silicon, native.
+            runner: macos-14
+          - arch: x86_64
+            # Native Intel build, preferred over cross-compiling from
+            # macos-14 since transcribe-cpp's cmake build is more likely to
+            # work correctly built natively per-arch. macos-13 (the prior
+            # Intel default) was retired 2025-12-04; macos-15-intel is
+            # GitHub's current native x86_64 macOS runner label.
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,16 +135,72 @@ jobs:
       - name: Archive Metal binary
         run: |
           mkdir -p release-assets
-          tar -C target/release -czf "release-assets/tonguetyped-${RELEASE_TAG}-macos-aarch64-gpu-metal.tar.gz" tonguetyped
+          tar -C target/release -czf "release-assets/tonguetyped-${RELEASE_TAG}-macos-${{ matrix.arch }}-gpu-metal.tar.gz" tonguetyped
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos-gpu-metal
+          name: release-macos-gpu-metal-${{ matrix.arch }}
           path: release-assets/
+          if-no-files-found: error
+
+  arch:
+    name: Arch package
+    needs: [linux]
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: pacman -Sy --noconfirm --needed base-devel git
+      - name: Create unprivileged build user
+        # makepkg refuses to run as root.
+        run: useradd -m builder
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux-default
+          path: linux-release
+      - name: Resolve PKGBUILD for this release
+        run: |
+          version="${RELEASE_TAG#v}"
+          binary="linux-release/tonguetyped-${RELEASE_TAG}-linux-x86_64"
+          test -f "$binary"
+          mkdir -p build
+          cp PKGBUILD build/PKGBUILD
+          sha256="$(sha256sum "$binary" | cut -d' ' -f1)"
+          sed -i "s/^pkgver=.*/pkgver=${version}/" build/PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${sha256}')/" build/PKGBUILD
+          # Place the already-built binary under the name makepkg's source
+          # array expects, so makepkg verifies the checksum locally instead
+          # of downloading from the GitHub release - which doesn't exist yet
+          # at this point in the workflow.
+          cp "$binary" "build/tonguetyped-v${version}-linux-x86_64"
+          chown -R builder:builder build
+      - name: Build package with makepkg
+        run: su builder -c 'cd build && makepkg --noconfirm --nodeps'
+      - name: Generate .SRCINFO
+        run: su builder -c 'cd build && makepkg --printsrcinfo > .SRCINFO'
+      - name: Collect release asset
+        run: |
+          mkdir -p release-assets
+          cp build/*.pkg.tar.zst release-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-arch
+          path: release-assets/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aur-pkgbuild
+          path: |
+            build/PKGBUILD
+            build/.SRCINFO
           if-no-files-found: error
 
   publish:
     name: Publish GitHub release
-    needs: [linux, macos-metal]
+    needs: [linux, macos-metal, arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -147,3 +217,58 @@ jobs:
           else
             gh release create "$RELEASE_TAG" release-assets/* --generate-notes --title "$RELEASE_TAG"
           fi
+
+  aur-publish:
+    name: Publish to AUR
+    # Runs after the GitHub release exists so the PKGBUILD's source URL
+    # (a GitHub release download link) actually resolves for AUR users.
+    needs: [publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for AUR SSH key
+        id: check
+        env:
+          HAS_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$HAS_KEY" ]; then
+            echo "::notice::AUR_SSH_PRIVATE_KEY secret is not set - skipping AUR publish. Add that secret (a deploy SSH key for an AUR account) to publish tonguetyped-bin to the AUR automatically."
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "AUR_SSH_PRIVATE_KEY secret found - publishing tonguetyped-bin to the AUR."
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.check.outputs.has_key == 'true'
+        with:
+          name: aur-pkgbuild
+          path: aur-pkg
+      - name: Set up SSH agent for AUR
+        if: steps.check.outputs.has_key == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" | ssh-add -
+      - name: Push package to AUR
+        if: steps.check.outputs.has_key == 'true'
+        env:
+          GIT_AUTHOR_NAME: cheerfulScumbag
+          GIT_AUTHOR_EMAIL: 164391367+cheerfulScumbag@users.noreply.github.com
+          GIT_COMMITTER_NAME: cheerfulScumbag
+          GIT_COMMITTER_EMAIL: 164391367+cheerfulScumbag@users.noreply.github.com
+        run: |
+          git clone ssh://aur@aur.archlinux.org/tonguetyped-bin.git aur-repo
+          cp aur-pkg/PKGBUILD aur-pkg/.SRCINFO aur-repo/
+          cd aur-repo
+          if [ -z "$(git status --porcelain -- PKGBUILD .SRCINFO)" ]; then
+            echo "AUR package already up to date for ${RELEASE_TAG}; nothing to push."
+            exit 0
+          fi
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${RELEASE_TAG}"
+          git push origin master
