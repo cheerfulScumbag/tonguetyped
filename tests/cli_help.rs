@@ -19,7 +19,7 @@ const ALL_COMMANDS_WITH_DESCRIPTIONS: &[(&str, &str)] = &[
     ("doctor", "Run system diagnostics"),
     (
         "shortcut-test",
-        "Interactively validate desktop shortcut authorization and binding",
+        "Bind the desktop shortcut and wait for you to actually press it",
     ),
     ("autostart", "Manage desktop-session autostart"),
     (

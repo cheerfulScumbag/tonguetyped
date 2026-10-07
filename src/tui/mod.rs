@@ -426,7 +426,11 @@ impl App {
             }
             "shortcut-test" => {
                 let keybind = self.config.activation.keybind.clone();
-                self.spawn_pending("Shortcut test", shortcut_test_task(keybind), None);
+                self.spawn_pending(
+                    "Shortcut test - press it now",
+                    shortcut_test_task(keybind),
+                    None,
+                );
             }
             "autostart" => {
                 self.screen = Screen::Autostart(screens::AutostartScreen::new(&self.config));
@@ -722,11 +726,15 @@ async fn doctor_task(config: Config) -> Vec<OutputLine> {
 
 async fn shortcut_test_task(keybind: String) -> Vec<OutputLine> {
     match activation::test_shortcut_binding(&keybind).await {
-        None => vec![OutputLine {
-            text: "shortcut binding available".to_string(),
+        Ok(activation::ShortcutTestOutcome::Pressed) => vec![OutputLine {
+            text: "shortcut press detected - the binding works".to_string(),
             is_error: false,
         }],
-        Some(error) => vec![OutputLine {
+        Ok(activation::ShortcutTestOutcome::TimedOut) => vec![OutputLine {
+            text: "no shortcut press detected within 15s".to_string(),
+            is_error: true,
+        }],
+        Err(error) => vec![OutputLine {
             text: format!("shortcut binding test failed: {error}"),
             is_error: true,
         }],

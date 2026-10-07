@@ -45,7 +45,7 @@ pub enum Commands {
         #[arg(long)]
         test_type: bool,
     },
-    /// Interactively validate desktop shortcut authorization and binding
+    /// Bind the desktop shortcut and wait for you to actually press it
     ShortcutTest,
     /// Manage desktop-session autostart
     Autostart {
