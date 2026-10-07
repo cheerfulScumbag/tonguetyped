@@ -82,7 +82,10 @@ console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc
 returns to the previous one, and `q` quits without saving. The microphone step
 shows a live input level meter for whichever microphone is currently
 highlighted after navigation settles, so you can compare devices without
-restarting audio capture for every keypress. After the model step, the
+restarting audio capture for every keypress. On the shortcut step, typing a
+new combination only takes effect the first time a shortcut is ever bound;
+to change an already-bound shortcut, press `Ctrl+R` to open the desktop's
+own native "press your new shortcut" dialog instead. After the model step, the
 console fetches the selected GGUF model file if it isn't already installed,
 with progress shown before continuing - the same file every backend (CPU or
 an accelerator) requests, so there is only ever one model to fetch.
@@ -124,7 +127,8 @@ transcripts directly. To test typing explicitly, focus a disposable text field
 and run `cargo run -- doctor --test-type`. The regular `doctor` command checks
 the compositor, microphone, model, and typing backends without injecting text
 or requesting shortcut authorization. Run `cargo run -- shortcut-test`
-explicitly to validate desktop shortcut authorization and binding.
+explicitly, then press the configured shortcut; the command waits up to 15
+seconds and reports whether the press was actually detected.
 
 ## Desktop feedback
 
@@ -198,7 +202,7 @@ tonguetyped status         Show daemon state, activation mode, and shortcut heal
 tonguetyped reload         Validate and reload the config
 tonguetyped last-result    Print the latest transcription
 tonguetyped doctor         Check runtime dependencies
-tonguetyped shortcut-test  Interactively test shortcut authorization and binding
+tonguetyped shortcut-test  Bind the desktop shortcut and wait for you to press it
 tonguetyped autostart      Enable or disable desktop-session autostart
 tonguetyped model          Manage the GGUF speech model catalog
 ```
