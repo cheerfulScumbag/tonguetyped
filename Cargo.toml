@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Local Linux dictation controlled from the terminal or a desktop-wide keyboard shortcut"
 repository = "https://github.com/cheerfulScumbag/tonguetyped"
+license = "MIT"
 
 [package.metadata.deb]
 maintainer = "cheerfulScumbag <164391367+cheerfulScumbag@users.noreply.github.com>"
