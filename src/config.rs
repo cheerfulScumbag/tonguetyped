@@ -55,6 +55,13 @@ pub enum ActivationMode {
     Toggle,
 }
 
+/// The two `ActivationMode` choices as both configuration UIs label them, in
+/// order (index 0 = `Hold`, index 1 = `Toggle`).
+pub(crate) const ACTIVATION_MODE_LABELS: [&str; 2] = [
+    "Hold the shortcut while speaking",
+    "Press once to start and again to stop",
+];
+
 impl std::fmt::Display for ActivationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -362,6 +369,11 @@ pub struct StartupConfig {
     #[serde(default = "default_false")]
     pub autostart: bool,
 }
+
+/// The `StartupConfig::autostart` choices as both configuration UIs label
+/// them, in order (index 0 = start manually, index 1 = autostart).
+pub(crate) const STARTUP_LABELS: [&str; 2] =
+    ["Start manually", "Start TongueTyped when you sign in"];
 
 fn default_activation_mode() -> ActivationMode {
     ActivationMode::Hold

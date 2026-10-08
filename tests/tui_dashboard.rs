@@ -71,6 +71,10 @@ impl Sandbox {
         cmd.env("NO_COLOR", "1");
         cmd.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
     }
+
+    fn config_contents(&self) -> String {
+        std::fs::read_to_string(self.config_home.join("tonguetyped/config.toml")).unwrap()
+    }
 }
 
 impl Drop for Sandbox {
@@ -186,7 +190,18 @@ const KEY_DOWN: &[u8] = b"\x1b[B";
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 
-const ALL_COMMAND_NAMES: [&str; 11] = [
+const SETTING_LABELS: [&str; 8] = [
+    "Model",
+    "Microphone",
+    "Activation",
+    "Shortcut",
+    "Transcript output",
+    "Typing backend",
+    "Startup",
+    "Overlay",
+];
+
+const COMMAND_NAMES: [&str; 9] = [
     "setup",
     "daemon",
     "toggle",
@@ -196,46 +211,83 @@ const ALL_COMMAND_NAMES: [&str; 11] = [
     "last-result",
     "doctor",
     "shortcut-test",
-    "autostart",
-    "model",
 ];
 
+/// Home index of the first command row (after the eight Settings rows), for
+/// tests that need to arrow down to a specific command.
+const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
+
 #[test]
-fn pty_bare_invocation_opens_the_dashboard_with_full_command_coverage_on_a_normal_terminal() {
+fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
     let session = Session::spawn(&sandbox, 100, 32);
 
-    // The pre-change baseline (see .superdesign/replica_html_template and
-    // this task's report) was a clap "missing subcommand" usage error on
-    // stderr with exit code 2 - bare invocation must now instead render the
-    // dashboard: the centered logo and every one of the 11 dashboard-listed
-    // commands on one screen, no pagination. `start`/`stop` (single-shot
-    // recording start/stop) are real CLI subcommands but are intentionally
-    // hidden from the dashboard home list - `toggle`/`cancel` are the
-    // dashboard's recording controls.
-    let screen = session.wait_for("Commands", Duration::from_secs(5));
+    // The pre-change baseline (see .superdesign/replica_html_template and the
+    // dashboard task's report) listed 11 CLI commands with model/autostart
+    // among them. The signed-off settings-menu redesign turns the home screen
+    // into two stacked panels with one selection cursor: eight Settings rows
+    // with current values (model and autostart included) above the remaining
+    // Commands. All of it must fit one normal terminal, no pagination.
+    let screen = session.wait_for("Settings", Duration::from_secs(5));
     assert!(
         screen.contains("████████╗"),
         "a 100-column terminal should fit the full block-art logo:\n{screen}"
     );
-    for name in ALL_COMMAND_NAMES {
+    for label in SETTING_LABELS {
+        assert!(
+            screen.contains(label),
+            "home screen is missing settings row {label:?}; got:\n{screen}"
+        );
+    }
+    for name in COMMAND_NAMES {
         assert!(
             screen.contains(name),
             "home screen is missing command {name:?}; got:\n{screen}"
         );
     }
-    for hidden in [
-        "start          Start a new recording",
-        "stop           Stop the current recording",
-    ] {
-        assert!(
-            !screen.contains(hidden),
-            "home screen must omit {hidden:?}; got:\n{screen}"
-        );
-    }
+    assert!(
+        !screen.contains("start          Start a new recording"),
+        "start/stop stay hidden from the Commands panel:\n{screen}"
+    );
+    // The Settings panel shows real current values, not placeholders.
+    assert!(
+        screen.contains("Model              whisper-small-q5_k_m"),
+        "the Model row should show the active catalog model:\n{screen}"
+    );
+    assert!(
+        screen.contains("Overlay            enabled, top-right, badge, simple pulse"),
+        "the Overlay row should summarize the real config:\n{screen}"
+    );
     assert!(
         screen.contains("Daemon:"),
         "missing status strip:\n{screen}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_home_selection_crosses_from_the_settings_panel_into_the_commands_panel() {
+    let sandbox = Sandbox::new("cross-panel-nav");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // "Model" (first settings row) is selected by default.
+    let initial = session.visible_text();
+    assert!(
+        initial.contains("> Model"),
+        "expected Model selected:\n{initial}"
+    );
+
+    // Walking down past all eight settings rows lands on "setup", the first
+    // command row - one cursor spans both panels.
+    for _ in 0..FIRST_COMMAND_ROW {
+        session.send(KEY_DOWN);
+    }
+    let commands_selected = session.wait_for("> setup", Duration::from_secs(3));
+    assert!(
+        !commands_selected.contains("> Model"),
+        "only one row should carry the selection marker:\n{commands_selected}"
     );
 
     session.quit_and_wait();
@@ -266,25 +318,25 @@ fn non_terminal_bare_invocation_fails_fast_instead_of_hanging() {
 fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_home_screen() {
     let sandbox = Sandbox::new("nav");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Commands", Duration::from_secs(5));
+    session.wait_for("Settings", Duration::from_secs(5));
 
-    // "setup" (first item) is selected by default.
+    // "Model" (first settings row) is selected by default.
     let initial = session.visible_text();
     assert!(
-        initial.contains("> setup"),
-        "expected setup selected:\n{initial}"
+        initial.contains("> Model"),
+        "expected Model selected:\n{initial}"
     );
 
     session.send(KEY_DOWN);
     session.send(KEY_DOWN);
-    let after_down = session.wait_for("> toggle", Duration::from_secs(3));
+    let after_down = session.wait_for("> Activation", Duration::from_secs(3));
     assert!(
-        !after_down.contains("> setup") && !after_down.contains("> daemon"),
+        !after_down.contains("> Model") && !after_down.contains("> Microphone"),
         "only one row should carry the selection marker:\n{after_down}"
     );
 
     session.send(KEY_UP);
-    session.wait_for("> daemon", Duration::from_secs(3));
+    session.wait_for("> Microphone", Duration::from_secs(3));
 
     // Escape on the home screen must not quit or navigate anywhere.
     session.send(KEY_ESC);
@@ -295,7 +347,7 @@ fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_ho
     );
     let still_home = session.visible_text();
     assert!(
-        still_home.contains("> daemon"),
+        still_home.contains("> Microphone"),
         "Esc must be a no-op on home:\n{still_home}"
     );
 
@@ -334,13 +386,13 @@ fn pty_logo_recenters_for_wide_and_narrow_terminals_without_clipping() {
 fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_error() {
     let sandbox = Sandbox::new("action-feedback");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Commands", Duration::from_secs(5));
+    session.wait_for("Settings", Duration::from_secs(5));
 
-    // Navigate to "status" (index 4: setup, daemon, toggle, cancel, status)
-    // and select it. No daemon is running in this sandbox, so the dashboard
-    // must show a visible, actionable error - not hang, not crash, not
-    // silently do nothing.
-    for _ in 0..4 {
+    // Navigate to "status" (the fifth Commands row, after eight Settings
+    // rows: setup, daemon, toggle, cancel, status) and select it. No daemon
+    // is running in this sandbox, so the dashboard must show a visible,
+    // actionable error - not hang, not crash, not silently do nothing.
+    for _ in 0..FIRST_COMMAND_ROW + 4 {
         session.send(KEY_DOWN);
     }
     session.send(KEY_ENTER);
@@ -367,12 +419,15 @@ fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_erro
 fn pty_daemon_home_item_opens_a_start_stop_restart_screen_instead_of_starting_immediately() {
     let sandbox = Sandbox::new("daemon-screen");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Commands", Duration::from_secs(5));
+    session.wait_for("Settings", Duration::from_secs(5));
 
-    // "daemon" is already selected by default (second item). Selecting it
+    // "daemon" is the second Commands row, right after "setup". Selecting it
     // must open a sub-screen offering Start/Stop/Restart, not immediately
     // launch the daemon the way the old single-action binding did.
-    session.send(KEY_DOWN);
+    for _ in 0..FIRST_COMMAND_ROW + 1 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> daemon", Duration::from_secs(3));
     session.send(KEY_ENTER);
     let screen = session.wait_for("Restart", Duration::from_secs(3));
     assert!(
@@ -425,12 +480,10 @@ fn pty_model_screen_lists_the_catalog_and_activation_reports_confirmed_failure_f
     // requiring a multi-gigabyte network download in a test.
     let sandbox = Sandbox::new("model-activation");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Commands", Duration::from_secs(5));
+    session.wait_for("Settings", Duration::from_secs(5));
 
-    for _ in 0..10 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> model", Duration::from_secs(3));
+    // "Model" is the first Settings row and is already selected.
+    session.wait_for("> Model", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
     let catalog_screen = session.wait_for("Model catalog", Duration::from_secs(5));
@@ -451,6 +504,283 @@ fn pty_model_screen_lists_the_catalog_and_activation_reports_confirmed_failure_f
         outcome.contains("download:"),
         "activation result should report the download outcome:\n{outcome}"
     );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_activation_setting_changes_mode_and_persists_it() {
+    let sandbox = Sandbox::new("activation-setting");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Activation is the third Settings row (Model, Microphone, Activation).
+    session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
+    session.wait_for("> Activation", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    session.wait_for("> Hold the shortcut while speaking", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    let saved = session.wait_for("Activation mode saved.", Duration::from_secs(3));
+    assert!(
+        saved.contains("> Press once to start and again to stop"),
+        "the new mode should stay highlighted after applying:\n{saved}"
+    );
+
+    // Reopening the screen shows the new mode selected, and the same choice
+    // was written to config.toml.
+    session.send(KEY_ESC);
+    session.wait_for("Settings", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for(
+        "> Press once to start and again to stop",
+        Duration::from_secs(3),
+    );
+    assert!(sandbox.config_contents().contains("mode = \"toggle\""));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_overlay_setting_cycles_position_and_persists_it() {
+    let sandbox = Sandbox::new("overlay-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Overlay is the eighth and last Settings row.
+    for _ in 0..SETTING_LABELS.len() - 1 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Overlay", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    let opened = session.wait_for("Position    top-right", Duration::from_secs(3));
+    assert!(
+        opened.contains("Style       Badge") && opened.contains("Streaming   Simple pulse"),
+        "the Overlay screen should show all current values:\n{opened}"
+    );
+    assert!(
+        opened.contains("> Enabled"),
+        "the current enable state should be selected:\n{opened}"
+    );
+
+    // Selection starts on "Enabled"; one Down selects Position, Enter cycles
+    // it to the next configured value.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    let cycled = session.wait_for("Position    center", Duration::from_secs(3));
+    assert!(
+        cycled.contains("Overlay saved."),
+        "cycling a value should report the save:\n{cycled}"
+    );
+    assert!(sandbox.config_contents().contains("position = \"center\""));
+
+    // Home's summary row reflects the new value.
+    session.send(KEY_ESC);
+    let home = session.wait_for(
+        "enabled, center, badge, simple pulse",
+        Duration::from_secs(3),
+    );
+    assert!(
+        home.contains("> Overlay"),
+        "selection should return to the Overlay row:\n{home}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
+    let sandbox = Sandbox::new("overlay-disabled");
+    std::fs::write(
+        sandbox.config_home.join("tonguetyped/config.toml"),
+        "[overlay]\nenabled = false\n",
+    )
+    .unwrap();
+    let mut session = Session::spawn(&sandbox, 100, 40);
+
+    let home = session.wait_for("Overlay            disabled", Duration::from_secs(5));
+    assert!(
+        home.contains("Overlay            disabled"),
+        "the summary row should reflect the disabled overlay:\n{home}"
+    );
+    for _ in 0..SETTING_LABELS.len() - 1 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Overlay", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    // Disabled state: only the two enable rows, no configuration sub-rows.
+    let disabled = session.wait_for("> Disabled", Duration::from_secs(3));
+    assert!(
+        !disabled.contains("Position") && !disabled.contains("Streaming"),
+        "a disabled overlay must not show position/style/streaming:\n{disabled}"
+    );
+
+    // Move to Enabled and apply: the three configuration rows appear.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    let enabled = session.wait_for("Position", Duration::from_secs(3));
+    assert!(
+        enabled.contains("Overlay saved.") && enabled.contains("> Enabled"),
+        "enabling should save and keep the row selected:\n{enabled}"
+    );
+    assert!(sandbox.config_contents().contains("enabled = true"));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_shortcut_screen_edits_the_keybinding_and_reports_portal_failures_inline() {
+    let sandbox = Sandbox::new("shortcut-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Shortcut is the fourth Settings row.
+    for _ in 0..3 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Shortcut", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    session.wait_for("Shortcut: Super+O_", Duration::from_secs(3));
+    session.wait_for("Test shortcut - press it now", Duration::from_secs(3));
+
+    // Backspace edits the raw value (typing is literal on this screen).
+    session.send(b"\x7f");
+    let edited = session.wait_for("Shortcut: Super+_", Duration::from_secs(3));
+    assert!(
+        edited.contains("A successful test saves the typed shortcut."),
+        "the idle hint should explain that testing saves:\n{edited}"
+    );
+
+    // Ctrl+R with an invalid value is rejected inline before any portal call.
+    session.send(b"\x12");
+    session.wait_for("Invalid shortcut", Duration::from_secs(3));
+
+    // Repair the value, then Ctrl+R again: the sandbox has no session bus, so
+    // the portal failure must surface inline and the screen must stay usable.
+    session.send(b"O");
+    session.wait_for("Shortcut: Super+O_", Duration::from_secs(3));
+    session.send(b"\x12");
+    let failed = session.wait_for("Reconfigure failed", Duration::from_secs(10));
+    assert!(
+        failed.contains("Shortcut"),
+        "the failure should render inside the Shortcut panel:\n{failed}"
+    );
+    session.send(b"X");
+    session.wait_for("Shortcut: Super+OX_", Duration::from_secs(3));
+
+    // `q` is a literal keybinding character on this screen, so leave to Home
+    // before quitting.
+    session.send(KEY_ESC);
+    session.wait_for("Settings", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_microphone_screen_lists_devices_with_a_level_panel() {
+    let sandbox = Sandbox::new("microphone-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Microphone is the second Settings row.
+    session.send(KEY_DOWN);
+    session.wait_for("> Microphone", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    // Whether or not a real capture device opens in this environment, the
+    // screen must show the device list and the input-level panel (a live
+    // gauge, or the recorder's error message inside that panel).
+    let screen = session.wait_for("Input level", Duration::from_secs(10));
+    assert!(
+        screen.contains("System default microphone"),
+        "the microphone list should render:\n{screen}"
+    );
+
+    session.send(KEY_ENTER);
+    session.wait_for(
+        "Saved - used for the next recording.",
+        Duration::from_secs(3),
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
+    let sandbox = Sandbox::new("output-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Transcript output is the fifth Settings row.
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Keep transcripts in TongueTyped", Duration::from_secs(3));
+
+    // "Type into the focused application" only exists when at least one
+    // typing helper was detected, so the environment decides whether there is
+    // a second choice to exercise here.
+    if session
+        .visible_text()
+        .contains("Type into the focused application")
+    {
+        session.send(KEY_DOWN);
+        session.send(KEY_ENTER);
+        session.wait_for("Transcript output saved.", Duration::from_secs(3));
+        assert!(sandbox.config_contents().contains("method = \"type\""));
+    }
+
+    // Typing backend is the sixth Settings row.
+    session.send(KEY_ESC);
+    session.wait_for("Settings", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.wait_for("> Typing backend", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    let backend_screen = session.wait_for(
+        "Only used when transcripts are typed into the focused application.",
+        Duration::from_secs(3),
+    );
+    assert!(
+        backend_screen.contains("> auto"),
+        "the configured backend should be selected:\n{backend_screen}"
+    );
+    session.send(KEY_ENTER);
+    session.wait_for("Typing backend saved.", Duration::from_secs(3));
+    assert!(sandbox
+        .config_contents()
+        .contains("typing_backend = \"auto\""));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
+    let sandbox = Sandbox::new("startup-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Startup is the seventh Settings row.
+    for _ in 0..6 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Startup", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    session.wait_for("> Start manually", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    session.wait_for("Startup setting saved.", Duration::from_secs(3));
+    assert!(sandbox
+        .config_home
+        .join("autostart/tonguetyped.desktop")
+        .exists());
+    assert!(sandbox.config_contents().contains("autostart = true"));
 
     session.quit_and_wait();
 }

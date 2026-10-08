@@ -8,16 +8,23 @@
 //! service that must outlive this dashboard session (see that function's
 //! doc comment).
 //!
-//! The command list on the first page is derived from `crate::cli::Cli`'s
-//! clap metadata (`Cli::command().get_subcommands()`), with the directional
-//! recording commands intentionally omitted in favor of Toggle.
+//! The home screen is two stacked panels with one selection cursor: a
+//! fixed Settings panel listing the eight configuration areas (Model,
+//! Microphone, Activation, Shortcut, Transcript output, Typing backend,
+//! Startup, Overlay) with their current values, and a Commands panel derived
+//! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
+//! with the directional recording commands intentionally omitted in favor of
+//! Toggle. `model` and `autostart` are CLI commands but live in the Settings
+//! panel rather than the Commands panel, so each configuration area has
+//! exactly one home-screen entry point.
 
 mod logo;
 mod screens;
 
 use crate::cli::Cli;
 use crate::commands::{self, OutputLine};
-use crate::config::Config;
+use crate::config::{Config, OutputMethod};
+use crate::setup::Capabilities;
 use crate::{activation, doctor, ipc, setup};
 use clap::CommandFactory;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -143,17 +150,67 @@ struct HomeItem {
     about: String,
 }
 
-/// The dashboard's first-page command list, derived from the exact same
-/// clap metadata `--help` renders - see this module's doc comment. The
-/// implicit `help` meta-subcommand clap adds is excluded; it has no useful
-/// standalone dashboard action. `start`/`stop` (single-shot recording
-/// start/stop) are also excluded: the dashboard offers `toggle` and
-/// `cancel` for recording control, and `start`/`stop` remain reachable only
-/// as the public CLI commands documented in `--help`.
+/// The eight configuration areas the home screen's Settings panel lists, in
+/// display order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SettingId {
+    Model,
+    Microphone,
+    Activation,
+    Shortcut,
+    TranscriptOutput,
+    TypingBackend,
+    Startup,
+    Overlay,
+}
+
+impl SettingId {
+    const ALL: [SettingId; 8] = [
+        SettingId::Model,
+        SettingId::Microphone,
+        SettingId::Activation,
+        SettingId::Shortcut,
+        SettingId::TranscriptOutput,
+        SettingId::TypingBackend,
+        SettingId::Startup,
+        SettingId::Overlay,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingId::Model => "Model",
+            SettingId::Microphone => "Microphone",
+            SettingId::Activation => "Activation",
+            SettingId::Shortcut => "Shortcut",
+            SettingId::TranscriptOutput => "Transcript output",
+            SettingId::TypingBackend => "Typing backend",
+            SettingId::Startup => "Startup",
+            SettingId::Overlay => "Overlay",
+        }
+    }
+}
+
+/// Eight settings rows plus the panel's two border rows.
+const SETTINGS_PANEL_HEIGHT: u16 = 10;
+
+/// The dashboard's Commands panel, derived from the exact same clap metadata
+/// `--help` renders - see this module's doc comment. The implicit `help`
+/// meta-subcommand clap adds is excluded; it has no useful standalone
+/// dashboard action. `start`/`stop` (single-shot recording start/stop) are
+/// also excluded: the dashboard offers `toggle` and `cancel` for recording
+/// control, and `start`/`stop` remain reachable only as the public CLI
+/// commands documented in `--help`. `model` and `autostart` exist as CLI
+/// commands but are excluded here because their settings live in the
+/// Settings panel (exactly one home-screen entry point per area).
 fn home_items() -> Vec<HomeItem> {
     Cli::command()
         .get_subcommands()
-        .filter(|command| !matches!(command.get_name(), "help" | "start" | "stop"))
+        .filter(|command| {
+            !matches!(
+                command.get_name(),
+                "help" | "start" | "stop" | "model" | "autostart"
+            )
+        })
         .map(|command| HomeItem {
             name: command.get_name().to_string(),
             about: command
@@ -173,6 +230,12 @@ enum Screen {
     Model(screens::ModelScreen),
     Autostart(screens::AutostartScreen),
     Daemon(screens::DaemonScreen),
+    Microphone(screens::MicrophoneScreen),
+    Activation(screens::ActivationScreen),
+    Shortcut(screens::ShortcutScreen),
+    TranscriptOutput(screens::OutputScreen),
+    TypingBackend(screens::TypingBackendScreen),
+    Overlay(screens::OverlayScreen),
 }
 
 struct PendingAction {
@@ -183,10 +246,13 @@ struct PendingAction {
 
 struct App {
     config: Config,
+    capabilities: Capabilities,
     screen: Screen,
-    home_items: Vec<HomeItem>,
+    command_items: Vec<HomeItem>,
     home_selected: usize,
     pending: Option<PendingAction>,
+    shortcut_test: Option<setup::ShortcutTestHandle>,
+    shortcut_dialog: Option<setup::ReconfigureHandle>,
     should_quit: bool,
     daemon_status_cache: Cell<Option<(bool, Instant)>>,
 }
@@ -204,10 +270,13 @@ impl App {
     fn new(config: Config) -> Self {
         Self {
             config,
+            capabilities: Capabilities::discover_or_default(),
             screen: Screen::Home,
-            home_items: home_items(),
+            command_items: home_items(),
             home_selected: 0,
             pending: None,
+            shortcut_test: None,
+            shortcut_dialog: None,
             should_quit: false,
             daemon_status_cache: Cell::new(None),
         }
@@ -218,6 +287,7 @@ impl App {
         let mut ticker = tokio::time::interval(Duration::from_millis(66));
 
         loop {
+            self.refresh_screens();
             terminal.draw(|frame| self.render(frame))?;
 
             // Computed before `pending_done` borrows `self.pending` mutably,
@@ -267,6 +337,114 @@ impl App {
         };
     }
 
+    /// Per-frame maintenance for screens with background work: the
+    /// microphone preview's settle/restart cycle, and the Shortcut screen's
+    /// in-flight portal test/dialog. Called every tick, before drawing, so
+    /// results surface in the next frame - the same shape the setup console
+    /// uses for its own background handles.
+    fn refresh_screens(&mut self) {
+        if let Screen::Microphone(screen) = &mut self.screen {
+            screen.poll_preview();
+        }
+        self.poll_shortcut_handles();
+    }
+
+    fn poll_shortcut_handles(&mut self) {
+        let test_outcome = self
+            .shortcut_test
+            .as_ref()
+            .and_then(|handle| handle.result.lock().ok().and_then(|mut guard| guard.take()));
+        if let Some(outcome) = test_outcome {
+            self.shortcut_test = None;
+            self.apply_shortcut_test_outcome(outcome);
+        }
+
+        let dialog_outcome = self
+            .shortcut_dialog
+            .as_ref()
+            .and_then(|handle| handle.result.lock().ok().and_then(|mut guard| guard.take()));
+        if let Some(outcome) = dialog_outcome {
+            self.shortcut_dialog = None;
+            self.apply_shortcut_dialog_outcome(outcome);
+        }
+    }
+
+    fn apply_shortcut_test_outcome(
+        &mut self,
+        outcome: Result<activation::ShortcutTestOutcome, String>,
+    ) {
+        let Screen::Shortcut(screen) = &mut self.screen else {
+            return;
+        };
+        match outcome {
+            Ok(activation::ShortcutTestOutcome::Pressed) => {
+                // The desktop only listened for presses after actually
+                // binding the shortcut, so a detected press is strong enough
+                // to persist the typed value, same as the console's
+                // shortcut step.
+                let keybind = screen.input.trim().to_string();
+                if keybind != self.config.activation.keybind {
+                    self.config.activation.keybind_status = "untested".to_string();
+                }
+                self.config.activation.keybind = keybind;
+                screen.status = match self.config.save() {
+                    Ok(()) => screens::ShortcutStatus::Message {
+                        text: "shortcut press detected - the binding works".to_string(),
+                        is_error: false,
+                    },
+                    Err(error) => screens::ShortcutStatus::Message {
+                        text: format!(
+                            "shortcut press detected, but saving the configuration failed: {error}"
+                        ),
+                        is_error: true,
+                    },
+                };
+            }
+            Ok(activation::ShortcutTestOutcome::TimedOut) => {
+                screen.status = screens::ShortcutStatus::Message {
+                    text: "no shortcut press detected within 15s".to_string(),
+                    is_error: true,
+                };
+            }
+            Err(error) => {
+                screen.status = screens::ShortcutStatus::Message {
+                    text: format!("shortcut binding test failed: {error}"),
+                    is_error: true,
+                };
+            }
+        }
+    }
+
+    fn apply_shortcut_dialog_outcome(&mut self, outcome: Result<String, String>) {
+        let Screen::Shortcut(screen) = &mut self.screen else {
+            return;
+        };
+        match outcome {
+            Ok(trigger_description) => {
+                self.config.activation.keybind = screen.input.trim().to_string();
+                self.config.activation.keybind_status = trigger_description.clone();
+                screen.status = match self.config.save() {
+                    Ok(()) => screens::ShortcutStatus::Message {
+                        text: format!("Shortcut bound: {trigger_description}"),
+                        is_error: false,
+                    },
+                    Err(error) => screens::ShortcutStatus::Message {
+                        text: format!(
+                            "Shortcut bound, but saving the configuration failed: {error}"
+                        ),
+                        is_error: true,
+                    },
+                };
+            }
+            Err(error) => {
+                screen.status = screens::ShortcutStatus::Message {
+                    text: format!("Reconfigure failed: {error}"),
+                    is_error: true,
+                };
+            }
+        }
+    }
+
     fn handle_event(
         &mut self,
         event: Event,
@@ -295,12 +473,18 @@ impl App {
             Screen::Model(_) => self.handle_model_key(key),
             Screen::Autostart(_) => self.handle_autostart_key(key),
             Screen::Daemon(_) => self.handle_daemon_key(key),
+            Screen::Microphone(_) => self.handle_microphone_key(key),
+            Screen::Activation(_) => self.handle_activation_key(key),
+            Screen::Shortcut(_) => self.handle_shortcut_key(key),
+            Screen::TranscriptOutput(_) => self.handle_output_key(key),
+            Screen::TypingBackend(_) => self.handle_typing_backend_key(key),
+            Screen::Overlay(_) => self.handle_overlay_key(key),
         }
         Ok(())
     }
 
     fn move_home_selection(&mut self, delta: i32) {
-        let len = self.home_items.len() as i32;
+        let len = (SettingId::ALL.len() + self.command_items.len()) as i32;
         if len == 0 {
             return;
         }
@@ -318,12 +502,255 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_home_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_home_selection(1),
             KeyCode::Enter if self.pending.is_none() => {
-                let name = self.home_items[self.home_selected].name.clone();
-                self.dispatch_home_action(&name, terminal)?;
+                let selected = self.home_selected;
+                self.open_home_row(selected, terminal)?;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn open_home_row(
+        &mut self,
+        index: usize,
+        terminal: &mut Terminal<Backend>,
+    ) -> anyhow::Result<()> {
+        if index < SettingId::ALL.len() {
+            self.open_setting(SettingId::ALL[index]);
+            return Ok(());
+        }
+        let name = self.command_items[index - SettingId::ALL.len()]
+            .name
+            .clone();
+        self.dispatch_command(&name, terminal)
+    }
+
+    fn open_setting(&mut self, setting: SettingId) {
+        self.screen = match setting {
+            SettingId::Model => Screen::Model(screens::ModelScreen::new(&self.config)),
+            SettingId::Microphone => {
+                let mut screen = screens::MicrophoneScreen::new(&self.capabilities, &self.config);
+                screen.start_preview();
+                Screen::Microphone(screen)
+            }
+            SettingId::Activation => {
+                Screen::Activation(screens::ActivationScreen::new(&self.config))
+            }
+            SettingId::Shortcut => Screen::Shortcut(screens::ShortcutScreen::new(&self.config)),
+            SettingId::TranscriptOutput => Screen::TranscriptOutput(screens::OutputScreen::new(
+                &self.capabilities,
+                &self.config,
+            )),
+            SettingId::TypingBackend => Screen::TypingBackend(screens::TypingBackendScreen::new(
+                &self.capabilities,
+                &self.config,
+            )),
+            SettingId::Startup => Screen::Autostart(screens::AutostartScreen::new(&self.config)),
+            SettingId::Overlay => Screen::Overlay(screens::OverlayScreen::new(&self.config)),
+        };
+    }
+
+    /// Saves the current config after a settings screen mutated it in place,
+    /// reporting the outcome in whichever screen's result line is current -
+    /// so every settings screen gives the same success/error feedback.
+    fn save_settings_config(&mut self) {
+        let result = self.config.save().map_err(|error| error.to_string());
+        match &mut self.screen {
+            Screen::Microphone(screen) => screen.result = Some(result),
+            Screen::Activation(screen) => screen.result = Some(result),
+            Screen::TranscriptOutput(screen) => screen.result = Some(result),
+            Screen::TypingBackend(screen) => screen.result = Some(result),
+            Screen::Overlay(screen) => screen.result = Some(result),
+            _ => {}
+        }
+    }
+
+    fn handle_microphone_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::Microphone(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::Microphone(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::Microphone(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_activation_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::Activation(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::Activation(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::Activation(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_output_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::TranscriptOutput(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::TranscriptOutput(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::TranscriptOutput(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_typing_backend_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::TypingBackend(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::TypingBackend(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::TypingBackend(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_overlay_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::Overlay(screen) = &mut self.screen {
+                    screen.move_selection(-1, &self.config);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::Overlay(screen) = &mut self.screen {
+                    screen.move_selection(1, &self.config);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::Overlay(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    /// The Shortcut screen owns raw text input, so `q` and `j`/`k` are
+    /// literal keybinding characters here (same as the setup console's
+    /// shortcut step) - only the arrow keys, Escape, Enter, Ctrl+R and
+    /// Ctrl+C are commands, and everything is inert while the portal test or
+    /// native dialog is in flight except Escape.
+    fn handle_shortcut_key(&mut self, key: KeyEvent) {
+        let busy = matches!(&self.screen, Screen::Shortcut(screen) if screen.is_busy());
+        if busy {
+            if key.code == KeyCode::Esc {
+                self.screen = Screen::Home;
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up => {
+                if let Screen::Shortcut(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down => {
+                if let Screen::Shortcut(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Screen::Shortcut(screen) = &mut self.screen {
+                    screen.input.pop();
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.start_shortcut_action(Some(1));
+            }
+            KeyCode::Enter => self.start_shortcut_action(None),
+            KeyCode::Char(c) => {
+                if let Screen::Shortcut(screen) = &mut self.screen {
+                    screen.input.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn start_shortcut_action(&mut self, action: Option<usize>) {
+        let Screen::Shortcut(screen) = &mut self.screen else {
+            return;
+        };
+        let shortcut = screen.input.trim().to_string();
+        if let Err(error) = activation::portal_trigger(&shortcut) {
+            screen.status = screens::ShortcutStatus::Message {
+                text: format!("Invalid shortcut: {error}"),
+                is_error: true,
+            };
+            return;
+        }
+        match action.unwrap_or(screen.selected_action) {
+            0 => {
+                screen.status = screens::ShortcutStatus::Testing;
+                self.shortcut_test = Some(setup::shortcut_test_async(shortcut));
+            }
+            1 => {
+                screen.status = screens::ShortcutStatus::DialogOpen;
+                self.shortcut_dialog = Some(setup::reconfigure_shortcut_async(shortcut));
+            }
+            _ => {}
+        }
     }
 
     fn handle_info_key(&mut self, key: KeyEvent) {
@@ -419,7 +846,7 @@ impl App {
         }
     }
 
-    fn dispatch_home_action(
+    fn dispatch_command(
         &mut self,
         name: &str,
         terminal: &mut Terminal<Backend>,
@@ -443,12 +870,6 @@ impl App {
                     shortcut_test_task(keybind),
                     None,
                 );
-            }
-            "autostart" => {
-                self.screen = Screen::Autostart(screens::AutostartScreen::new(&self.config));
-            }
-            "model" => {
-                self.screen = Screen::Model(screens::ModelScreen::new(&self.config));
             }
             other => unreachable!("dashboard home has no handler for CLI command {other:?}"),
         }
@@ -522,6 +943,12 @@ impl App {
             Screen::Model(screen) => self.render_model(frame, area, screen),
             Screen::Autostart(screen) => self.render_autostart(frame, area, screen),
             Screen::Daemon(screen) => self.render_daemon(frame, area, screen),
+            Screen::Microphone(screen) => self.render_microphone(frame, area, screen),
+            Screen::Activation(screen) => self.render_activation(frame, area, screen),
+            Screen::Shortcut(screen) => self.render_shortcut(frame, area, screen),
+            Screen::TranscriptOutput(screen) => self.render_output(frame, area, screen),
+            Screen::TypingBackend(screen) => self.render_typing_backend(frame, area, screen),
+            Screen::Overlay(screen) => self.render_overlay(frame, area, screen),
         }
     }
 
@@ -532,6 +959,7 @@ impl App {
             .constraints([
                 Constraint::Length(logo_height),
                 Constraint::Length(1),
+                Constraint::Length(SETTINGS_PANEL_HEIGHT),
                 Constraint::Min(3),
                 Constraint::Length(1),
             ])
@@ -539,7 +967,8 @@ impl App {
 
         frame.render_widget(Paragraph::new(logo_lines), chunks[0]);
         frame.render_widget(Paragraph::new(self.status_strip_line()), chunks[1]);
-        frame.render_widget(self.home_list_widget(chunks[2].height), chunks[2]);
+        frame.render_widget(self.settings_panel_widget(), chunks[2]);
+        frame.render_widget(self.commands_panel_widget(chunks[3].height), chunks[3]);
 
         let footer = match &self.pending {
             Some(pending) => Line::from(Span::styled(
@@ -548,7 +977,7 @@ impl App {
             )),
             None => Line::from("↑/↓ navigate  Enter select  q quit"),
         };
-        frame.render_widget(Paragraph::new(footer), chunks[3]);
+        frame.render_widget(Paragraph::new(footer), chunks[4]);
     }
 
     fn daemon_running_cached(&self) -> bool {
@@ -583,32 +1012,95 @@ impl App {
         ])
     }
 
-    fn home_list_widget(&self, height: u16) -> Paragraph<'static> {
+    /// The current value shown next to a Settings-panel row, grounded in the
+    /// same config fields the corresponding settings screen edits.
+    fn setting_value(&self, setting: SettingId) -> String {
+        match setting {
+            SettingId::Model => self.config.model.active_model.clone(),
+            SettingId::Microphone => self
+                .capabilities
+                .microphone_label(&self.config.audio.microphone),
+            SettingId::Activation => self.config.activation.mode.to_string(),
+            SettingId::Shortcut => {
+                if self.config.activation.keybind_status == "untested" {
+                    self.config.activation.keybind.clone()
+                } else {
+                    self.config.activation.keybind_status.clone()
+                }
+            }
+            SettingId::TranscriptOutput => match self.config.output.method {
+                OutputMethod::None => "keep in TongueTyped".to_string(),
+                OutputMethod::Type => "type into the focused application".to_string(),
+            },
+            SettingId::TypingBackend => self.config.output.typing_backend.clone(),
+            SettingId::Startup => {
+                if self.config.startup.autostart {
+                    "start when you sign in".to_string()
+                } else {
+                    "start manually".to_string()
+                }
+            }
+            SettingId::Overlay => {
+                if !self.config.overlay.enabled {
+                    "disabled".to_string()
+                } else {
+                    format!(
+                        "enabled, {}, {}, {}",
+                        self.config.overlay.position,
+                        self.config.overlay.style,
+                        if self.config.overlay.streaming_indicator {
+                            "streaming waveform"
+                        } else {
+                            "simple pulse"
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    /// The Settings panel: every row is `"> "`/`"  "`-prefixed, the selected
+    /// row cyan+bold, the value column aligned after an 18-wide name.
+    fn settings_panel_widget(&self) -> Paragraph<'static> {
+        let lines: Vec<Line> = SettingId::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, setting)| {
+                let selected = index == self.home_selected;
+                let marker = if selected { "> " } else { "  " };
+                let text = format!(
+                    "{marker}{:<18} {}",
+                    setting.label(),
+                    self.setting_value(*setting)
+                );
+                Line::from(Span::styled(text, selection_style(selected)))
+            })
+            .collect();
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Settings"))
+    }
+
+    /// The Commands panel, sharing one selection cursor with the Settings
+    /// panel above it: command row `i` is home-selected when
+    /// `home_selected == SettingId::ALL.len() + i`.
+    fn commands_panel_widget(&self, height: u16) -> Paragraph<'static> {
         let lines: Vec<Line> = self
-            .home_items
+            .command_items
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let marker = if index == self.home_selected {
-                    "> "
-                } else {
-                    "  "
-                };
+                let selected = self.home_selected == SettingId::ALL.len() + index;
+                let marker = if selected { "> " } else { "  " };
                 let text = format!("{marker}{:<14} {}", item.name, item.about);
-                let style = if index == self.home_selected {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                Line::from(Span::styled(text, style))
+                Line::from(Span::styled(text, selection_style(selected)))
             })
             .collect();
         let visible_rows = usize::from(height.saturating_sub(2)).max(1);
-        let scroll = self
-            .home_selected
-            .saturating_sub(visible_rows.saturating_sub(1)) as u16;
+        let scroll = if self.home_selected >= SettingId::ALL.len() {
+            (self.home_selected - SettingId::ALL.len())
+                .saturating_sub(visible_rows.saturating_sub(1)) as u16
+        } else {
+            0
+        };
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("Commands"))
             .scroll((scroll, 0))
@@ -698,6 +1190,140 @@ impl App {
             Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
             chunks[2],
         );
+    }
+
+    fn render_microphone(&self, frame: &mut Frame, area: Rect, screen: &screens::MicrophoneScreen) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        match screen.error() {
+            Some(error) => frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("Unavailable: {error}"),
+                    Style::default().fg(Color::Red),
+                ))
+                .block(Block::default().borders(Borders::ALL).title("Input level")),
+                chunks[1],
+            ),
+            None => frame.render_widget(screen.gauge(), chunks[1]),
+        }
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            chunks[3],
+        );
+    }
+
+    fn render_activation(&self, frame: &mut Frame, area: Rect, screen: &screens::ActivationScreen) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            chunks[2],
+        );
+    }
+
+    fn render_shortcut(&self, frame: &mut Frame, area: Rect, screen: &screens::ShortcutScreen) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(1)])
+            .split(area);
+        frame.render_widget(
+            screen.body(&self.config.activation.keybind_status),
+            chunks[0],
+        );
+        frame.render_widget(
+            Paragraph::new(
+                "Type to edit  ↑/↓ choose action  Enter run  Ctrl+R system dialog  Esc back",
+            ),
+            chunks[1],
+        );
+    }
+
+    fn render_output(&self, frame: &mut Frame, area: Rect, screen: &screens::OutputScreen) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            chunks[2],
+        );
+    }
+
+    fn render_typing_backend(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        screen: &screens::TypingBackendScreen,
+    ) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            Paragraph::new("Only used when transcripts are typed into the focused application."),
+            chunks[1],
+        );
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            chunks[3],
+        );
+    }
+
+    fn render_overlay(&self, frame: &mut Frame, area: Rect, screen: &screens::OverlayScreen) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(&self.config), chunks[0]);
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter change  Esc back  q quit"),
+            chunks[2],
+        );
+    }
+}
+
+fn selection_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
     }
 }
 
@@ -899,7 +1525,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn home_items_cover_every_real_cli_command_in_declared_order_excluding_help_start_stop() {
+    fn home_items_cover_every_real_cli_command_in_declared_order_excluding_help_start_stop_and_settings_areas(
+    ) {
         let names: Vec<String> = home_items().into_iter().map(|item| item.name).collect();
         assert_eq!(
             names,
@@ -913,8 +1540,27 @@ mod tests {
                 "last-result",
                 "doctor",
                 "shortcut-test",
-                "autostart",
-                "model",
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_are_the_captains_eight_areas_in_order() {
+        let labels: Vec<&str> = SettingId::ALL
+            .iter()
+            .map(|setting| setting.label())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Model",
+                "Microphone",
+                "Activation",
+                "Shortcut",
+                "Transcript output",
+                "Typing backend",
+                "Startup",
+                "Overlay",
             ]
         );
     }

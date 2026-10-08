@@ -1,5 +1,15 @@
 # Dashboard settings menu - design brief (sign-off requested)
 
+## Sign-off outcome
+
+Captain approved **Option B** - the two-section home with unified selection
+and no separate hub screen - relayed by firstmate in this task's inbox
+(`001.msg`, 2026-10-08). The per-screen decisions below (separate Transcript
+output / Typing backend screens, one-screen Overlay, Shortcut reusing the
+portal test/dialog, Mic live gauge, immediate save with a green result line)
+were approved as part of the same sign-off. Implementation follows Option B;
+see `report.md` for the implementation and validation.
+
 ## What this is
 
 The bare-invocation dashboard's home screen currently lists only top-level CLI

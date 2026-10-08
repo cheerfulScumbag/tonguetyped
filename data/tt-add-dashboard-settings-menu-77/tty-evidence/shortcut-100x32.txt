@@ -1,0 +1,32 @@
+┌Shortcut──────────────────────────────────────────────────────────────────────────────────────────┐
+│Shortcut: Super+O_                                                                                │
+│Currently bound: (not confirmed by the desktop yet)                                               │
+│                                                                                                  │
+│> Test shortcut - press it now                                                                    │
+│  Set via system dialog (Ctrl+R)                                                                  │
+│                                                                                                  │
+│A successful test saves the typed shortcut.                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+Type to edit  ↑/↓ choose action  Enter run  Ctrl+R system dialog  Esc back

@@ -400,6 +400,38 @@ fn resolve_output(output_state: &OutputState, monitor: &str) -> Option<wl_output
     })
 }
 
+/// The `OverlayConfig::position` values both configuration UIs (the setup
+/// console and the dashboard's Overlay screen) cycle through, in the order
+/// `anchor_for` recognizes them.
+pub(crate) const POSITION_VALUES: [&str; 7] = [
+    "top-left",
+    "top",
+    "top-right",
+    "center",
+    "bottom-left",
+    "bottom",
+    "bottom-right",
+];
+
+/// The `OverlayConfig::style` values both configuration UIs offer, matching
+/// `style_for`'s accepted values 1:1. These three were reviewed as Superdesign
+/// mockups and approved by the captain.
+pub(crate) const STYLE_VALUES: [&str; 3] = ["badge", "minimal", "pill"];
+
+/// Display labels matching `STYLE_VALUES` position for position.
+pub(crate) const STYLE_LABELS: [&str; 3] = ["Badge", "Minimal", "Pill"];
+
+/// Display labels for `OverlayConfig::streaming_indicator`: the plain pulsing
+/// dot first, the busier live-capture treatment second. Mirrors Handy's
+/// (github.com/cjpais/Handy) distinction between a minimal recording pill and
+/// a busier "Live" panel with a reactive waveform once streaming
+/// transcription is active - see `OverlayConfig::streaming_indicator` for why
+/// this is a synthetic animation rather than a true audio-reactive one.
+pub(crate) const STREAMING_LABELS: [&str; 2] = [
+    "Simple pulse",
+    "Streaming waveform (live-capture indicator)",
+];
+
 fn anchor_for(position: &str) -> Anchor {
     match position {
         "top-left" => Anchor::TOP | Anchor::LEFT,

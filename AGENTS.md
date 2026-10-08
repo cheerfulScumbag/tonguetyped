@@ -140,19 +140,41 @@ dictation's output phase before this, measured at just over 2s in the same real
 
 Running bare `tonguetyped` (no subcommand) opens the dashboard (`src/tui/`,
 `CLI`'s `command` field is `Option<Commands>` - see `data/tt-tui-dashboard-1/report.md`
-for the SuperDesign process and draft comparison behind its design). `src/cli.rs`
-holds the clap `Cli`/`Commands` definitions as a library module specifically so
-`src/tui/mod.rs`'s home screen can read the first page's command list straight off
-clap's own metadata (`Cli::command().get_subcommands()`) instead of a second,
-driftable copy - it can never disagree with `--help`. `src/commands.rs` is the one
-shared command-implementation layer both `main.rs`'s CLI dispatch and the dashboard
-call into (IPC send/format, model catalog rows, `activate_model`'s
+for the original SuperDesign process and `data/tt-add-dashboard-settings-menu-77/report.md`
+for the settings-menu redesign). The home screen is two stacked panels sharing one
+selection cursor: a fixed eight-row Settings panel (Model, Microphone, Activation,
+Shortcut, Transcript output, Typing backend, Startup, Overlay) showing each area's
+current value, above a Commands panel. `src/cli.rs` holds the clap
+`Cli`/`Commands` definitions as a library module specifically so `src/tui/mod.rs`'s
+`home_items()` can read the Commands panel straight off clap's own metadata
+(`Cli::command().get_subcommands()`) instead of a second, driftable copy - it can
+never disagree with `--help`; `model`/`autostart` are clap commands deliberately
+filtered out of `home_items()` because they are Settings-panel rows instead. The
+settings screens (`src/tui/screens.rs`) only mutate the in-memory `Config` via
+`apply`; `App::save_settings_config` is the one place that calls `Config::save`, so
+success/failure feedback stays uniform. `src/commands.rs` is the one shared
+command-implementation layer both `main.rs`'s CLI dispatch and the dashboard call
+into (IPC send/format, model catalog rows, `activate_model`'s
 download+save+reload+confirm composition) - add new shared command logic there, not
-in either caller. The dashboard's own interactive screens (`Model`, `Autostart`,
-`Daemon`) are new ratatui screens in `src/tui/`; `setup` is NOT reimplemented
-there - the dashboard suspends its own alternate screen, runs the pre-existing
-`setup::run_console()` (`src/setup.rs`), then resumes, since a terminal tracks
-one alternate-screen buffer, not a stack.
+in either caller. `setup` is NOT reimplemented in the dashboard - it suspends its
+own alternate screen, runs the pre-existing `setup::run_console()`
+(`src/setup.rs`), then resumes, since a terminal tracks one alternate-screen
+buffer, not a stack.
+
+Misconfiguration-prone preview/choice logic is extracted once and shared by the
+wizard and the dashboard rather than copied: `audio::MicMonitor` owns the
+microphone-preview stream (settle delay after rapid navigation, async stream-error
+routing, restart) for both `setup/console.rs`'s Microphone step and the dashboard's
+Microphone screen; `audio::level_to_ratio` is the one gauge mapping; the overlay
+position/style value lists (`overlay::POSITION_VALUES`/`STYLE_VALUES`/
+`STYLE_LABELS`/`STREAMING_LABELS`) and the activation/startup choice labels
+(`config::ACTIVATION_MODE_LABELS`/`STARTUP_LABELS`) are imported by both UIs. Add a
+new choice/value there, not as a second copy in either UI. The dashboard's Shortcut
+screen is the one screen where `q` is a literal keybinding character (not quit),
+like the console's shortcut step; its portal test and native reconfigure dialog run
+through `setup::shortcut_test_async`/`reconfigure_shortcut_async` handles polled by
+`App::poll_shortcut_handles` each frame, and only a successful test or dialog
+persists the typed keybind.
 
 A ratatui app that ever loads an inference model (Doctor, Model-activation) while
 holding raw mode/the alternate screen must keep **two** independent things off the
