@@ -1,5 +1,5 @@
 //! Clap argument definitions, kept as a library module (rather than private to
-//! `main.rs`) so `tui::home` can introspect the exact same subcommand names
+//! `main.rs`) so `tui::home_items` can introspect the exact same subcommand names
 //! and `about` text that `--help` renders (`Cli::command()`), instead of
 //! maintaining a second, driftable copy of each command's name/description
 //! for the dashboard's first page.

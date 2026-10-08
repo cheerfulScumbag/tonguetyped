@@ -177,13 +177,15 @@ not inject text or move focus when it reports state.
 
 ## Dashboard
 
-Running `tonguetyped` with no subcommand opens an interactive terminal dashboard
-listing most commands below, plus screens for configuration, daemon start/stop/
-restart, model download and activation, and autostart - all built on the same
-underlying commands as the CLI. `start` and `stop` are omitted from the
-dashboard's list in favor of `toggle` and `cancel` for recording control, but
-every subcommand remains directly invocable on its own, and `tonguetyped --help`
-still lists them all.
+Running `tonguetyped` with no subcommand opens an interactive terminal dashboard.
+Its home screen is a settings overview - one row each for Model, Microphone,
+Activation, Shortcut, Transcript output, Typing backend, Startup, and Overlay,
+showing the current value - above a list of the remaining commands below.
+Selecting a settings row opens a screen that edits just that area, with the same
+live microphone preview and shortcut test/native dialog as `tonguetyped setup`.
+`start` and `stop` are omitted from the dashboard's list in favor of `toggle` and
+`cancel` for recording control, but every subcommand remains directly invocable
+on its own, and `tonguetyped --help` still lists them all.
 
 ## Commands
 

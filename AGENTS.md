@@ -207,9 +207,10 @@ that builds the actual ordered list of steps for the current conditional state
 (download queue, output backend, overlay enabled), rather than four separately
 hand-maintained arithmetic functions - add a new conditional step there, not as a
 fourth place to keep in sync. Overlay settings (enable/disable, position, style,
-streaming indicator) live in this console only, not the bare-invocation dashboard
-(`src/tui/`); the dashboard reaches them by suspending itself and running
-`setup::run_console()`, same as every other setup-console entry. The legacy
+streaming indicator) and the other settings areas now have their own dashboard
+screens (`src/tui/screens.rs`), so the dashboard runs `setup::run_console()` only
+for the `setup` command itself, suspending its alternate screen
+(`App::run_setup_console`). The legacy
 line-based `configure()` flow in `setup.rs` (kept for scripted/piped `tonguetyped
 setup`, see `tests/setup_cli.rs`) has never prompted for overlay settings at all -
 it leaves whatever `Config::reload()` loaded untouched - so it needed no changes

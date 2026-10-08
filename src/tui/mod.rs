@@ -395,11 +395,12 @@ impl App {
         let Screen::Shortcut(screen) = &mut self.screen else {
             return;
         };
-                if screen.input.trim() != submitted_keybind {
+        if screen.input.trim() != submitted_keybind {
             return;
         }
         match outcome {
-            Ok(activation::ShortcutTestOutcome::Pressed) => {                // The desktop only listened for presses after actually
+            Ok(activation::ShortcutTestOutcome::Pressed) => {
+                // The desktop only listened for presses after actually
                 // binding the shortcut, so a detected press is strong enough
                 // to persist the typed value, same as the console's
                 // shortcut step.
@@ -777,8 +778,10 @@ impl App {
             }
             1 => {
                 screen.status = screens::ShortcutStatus::DialogOpen;
-                self.shortcut_dialog =
-                    Some((shortcut.clone(), setup::reconfigure_shortcut_async(shortcut)));
+                self.shortcut_dialog = Some((
+                    shortcut.clone(),
+                    setup::reconfigure_shortcut_async(shortcut),
+                ));
             }
             _ => {}
         }
