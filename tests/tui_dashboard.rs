@@ -189,6 +189,7 @@ const KEY_UP: &[u8] = b"\x1b[A";
 const KEY_DOWN: &[u8] = b"\x1b[B";
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
+const KEY_TAB: &[u8] = b"\t";
 
 const SETTING_LABELS: [&str; 8] = [
     "Model",
@@ -781,6 +782,51 @@ fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
         .join("autostart/tonguetyped.desktop")
         .exists());
     assert!(sandbox.config_contents().contains("autostart = true"));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_model_screen_saves_a_pinned_inference_backend_and_reports_it() {
+    // Same stub-model trick as the activation test above: pinning the
+    // always-available CPU backend must save the setting, then report that
+    // the stub still can't be loaded on it rather than claiming success.
+    let sandbox = Sandbox::new("backend-selection");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // "Model" is the first Settings row and is already selected.
+    session.wait_for("> Model", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    let screen = session.wait_for("Inference backend", Duration::from_secs(5));
+    assert!(
+        screen.contains("Auto (tries CUDA"),
+        "backend panel should list the auto choice:\n{screen}"
+    );
+
+    // Tab moves the selection from the catalog to the backend list, where
+    // only the usable backends are selectable: auto, then cpu.
+    session.send(KEY_TAB);
+    session.send(KEY_DOWN);
+    session.wait_for("> CPU", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    let outcome = session.wait_for("NOT confirmed", Duration::from_secs(20));
+    assert!(
+        outcome.contains("Backend change"),
+        "expected the backend change result title:\n{outcome}"
+    );
+    assert!(
+        outcome.contains("backend pref:   cpu"),
+        "diagnostics should report the pinned backend:\n{outcome}"
+    );
+    let config = std::fs::read_to_string(sandbox.config_home.join("tonguetyped/config.toml"))
+        .expect("config saved");
+    assert!(
+        config.contains("preferred_backend = \"cpu\""),
+        "config should pin the CPU backend:\n{config}"
+    );
 
     session.quit_and_wait();
 }

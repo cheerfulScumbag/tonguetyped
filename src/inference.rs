@@ -11,6 +11,11 @@
 //! `cfg` gating of its own. Every attempt - accelerator or CPU - loads the
 //! exact same GGUF file (`InferenceEngine::new`'s `model_path`): fallback
 //! never substitutes a different model.
+//!
+//! `config.model.preferred_backend` (see `BackendPreference`) can pin `load`
+//! to exactly one backend instead. A pinned backend is the only one tried:
+//! if it can't be used, `load` fails with an error naming it rather than
+//! quietly running on a different backend.
 
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -32,6 +37,144 @@ const ACCELERATOR_PRIORITY: &[(transcribe_cpp::Backend, &str)] = &[
     (transcribe_cpp::Backend::Vulkan, "vulkan"),
     (transcribe_cpp::Backend::Metal, "metal"),
 ];
+
+/// Every value `config.model.preferred_backend` accepts, in the order the
+/// setup wizard and dashboard list them. `"auto"` is the priority-order
+/// fallback chain above; every other entry pins `InferenceEngine::load` to
+/// that one backend.
+pub const BACKEND_PREFERENCES: &[&str] = &["auto", "cpu", "vulkan", "cuda", "rocm", "metal"];
+
+/// Human-readable label for a `BACKEND_PREFERENCES` value, shared by the
+/// setup wizard and dashboard.
+pub fn backend_preference_label(name: &str) -> &'static str {
+    match name {
+        "auto" => "Auto (tries CUDA, ROCm, Vulkan, Metal, then CPU)",
+        "cpu" => "CPU",
+        "vulkan" => "Vulkan",
+        "cuda" => "CUDA (NVIDIA)",
+        "rocm" => "ROCm (AMD)",
+        "metal" => "Metal (Apple)",
+        _ => "Unknown backend",
+    }
+}
+
+/// A parsed `config.model.preferred_backend` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendPreference {
+    /// Try `ACCELERATOR_PRIORITY` in order, then CPU.
+    Auto,
+    /// Try only this backend, never falling back to another one.
+    Only(transcribe_cpp::Backend),
+}
+
+impl BackendPreference {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        if value == "auto" {
+            return Ok(BackendPreference::Auto);
+        }
+        selectable_backend(value)
+            .map(|backend| BackendPreference::Only(backend.backend))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported inference backend '{value}' (expected one of: {})",
+                    BACKEND_PREFERENCES.join(", ")
+                )
+            })
+    }
+}
+
+/// A non-`auto` backend choice, with whether this build compiled it in.
+struct SelectableBackend {
+    name: &'static str,
+    backend: transcribe_cpp::Backend,
+    /// The Cargo feature that compiles this backend in, `None` for CPU.
+    feature: Option<&'static str>,
+    compiled: bool,
+}
+
+const SELECTABLE_BACKENDS: &[SelectableBackend] = &[
+    SelectableBackend {
+        name: "cpu",
+        backend: transcribe_cpp::Backend::Cpu,
+        feature: None,
+        compiled: true,
+    },
+    SelectableBackend {
+        name: "vulkan",
+        backend: transcribe_cpp::Backend::Vulkan,
+        feature: Some("gpu-vulkan"),
+        compiled: cfg!(feature = "gpu-vulkan"),
+    },
+    SelectableBackend {
+        name: "cuda",
+        backend: transcribe_cpp::Backend::Cuda,
+        feature: Some("gpu-cuda"),
+        compiled: cfg!(feature = "gpu-cuda"),
+    },
+    SelectableBackend {
+        name: "rocm",
+        backend: transcribe_cpp::Backend::Rocm,
+        feature: Some("gpu-rocm"),
+        compiled: cfg!(feature = "gpu-rocm"),
+    },
+    SelectableBackend {
+        name: "metal",
+        backend: transcribe_cpp::Backend::Metal,
+        feature: Some("gpu-metal"),
+        compiled: cfg!(feature = "gpu-metal"),
+    },
+];
+
+fn selectable_backend(name: &str) -> Option<&'static SelectableBackend> {
+    SELECTABLE_BACKENDS.iter().find(|entry| entry.name == name)
+}
+
+fn selectable_backend_for(backend: transcribe_cpp::Backend) -> Option<&'static SelectableBackend> {
+    SELECTABLE_BACKENDS
+        .iter()
+        .find(|entry| entry.backend == backend)
+}
+
+/// Why a pinned backend can't be used on this build and host, or `None` when
+/// it can. Separates "not compiled in" (fixable by rebuilding with a feature)
+/// from "compiled in, but no usable device or driver" (a host problem).
+fn backend_unavailable_reason(entry: &SelectableBackend) -> Option<String> {
+    if !entry.compiled {
+        return Some(format!(
+            "this build was compiled without the `{}` feature",
+            entry.feature.unwrap_or_default()
+        ));
+    }
+    if entry.feature.is_some() && !transcribe_cpp::backend_available(entry.backend) {
+        return Some(format!(
+            "no usable {} device or driver was found on this host",
+            entry.name
+        ));
+    }
+    None
+}
+
+/// One row of the backend picker shown by the setup wizard and dashboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendChoice {
+    /// The `config.model.preferred_backend` value.
+    pub name: &'static str,
+    /// Why this choice can't work here, `None` when it can.
+    pub unavailable: Option<String>,
+}
+
+/// Every `BACKEND_PREFERENCES` entry with whether it can work on this build
+/// and host. Blocks on the first call the same way `backend_info` does
+/// (device enumeration), so keep it off hot paths.
+pub fn backend_choices() -> Vec<BackendChoice> {
+    BACKEND_PREFERENCES
+        .iter()
+        .map(|&name| BackendChoice {
+            name,
+            unavailable: selectable_backend(name).and_then(backend_unavailable_reason),
+        })
+        .collect()
+}
 
 static CAPABILITY_PROBE: std::sync::OnceLock<BackendInfo> = std::sync::OnceLock::new();
 
@@ -151,13 +294,15 @@ struct LoadedSession {
 pub struct InferenceEngine {
     session: Option<LoadedSession>,
     model_path: PathBuf,
+    preference: BackendPreference,
 }
 
 impl InferenceEngine {
-    pub fn new(model_path: PathBuf) -> Self {
+    pub fn new(model_path: PathBuf, preference: BackendPreference) -> Self {
         InferenceEngine {
             session: None,
             model_path,
+            preference,
         }
     }
 
@@ -174,8 +319,19 @@ impl InferenceEngine {
             ..Default::default()
         };
 
+        if let BackendPreference::Only(backend) = self.preference {
+            let entry = selectable_backend_for(backend)
+                .expect("BackendPreference::parse only produces selectable backends");
+            if let Some(reason) = backend_unavailable_reason(entry) {
+                anyhow::bail!(
+                    "configured inference backend '{}' is unavailable: {reason}",
+                    entry.name
+                );
+            }
+        }
+
         let mut last_error: Option<anyhow::Error> = None;
-        for backend in Self::backend_candidates() {
+        for backend in self.backend_candidates() {
             let model = match transcribe_cpp::Model::load_with(
                 &self.model_path,
                 &transcribe_cpp::ModelOptions {
@@ -185,7 +341,9 @@ impl InferenceEngine {
             ) {
                 Ok(model) => model,
                 Err(error) => {
-                    if backend != transcribe_cpp::Backend::Cpu {
+                    if self.preference == BackendPreference::Auto
+                        && backend != transcribe_cpp::Backend::Cpu
+                    {
                         tracing::warn!(
                             "inference backend {backend:?} unavailable, trying next: {error:#}"
                         );
@@ -207,17 +365,28 @@ impl InferenceEngine {
                 }
             }
         }
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no inference backend available")))
-            .context("failed to create inference session")
+        let error = last_error.unwrap_or_else(|| anyhow::anyhow!("no inference backend available"));
+        match self.preference {
+            BackendPreference::Auto => Err(error.context("failed to create inference session")),
+            BackendPreference::Only(backend) => Err(error.context(format!(
+                "configured inference backend '{}' failed to load the model",
+                selectable_backend_for(backend).map_or("unknown", |entry| entry.name)
+            ))),
+        }
     }
 
-    /// Every backend this engine will try, in priority order, ending with the
-    /// unconditional, always-available explicit CPU backend.
-    fn backend_candidates() -> impl Iterator<Item = transcribe_cpp::Backend> {
-        ACCELERATOR_PRIORITY
-            .iter()
-            .map(|(backend, _)| *backend)
-            .chain(std::iter::once(transcribe_cpp::Backend::Cpu))
+    /// Every backend this engine will try, in order. `Auto` is the priority
+    /// list ending with the unconditional, always-available explicit CPU
+    /// backend; a pinned preference is that one backend alone.
+    fn backend_candidates(&self) -> Vec<transcribe_cpp::Backend> {
+        match self.preference {
+            BackendPreference::Auto => ACCELERATOR_PRIORITY
+                .iter()
+                .map(|(backend, _)| *backend)
+                .chain(std::iter::once(transcribe_cpp::Backend::Cpu))
+                .collect(),
+            BackendPreference::Only(backend) => vec![backend],
+        }
     }
 
     pub fn unload(&mut self) {
@@ -304,11 +473,15 @@ mod tests {
         assert_eq!(cpu_thread_count(8, 4), 4);
     }
 
+    fn engine(preference: BackendPreference) -> InferenceEngine {
+        InferenceEngine::new(PathBuf::from("irrelevant.gguf"), preference)
+    }
+
     #[test]
     fn backend_candidates_end_with_explicit_cpu() {
         assert_eq!(
-            InferenceEngine::backend_candidates().last(),
-            Some(transcribe_cpp::Backend::Cpu)
+            engine(BackendPreference::Auto).backend_candidates().last(),
+            Some(&transcribe_cpp::Backend::Cpu)
         );
     }
 
@@ -323,15 +496,77 @@ mod tests {
 
     #[test]
     fn backend_candidates_never_include_auto() {
-        assert!(InferenceEngine::backend_candidates()
-            .all(|backend| backend != transcribe_cpp::Backend::Auto));
+        assert!(engine(BackendPreference::Auto)
+            .backend_candidates()
+            .iter()
+            .all(|backend| *backend != transcribe_cpp::Backend::Auto));
+    }
+
+    #[test]
+    fn pinned_backend_is_the_only_candidate() {
+        for name in BACKEND_PREFERENCES.iter().filter(|name| **name != "auto") {
+            let preference = BackendPreference::parse(name).unwrap();
+            let BackendPreference::Only(backend) = preference else {
+                panic!("{name} parsed as auto");
+            };
+            assert_eq!(engine(preference).backend_candidates(), vec![backend]);
+        }
+    }
+
+    #[test]
+    fn parse_accepts_every_listed_preference_and_rejects_others() {
+        assert_eq!(
+            BackendPreference::parse("auto").unwrap(),
+            BackendPreference::Auto
+        );
+        assert_eq!(
+            BackendPreference::parse("cpu").unwrap(),
+            BackendPreference::Only(transcribe_cpp::Backend::Cpu)
+        );
+        for name in BACKEND_PREFERENCES {
+            BackendPreference::parse(name).unwrap();
+        }
+        assert!(BackendPreference::parse("cdua").is_err());
+        assert!(BackendPreference::parse("CPU").is_err());
+    }
+
+    #[test]
+    fn backend_choices_list_every_preference_with_cpu_and_auto_always_usable() {
+        let choices = backend_choices();
+        let names: Vec<&str> = choices.iter().map(|choice| choice.name).collect();
+        assert_eq!(names, BACKEND_PREFERENCES);
+        for choice in &choices {
+            if matches!(choice.name, "auto" | "cpu") {
+                assert_eq!(choice.unavailable, None, "{} should be usable", choice.name);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gpu-metal"))]
+    #[test]
+    fn pinned_backend_missing_from_the_build_fails_without_falling_back() {
+        let model = std::env::temp_dir().join(format!(
+            "tonguetyped-pinned-backend-{}.gguf",
+            std::process::id()
+        ));
+        std::fs::write(&model, b"not a real model").unwrap();
+        let mut engine = InferenceEngine::new(
+            model.clone(),
+            BackendPreference::Only(transcribe_cpp::Backend::Metal),
+        );
+        let error = engine.load().unwrap_err().to_string();
+        std::fs::remove_file(&model).unwrap();
+        assert!(error.contains("configured inference backend 'metal' is unavailable"));
+        assert!(error.contains("`gpu-metal` feature"));
+        assert!(engine.active_backend_info().is_none());
     }
 
     #[test]
     fn load_reports_a_missing_model_file_without_trying_any_backend() {
-        let mut engine = InferenceEngine::new(PathBuf::from(
-            "/nonexistent/tonguetyped-inference-test/missing.gguf",
-        ));
+        let mut engine = InferenceEngine::new(
+            PathBuf::from("/nonexistent/tonguetyped-inference-test/missing.gguf"),
+            BackendPreference::Auto,
+        );
         let error = engine.load().unwrap_err();
         assert!(error.to_string().contains("model file not found"));
         assert!(engine.active_model_path().is_none());
@@ -340,7 +575,7 @@ mod tests {
 
     #[test]
     fn unloaded_engine_reports_no_active_model_or_backend() {
-        let engine = InferenceEngine::new(PathBuf::from("irrelevant.gguf"));
+        let engine = engine(BackendPreference::Auto);
         assert!(engine.active_model_path().is_none());
         assert!(engine.active_backend_info().is_none());
     }

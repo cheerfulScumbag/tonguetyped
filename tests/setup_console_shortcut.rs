@@ -156,7 +156,9 @@ const KEY_BACKSPACE: &[u8] = b"\x7f";
 
 fn advance_to_shortcut_step(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
-    session.send(KEY_ENTER); // Model -> Microphone
+    session.send(KEY_ENTER); // Model -> Inference backend
+    session.wait_for("Inference backend", Duration::from_secs(5));
+    session.send(KEY_ENTER); // Inference backend -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
     session.send(KEY_ENTER); // Microphone -> Activation
     session.wait_for("Activation", Duration::from_secs(5));

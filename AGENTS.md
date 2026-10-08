@@ -14,7 +14,9 @@ When updating this file, preserve this bar for all agents and keep entries conci
 ## Build
 
 See README.md for system dependencies. On NixOS, run build commands through
-`nix develop -c`.
+`nix develop -c`. If test binaries fail with ``GLIBC_2.43' not found`` from
+`libasound.so.2`, the host shell's `LD_LIBRARY_PATH` is leaking a newer
+alsa-lib into the devshell; run `env -u LD_LIBRARY_PATH nix develop -c ...`.
 
 Format: `cargo fmt --check`  |  Lint: `cargo clippy -- -D warnings`  |  Test: `cargo test`
 
@@ -39,6 +41,11 @@ isn't natively satisfiable (`Error::Backend`), so this fallback chain needs no `
 gating and is correct on every build by construction. None of the four features is
 enabled by Cargo's default set, while `flake.nix`'s `packages.default` enables
 `gpu-vulkan` for `nix build`/`nix profile install`.
+That chain is `config.model.preferred_backend = "auto"`; any other value
+(`inference::BACKEND_PREFERENCES`) pins `load()` to that one backend and fails with
+a named reason (not compiled in vs. no usable device) instead of falling back. The
+coordinator's engine cache key includes the preference, so a reload with a changed
+backend reloads the engine.
 Report backend/device by reading the *loaded* model (`Model::device()`), not by
 re-probing: prefer `Device::kind` over `Model::backend()` for the category label -
 the latter returns device-indexed strings in practice (`"Vulkan0"`, uppercase `"CPU"`),

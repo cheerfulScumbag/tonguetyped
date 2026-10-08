@@ -37,6 +37,7 @@ const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
 enum StepKind {
     Model,
     Downloading,
+    InferenceBackend,
     Microphone,
     Activation,
     Shortcut,
@@ -88,6 +89,8 @@ struct ConsoleState {
     step: StepKind,
     model_values: Vec<String>,
     model_selection: usize,
+    inference_backend_values: Vec<&'static str>,
+    inference_backend_selection: usize,
     mic_selection: usize,
     activation_selection: usize,
     output_labels: Vec<String>,
@@ -121,6 +124,21 @@ impl ConsoleState {
             .iter()
             .position(|name| name == &config.model.active_model)
             .unwrap_or(0);
+        // Only choices that can work on this build and host are selectable;
+        // `render_inference_backend` explains why the rest are missing.
+        let mut inference_backend_values: Vec<&'static str> = capabilities
+            .inference_backends
+            .iter()
+            .filter(|choice| choice.unavailable.is_none())
+            .map(|choice| choice.name)
+            .collect();
+        if inference_backend_values.is_empty() {
+            inference_backend_values.push("auto");
+        }
+        let inference_backend_selection = inference_backend_values
+            .iter()
+            .position(|name| *name == config.model.preferred_backend)
+            .unwrap_or(0);
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = capabilities.output_labels();
@@ -150,6 +168,8 @@ impl ConsoleState {
             step: StepKind::Model,
             model_values,
             model_selection,
+            inference_backend_values,
+            inference_backend_selection,
             mic_selection,
             activation_selection,
             output_labels,
@@ -301,6 +321,7 @@ impl ConsoleState {
     fn current_options_len(&self) -> usize {
         match self.step {
             StepKind::Model => self.model_values.len(),
+            StepKind::InferenceBackend => self.inference_backend_values.len(),
             StepKind::Microphone => self.capabilities.microphones.len(),
             StepKind::Activation => ACTIVATION_LABELS.len(),
             StepKind::Output => self.output_labels.len(),
@@ -317,6 +338,7 @@ impl ConsoleState {
     fn current_index_mut(&mut self) -> &mut usize {
         match self.step {
             StepKind::Model => &mut self.model_selection,
+            StepKind::InferenceBackend => &mut self.inference_backend_selection,
             StepKind::Microphone => &mut self.mic_selection,
             StepKind::Activation => &mut self.activation_selection,
             StepKind::Output => &mut self.output_selection,
@@ -354,6 +376,7 @@ impl ConsoleState {
         if self.downloading_needed {
             steps.push(Downloading);
         }
+        steps.push(InferenceBackend);
         steps.push(Microphone);
         steps.push(Activation);
         steps.push(Shortcut);
@@ -397,6 +420,10 @@ impl ConsoleState {
                 if self.downloading_needed {
                     self.start_next_download();
                 }
+            }
+            StepKind::InferenceBackend => {
+                self.config.model.preferred_backend =
+                    self.inference_backend_values[self.inference_backend_selection].to_string();
             }
             StepKind::Microphone => {
                 self.config.audio.microphone =
@@ -569,6 +596,7 @@ impl ConsoleState {
         match self.step {
             StepKind::Model => "Speech model",
             StepKind::Downloading => "Fetching speech model",
+            StepKind::InferenceBackend => "Inference backend",
             StepKind::Microphone => "Microphone",
             StepKind::Activation => "Activation",
             StepKind::Shortcut => "Shortcut",
@@ -663,6 +691,7 @@ impl ConsoleState {
                 area,
             ),
             StepKind::Downloading => self.render_downloading(frame, area),
+            StepKind::InferenceBackend => self.render_inference_backend(frame, area),
             StepKind::Microphone => self.render_microphone(frame, area),
             StepKind::Activation => frame.render_widget(
                 list_paragraph(
@@ -795,6 +824,58 @@ impl ConsoleState {
         frame.render_widget(gauge, chunks[1]);
     }
 
+    fn render_inference_backend(&self, frame: &mut Frame, area: Rect) {
+        let unavailable: Vec<Line> = self
+            .capabilities
+            .inference_backends
+            .iter()
+            .filter_map(|choice| {
+                choice.unavailable.as_ref().map(|reason| {
+                    Line::from(Span::styled(
+                        format!("  {}: {reason}", choice.name),
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                })
+            })
+            .collect();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(if unavailable.is_empty() {
+                    0
+                } else {
+                    unavailable.len() as u16 + 2
+                }),
+            ])
+            .split(area);
+
+        let labels: Vec<String> = self
+            .inference_backend_values
+            .iter()
+            .map(|name| crate::inference::backend_preference_label(name).to_string())
+            .collect();
+        frame.render_widget(
+            list_paragraph(
+                &labels,
+                self.inference_backend_selection,
+                self.step_title(),
+                chunks[0].height,
+            ),
+            chunks[0],
+        );
+        if !unavailable.is_empty() {
+            frame.render_widget(
+                Paragraph::new(unavailable).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Not available here"),
+                ),
+                chunks[1],
+            );
+        }
+    }
+
     fn render_microphone(&self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -894,6 +975,10 @@ impl ConsoleState {
     fn render_confirm(&self, frame: &mut Frame, area: Rect) {
         let lines = vec![
             Line::from(format!("Model:       {}", self.config.model.active_model)),
+            Line::from(format!(
+                "Backend:     {}",
+                crate::inference::backend_preference_label(&self.config.model.preferred_backend)
+            )),
             Line::from(format!("Microphone:  {}", self.config.audio.microphone)),
             Line::from(format!(
                 "Activation:  {} with {}",
@@ -985,6 +1070,7 @@ mod tests {
                 "System default microphone".to_string(),
             )],
             typing_backends: Vec::new(),
+            inference_backends: Vec::new(),
         }
     }
 
@@ -1054,7 +1140,7 @@ mod tests {
         state.handle_downloading_key(enter).unwrap();
         assert_eq!(
             state.step,
-            StepKind::Microphone,
+            StepKind::InferenceBackend,
             "a failed download is non-fatal - the user can still continue setup"
         );
     }
@@ -1128,7 +1214,75 @@ mod tests {
         // filesystem or network in this test.
         state.downloading_needed = false;
 
-        assert_eq!(state.next_step(), Some(StepKind::Microphone));
+        assert_eq!(state.next_step(), Some(StepKind::InferenceBackend));
+    }
+
+    fn capabilities_with_backends(backends: &[(&'static str, Option<&str>)]) -> Capabilities {
+        let mut capabilities = no_mic_capabilities();
+        capabilities.inference_backends = backends
+            .iter()
+            .map(|(name, reason)| crate::inference::BackendChoice {
+                name,
+                unavailable: reason.map(String::from),
+            })
+            .collect();
+        capabilities
+    }
+
+    #[test]
+    fn inference_backend_step_offers_only_usable_backends_and_saves_the_choice() {
+        let capabilities = capabilities_with_backends(&[
+            ("auto", None),
+            ("cpu", None),
+            ("vulkan", None),
+            (
+                "cuda",
+                Some("this build was compiled without the `gpu-cuda` feature"),
+            ),
+        ]);
+        let mut state = ConsoleState::new(Config::default(), capabilities);
+        assert_eq!(
+            state.inference_backend_values,
+            vec!["auto", "cpu", "vulkan"]
+        );
+        assert_eq!(state.inference_backend_selection, 0);
+
+        state.step = StepKind::InferenceBackend;
+        state.move_selection(1);
+        state.advance().unwrap();
+        assert_eq!(state.config.model.preferred_backend, "cpu");
+        assert_eq!(state.step, StepKind::Microphone);
+        assert_eq!(state.prev_step(), Some(StepKind::InferenceBackend));
+    }
+
+    #[test]
+    fn a_configured_backend_that_is_unavailable_here_starts_the_step_on_auto() {
+        let mut config = Config::default();
+        config.model.preferred_backend = "cuda".to_string();
+        let capabilities = capabilities_with_backends(&[
+            ("auto", None),
+            ("cpu", None),
+            (
+                "cuda",
+                Some("no usable cuda device or driver was found on this host"),
+            ),
+        ]);
+        let state = ConsoleState::new(config, capabilities);
+        assert_eq!(
+            state.inference_backend_values[state.inference_backend_selection],
+            "auto"
+        );
+
+        let mut config = Config::default();
+        config.model.preferred_backend = "cpu".to_string();
+        let state = ConsoleState::new(
+            config,
+            capabilities_with_backends(&[("auto", None), ("cpu", None)]),
+        );
+        assert_eq!(
+            state.inference_backend_values[state.inference_backend_selection],
+            "cpu"
+        );
     }
 
     #[test]
@@ -1140,6 +1294,7 @@ mod tests {
                 ("test-mic-3".to_string(), "Test microphone 3".to_string()),
             ],
             typing_backends: Vec::new(),
+            inference_backends: Vec::new(),
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
         state.step = StepKind::Microphone;
@@ -1158,6 +1313,7 @@ mod tests {
         let capabilities = Capabilities {
             microphones: vec![("test-mic-1".to_string(), "Test microphone 1".to_string())],
             typing_backends: Vec::new(),
+            inference_backends: Vec::new(),
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
         state.step = StepKind::Microphone;
@@ -1182,6 +1338,7 @@ mod tests {
                 ("test-mic-2".to_string(), "Test microphone 2".to_string()),
             ],
             typing_backends: Vec::new(),
+            inference_backends: Vec::new(),
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
         state.step = StepKind::Microphone;
