@@ -118,9 +118,12 @@ unobserved, exactly like the console's in-flight reconfigure).
 
 - `cargo fmt --check` - clean.
 - `cargo clippy --all-targets -- -D warnings` - clean.
-- `cargo test` - 197 passed, 0 failed (112 lib, 3 cli, 4 daemon-startup, 37
-  coordinator/IPC, 7 model-cli, 8 model-activation, 4 setup-cli, 2 + 3 setup
-  console, 15 tui dashboard, 2 autostart).
+- `cargo test` - 197 passed, 0 failed (112 lib, 3 autostart, 4 cli-help, 37
+  coordinator/IPC, 8 daemon-startup, 2 model-activation, 7 model-cli, 4
+  setup-cli, 2 + 3 setup console, 15 tui dashboard).
+- `cargo test --features gpu-vulkan` - the same 197 passed, 0 failed; this
+  host has a real Vulkan-capable GPU, so the feature builds and runs, not
+  just compiles.
 
 ## Real TTY evidence
 
