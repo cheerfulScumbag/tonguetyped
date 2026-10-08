@@ -90,9 +90,11 @@ own native "press your new shortcut" dialog instead. After the model step, the
 console fetches the selected GGUF model file if it isn't already installed,
 with progress shown before continuing - the same file every backend (CPU or
 an accelerator) requests, so there is only ever one model to fetch. It then
-offers the inference backend step, listing only the backends this build and
-host can actually use; a backend that isn't usable here is shown with its
-reason instead of being selectable.
+offers the inference backend step, listing the backends this build and host
+can use; a backend that can't run here is shown with its reason instead of
+being selectable, except a configured backend that has become unusable, which
+stays in the list marked unavailable so stepping through the step can't
+silently replace it.
 Piped or non-interactive stdin/stdout (scripts, tests, CI) falls back to the
 original line-based prompts, reading newline-separated answers from stdin
 and leaving model downloads to the daemon or `tonguetyped model install`.
@@ -187,7 +189,8 @@ Activation, Shortcut, Transcript output, Typing backend, Startup, and Overlay,
 showing the current value - above a list of the remaining commands below.
 Selecting a settings row opens a screen that edits just that area, with the same
 live microphone preview and shortcut test/native dialog as `tonguetyped setup`,
-and the Model screen also selects the inference backend. `start` and `stop` are
+and the Model screen also selects the inference backend (`Tab` switches between
+the model catalog and the backend list). `start` and `stop` are
 omitted from the dashboard's list in favor of `toggle` and `cancel` for recording
 control, but every subcommand remains directly invocable on its own, and
 `tonguetyped --help` still lists them all.
