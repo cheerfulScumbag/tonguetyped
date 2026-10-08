@@ -420,6 +420,10 @@ fn daemon_build_line(own_build: &str, daemon_build: &DaemonBuild) -> OutputLine 
             "daemon build:   {build} - this binary records no git commit ({own_build}), so it \
              cannot confirm whether the daemon is the same build"
         )),
+        DaemonBuild::Reported(build) if build.ends_with("(unknown)") => line(format!(
+            "daemon build:   {build} - the daemon records no git commit, so this binary \
+             ({own_build}) cannot confirm whether they are the same build"
+        )),
         DaemonBuild::Reported(build) if build != own_build => error_line(format!(
             "daemon build:   {build} - differs from this binary ({own_build}); {RESTART}"
         )),
@@ -522,6 +526,17 @@ mod tests {
         assert!(!differing.is_error);
         assert!(!differing.text.contains("differs from this binary"));
         assert!(differing.text.contains("cannot confirm"));
+    }
+
+    #[test]
+    fn daemon_build_with_unknown_commit_is_not_claimed_to_differ() {
+        let own = "0.1.0 (b2c3d4e)";
+        let daemon_unknown =
+            daemon_build_line(own, &DaemonBuild::Reported("0.1.0 (unknown)".into()));
+        assert!(!daemon_unknown.is_error);
+        assert!(!daemon_unknown.text.contains("differs from this binary"));
+        assert!(!daemon_unknown.text.contains("tonguetyped daemon restart"));
+        assert!(daemon_unknown.text.contains("cannot confirm"));
     }
 
     #[test]
