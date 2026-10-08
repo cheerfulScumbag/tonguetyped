@@ -60,6 +60,30 @@ pub fn cached_backend_info() -> BackendInfo {
         })
 }
 
+/// Whether one backend kind can be used on this build and host.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BackendAvailability {
+    pub kind: String,
+    pub available: bool,
+}
+
+/// Every backend `InferenceEngine::load` can request, in its priority order
+/// (`ACCELERATOR_PRIORITY`, then CPU), each marked available or not. A backend
+/// is unavailable when its Cargo feature wasn't compiled in or the host has no
+/// device for it. Blocks like `backend_info`'s first call (a native device
+/// probe), so keep it off hot paths; `doctor` is the intended caller.
+pub fn backend_availability() -> Vec<BackendAvailability> {
+    ACCELERATOR_PRIORITY
+        .iter()
+        .copied()
+        .chain(std::iter::once((transcribe_cpp::Backend::Cpu, "cpu")))
+        .map(|(backend, kind)| BackendAvailability {
+            kind: kind.to_string(),
+            available: transcribe_cpp::backend_available(backend),
+        })
+        .collect()
+}
+
 fn detect_capability() -> BackendInfo {
     for (backend, kind) in ACCELERATOR_PRIORITY {
         if transcribe_cpp::backend_available(*backend) {
@@ -286,6 +310,15 @@ mod tests {
             InferenceEngine::backend_candidates().last(),
             Some(transcribe_cpp::Backend::Cpu)
         );
+    }
+
+    #[test]
+    fn backend_availability_lists_every_backend_in_load_order() {
+        let availability = backend_availability();
+        let kinds: Vec<&str> = availability.iter().map(|b| b.kind.as_str()).collect();
+        assert_eq!(kinds, ["cuda", "rocm", "vulkan", "metal", "cpu"]);
+        // CPU is the unconditional fallback, compiled into every build.
+        assert!(availability.last().unwrap().available);
     }
 
     #[test]

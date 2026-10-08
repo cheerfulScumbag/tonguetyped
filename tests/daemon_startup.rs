@@ -127,9 +127,14 @@ fn ipc_starts_when_shortcut_portal_is_unavailable() {
         .output()
         .unwrap();
     assert!(doctor.status.success());
-    assert!(String::from_utf8(doctor.stdout)
-        .unwrap()
-        .contains("shortcut error:  activation listener failed:"));
+    let stdout = String::from_utf8(doctor.stdout).unwrap();
+    assert!(stdout.contains("shortcut error:  activation listener failed:"));
+    // Same binary for daemon and doctor, so the daemon's reported build matches.
+    assert!(
+        stdout.contains("matches this binary") || stdout.contains("cannot confirm"),
+        "doctor should compare against the running daemon's build:\n{stdout}"
+    );
+    assert!(stdout.contains("backends:       available: "));
 
     drop(daemon);
     std::fs::remove_dir_all(root).unwrap();

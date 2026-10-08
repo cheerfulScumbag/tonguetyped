@@ -13,10 +13,34 @@ pub struct DoctorReport {
     pub model_id: String,
     pub inference_backend: String,
     pub inference_device: String,
+    /// Every backend kind and whether this build and host can use it, next to
+    /// the single active one above.
+    pub backend_availability: Vec<crate::inference::BackendAvailability>,
+    /// This (the `doctor` process's own) binary's `build_info::VERSION`.
+    pub build: String,
+    pub daemon_build: DaemonBuild,
     pub helpers_found: Vec<String>,
     pub output_method_available: bool,
     pub shortcut_status: Option<crate::ipc::ShortcutStatus>,
     pub shortcut_portal_error: Option<String>,
+}
+
+/// What the running daemon reported about its own build, if anything.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DaemonBuild {
+    /// No daemon answered a status request.
+    NotRunning,
+    /// A daemon answered but reported no build: it predates build reporting.
+    Unreported,
+    Reported(String),
+}
+
+/// The parts of the daemon's `Response::Status` that `doctor` reports on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonHealth {
+    shortcut_status: crate::ipc::ShortcutStatus,
+    activation_error: Option<String>,
+    build: Option<String>,
 }
 
 pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<DoctorReport> {
@@ -51,10 +75,16 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
     let helpers_found = crate::output::list_available_backends();
     let output_method_available = config.output.method == crate::config::OutputMethod::None
         || crate::output::type_backend_available(&config.output.typing_backend);
-    let daemon_shortcut_health = daemon_shortcut_health().await;
-    let (shortcut_status, shortcut_portal_error) = daemon_shortcut_health
-        .map(|(status, error)| (Some(status), error))
-        .unwrap_or((None, None));
+    let (shortcut_status, shortcut_portal_error, daemon_build) = match daemon_health().await {
+        Some(health) => (
+            Some(health.shortcut_status),
+            health.activation_error,
+            health
+                .build
+                .map_or(DaemonBuild::Unreported, DaemonBuild::Reported),
+        ),
+        None => (None, None, DaemonBuild::NotRunning),
+    };
 
     let backend = active_backend.unwrap_or_else(crate::inference::backend_info);
 
@@ -69,6 +99,9 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         model_id: config.model.active_model.clone(),
         inference_backend: backend.backend,
         inference_device: backend.device,
+        backend_availability: crate::inference::backend_availability(),
+        build: crate::build_info::VERSION.to_string(),
+        daemon_build,
         helpers_found,
         output_method_available,
         shortcut_status,
@@ -76,23 +109,21 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
     })
 }
 
-async fn daemon_shortcut_health() -> Option<(crate::ipc::ShortcutStatus, Option<String>)> {
+async fn daemon_health() -> Option<DaemonHealth> {
     let socket_path = crate::daemon::socket_path().ok()?;
     if !socket_path.exists() {
         return None;
     }
     tokio::time::timeout(
         std::time::Duration::from_millis(500),
-        daemon_shortcut_health_at(&socket_path),
+        daemon_health_at(&socket_path),
     )
     .await
     .ok()
     .flatten()
 }
 
-async fn daemon_shortcut_health_at(
-    socket_path: &std::path::Path,
-) -> Option<(crate::ipc::ShortcutStatus, Option<String>)> {
+async fn daemon_health_at(socket_path: &std::path::Path) -> Option<DaemonHealth> {
     let stream = tokio::net::UnixStream::connect(socket_path).await.ok()?;
     let (reader, mut writer) = stream.into_split();
     let frame = crate::ipc::encode_frame(&crate::ipc::Request::Status).ok()?;
@@ -104,8 +135,13 @@ async fn daemon_shortcut_health_at(
         crate::ipc::Response::Status {
             shortcut_status,
             activation_error,
+            build,
             ..
-        } => Some((shortcut_status, activation_error)),
+        } => Some(DaemonHealth {
+            shortcut_status,
+            activation_error,
+            build,
+        }),
         _ => None,
     }
 }
@@ -149,7 +185,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn reads_activation_health_from_running_daemon() {
+    async fn reads_activation_health_and_build_from_running_daemon() {
         let root = std::env::temp_dir().join(format!(
             "tonguetyped-doctor-test-{}-{}",
             std::process::id(),
@@ -175,6 +211,7 @@ mod tests {
                 operation_error: Some("output failed".to_string()),
                 shortcut_status: crate::ipc::ShortcutStatus::Failed,
                 activation_error: Some("activation listener failed".to_string()),
+                build: Some("0.1.0 (a1b2c3d)".to_string()),
             };
             writer
                 .write_all(crate::ipc::encode_frame(&response).unwrap().as_bytes())
@@ -183,11 +220,12 @@ mod tests {
         });
 
         assert_eq!(
-            daemon_shortcut_health_at(&socket_path).await,
-            Some((
-                crate::ipc::ShortcutStatus::Failed,
-                Some("activation listener failed".to_string())
-            ))
+            daemon_health_at(&socket_path).await,
+            Some(DaemonHealth {
+                shortcut_status: crate::ipc::ShortcutStatus::Failed,
+                activation_error: Some("activation listener failed".to_string()),
+                build: Some("0.1.0 (a1b2c3d)".to_string()),
+            })
         );
         server.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();

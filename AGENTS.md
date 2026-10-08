@@ -245,6 +245,15 @@ used to treat the leftover file as proof a daemon was running and tried (and
 failed) to send it `Shutdown`, surfacing a raw connection-refused error
 instead of proceeding straight to `spawn_daemon`.
 
+The Cargo version rarely changes, so build identity is the git commit:
+`build.rs` captures it (`-dirty` suffix for uncommitted changes) into
+`src/build_info.rs`, which `--version`, the daemon's `Response::Status.build`, and
+`doctor`'s daemon-vs-binary comparison all read. The Nix flake's source copy has
+no `.git`, so `flake.nix` passes the commit in via `TONGUETYPED_BUILD_COMMIT`; any
+other git-less build reports `unknown`. Because `build.rs` declares
+`rerun-if-changed`, Cargo no longer reruns it on every package file change - add
+any new input it reads to that list.
+
 ## Release
 
 `.github/workflows/release.yml` builds Linux (.deb variants + plain binary),

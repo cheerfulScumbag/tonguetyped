@@ -268,6 +268,7 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             operation_error,
             shortcut_status,
             activation_error,
+            build: Some(crate::build_info::VERSION.to_string()),
         },
     }
 }
