@@ -83,6 +83,12 @@ pub struct ModelConfig {
     /// migrated automatically - see `migrate_legacy_model_config`.
     #[serde(default = "default_active_model")]
     pub active_model: String,
+    /// Which inference backend `InferenceEngine::load` uses: `"auto"` tries
+    /// every compiled-in accelerator in priority order and falls back to CPU;
+    /// any other `crate::inference::BACKEND_PREFERENCES` value pins that one
+    /// backend and fails loudly rather than falling back.
+    #[serde(default = "default_preferred_backend")]
+    pub preferred_backend: String,
     #[serde(default)]
     pub idle_unload: IdleUnloadConfig,
 }
@@ -91,6 +97,7 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             active_model: default_active_model(),
+            preferred_backend: default_preferred_backend(),
             idle_unload: IdleUnloadConfig::default(),
         }
     }
@@ -423,6 +430,10 @@ fn default_output_method() -> OutputMethod {
     OutputMethod::None
 }
 
+fn default_preferred_backend() -> String {
+    "auto".to_string()
+}
+
 fn default_typing_backend() -> String {
     "auto".to_string()
 }
@@ -591,6 +602,7 @@ impl Config {
             }
         }
 
+        crate::inference::BackendPreference::parse(&self.model.preferred_backend)?;
         if self.output.method == OutputMethod::None && self.output.auto_submit {
             anyhow::bail!("auto_submit cannot be true when output.method is 'none'");
         }
@@ -671,6 +683,7 @@ mod tests {
         assert!(!config.audio.feedback_sounds);
         assert_eq!(config.transcription.max_recording_seconds, 120);
         assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
+        assert_eq!(config.model.preferred_backend, "auto");
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
         assert_eq!(config.history.max_entries, 500);
     }
@@ -682,6 +695,11 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.output.typing_backend = "auto".to_string();
+        config.model.preferred_backend = "cdua".to_string();
+        assert!(config.validate().is_err());
+
+        config.model.preferred_backend = "cpu".to_string();
+        config.validate().unwrap();
         config.model.active_model = "../custom".to_string();
         assert!(config.validate().is_err());
     }

@@ -11,6 +11,8 @@ pub struct DoctorReport {
     pub model_error: Option<String>,
     pub model_path: String,
     pub model_id: String,
+    #[serde(default)]
+    pub preferred_backend: String,
     pub inference_backend: String,
     pub inference_device: String,
     /// Every backend kind and whether this build and host can use it, next to
@@ -59,15 +61,16 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         .map(|d| d.name)
         .collect();
     let model_path = crate::catalog::model_path(&config.model.active_model)?;
+    let preference = crate::inference::BackendPreference::parse(&config.model.preferred_backend)?;
     let (model_ready, model_error, active_backend) = if model_path.exists() {
-        let mut engine = crate::inference::InferenceEngine::new(model_path.clone());
+        let mut engine = crate::inference::InferenceEngine::new(model_path.clone(), preference);
         match engine.load() {
             Ok(()) => {
                 let backend = engine.active_backend_info();
                 engine.unload();
                 (true, None, backend)
             }
-            Err(error) => (false, Some(error.to_string()), None),
+            Err(error) => (false, Some(format!("{error:#}")), None),
         }
     } else {
         (false, None, None)
@@ -86,7 +89,10 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         None => (None, None, DaemonBuild::NotRunning),
     };
 
-    let backend = active_backend.unwrap_or_else(crate::inference::backend_info);
+    // Without a loaded model, report what would be used: the pinned backend
+    // (never substituted by another), or the auto chain's capability probe.
+    let backend =
+        active_backend.unwrap_or_else(|| crate::inference::preferred_backend_info(preference));
 
     Ok(DoctorReport {
         compositor,
@@ -97,6 +103,7 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         model_error,
         model_path: model_path.to_string_lossy().to_string(),
         model_id: config.model.active_model.clone(),
+        preferred_backend: config.model.preferred_backend.clone(),
         inference_backend: backend.backend,
         inference_device: backend.device,
         backend_availability: crate::inference::backend_availability(),

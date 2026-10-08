@@ -163,12 +163,18 @@ const KEY_UP: &[u8] = b"\x1b[A";
 const KEY_DOWN: &[u8] = b"\x1b[B";
 const KEY_ENTER: &[u8] = b"\r";
 
-/// Advances through the setup console's early steps (Model, Microphone,
-/// Activation, Shortcut, Output, Startup) with Enter, accepting every
-/// default, until the Overlay step is reached.
+/// Advances through the setup console's early steps (Model, Inference
+/// backend, Microphone, Activation, Shortcut, Output, Startup) with Enter,
+/// accepting every default, until the Overlay step is reached.
 fn advance_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
-    session.send(KEY_ENTER); // Model -> Microphone
+    session.send(KEY_ENTER); // Model -> Inference backend
+    session.wait_for("Inference backend", Duration::from_secs(5));
+    advance_from_inference_backend_to_overlay_enabled(session);
+}
+
+fn advance_from_inference_backend_to_overlay_enabled(session: &mut Session) {
+    session.send(KEY_ENTER); // Inference backend -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
     session.send(KEY_ENTER); // Microphone -> Activation
     session.wait_for("Activation", Duration::from_secs(5));
@@ -278,4 +284,36 @@ fn pty_disabling_overlay_skips_the_position_style_and_streaming_steps() {
 
     let config = sandbox.config_contents();
     assert!(config.contains("enabled = false"), "{config}");
+}
+
+#[test]
+fn pty_inference_backend_step_lists_usable_backends_and_persists_the_choice() {
+    let sandbox = Sandbox::new("backend");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+
+    session.wait_for("Speech model", Duration::from_secs(10));
+    session.send(KEY_ENTER);
+    let screen = session.wait_for("Inference backend", Duration::from_secs(5));
+    assert!(
+        screen.contains("> Auto (tries CUDA") && screen.contains("CPU"),
+        "backend step should offer auto first and the always-available CPU:\n{screen}"
+    );
+
+    session.send(KEY_DOWN);
+    session.wait_for("> CPU", Duration::from_secs(5));
+    advance_from_inference_backend_to_overlay_enabled(&mut session);
+    session.wait_for("Overlay", Duration::from_secs(5));
+    session.send(KEY_UP); // Disabled -> skip straight to Review
+    session.send(KEY_ENTER);
+    let confirm_screen = session.wait_for("Write this configuration?", Duration::from_secs(5));
+    assert!(
+        confirm_screen.contains("Backend:     CPU"),
+        "review should summarize the pinned backend:\n{confirm_screen}"
+    );
+
+    session.send(KEY_ENTER); // save
+    session.wait_for_exit(Duration::from_secs(5));
+
+    let config = sandbox.config_contents();
+    assert!(config.contains("preferred_backend = \"cpu\""), "{config}");
 }

@@ -150,6 +150,7 @@ pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static 
 pub(crate) struct Capabilities {
     pub(crate) microphones: Vec<(String, String)>,
     pub(crate) typing_backends: Vec<String>,
+    pub(crate) inference_backends: Vec<crate::inference::BackendChoice>,
 }
 
 impl Capabilities {
@@ -171,6 +172,7 @@ impl Capabilities {
         Ok(Self {
             microphones,
             typing_backends: crate::output::list_available_backends(),
+            inference_backends: crate::inference::backend_choices(),
         })
     }
 
@@ -186,6 +188,7 @@ impl Capabilities {
                     "System default microphone".to_string(),
                 )],
                 typing_backends: Vec::new(),
+                inference_backends: crate::inference::backend_choices(),
             }
         })
     }
@@ -689,6 +692,7 @@ mod tests {
                 ),
             ],
             typing_backends: Vec::new(),
+            inference_backends: Vec::new(),
         };
 
         assert_eq!(capabilities.microphone_index("pipewire:usb-source"), 1);

@@ -227,7 +227,20 @@ pub async fn activate_model(
     let (_, download) = manager.install_catalog_model(id, on_progress).await?;
 
     select_model(id)?;
+    let (daemon_reload, confirmation) = reload_and_confirm().await?;
 
+    Ok(ModelActivation {
+        download,
+        daemon_reload,
+        confirmation,
+    })
+}
+
+/// Reloads a running daemon (`None` when none is running) and re-runs
+/// diagnostics against the saved config, so a caller that just changed
+/// inference settings can confirm the model really loads with them.
+async fn reload_and_confirm(
+) -> anyhow::Result<(Option<Result<(), String>>, crate::doctor::DoctorReport)> {
     let daemon_reload = if daemon_socket_exists() {
         Some(match send_ipc(Request::ReloadConfig).await {
             Ok(Response::Ok) => Ok(()),
@@ -238,12 +251,42 @@ pub async fn activate_model(
     } else {
         None
     };
-
     let config = Config::load()?;
     let confirmation = crate::doctor::run_doctor(&config).await?;
+    Ok((daemon_reload, confirmation))
+}
 
-    Ok(ModelActivation {
-        download,
+/// Saves `name` as `config.model.preferred_backend`, rejecting anything
+/// `inference::BackendPreference::parse` doesn't accept.
+pub fn select_backend(name: &str) -> anyhow::Result<()> {
+    crate::inference::BackendPreference::parse(name)?;
+    let mut config = Config::load()?;
+    config.model.preferred_backend = name.to_string();
+    config.save()
+}
+
+/// Everything that happened while switching the inference backend from the
+/// dashboard - the same save/reload/confirm steps as `ModelActivation`,
+/// without the download.
+pub struct BackendActivation {
+    pub daemon_reload: Option<Result<(), String>>,
+    pub confirmation: crate::doctor::DoctorReport,
+}
+
+impl BackendActivation {
+    /// Same rule as `ModelActivation::succeeded`: the saved backend must be
+    /// confirmed to load the model, and a running daemon must have reloaded.
+    pub fn succeeded(&self) -> bool {
+        !matches!(self.daemon_reload, Some(Err(_))) && self.confirmation.model_ready
+    }
+}
+
+/// Saves `name` as the preferred inference backend, reloads a running daemon
+/// and re-runs diagnostics to confirm the active model loads on it.
+pub async fn activate_backend(name: &str) -> anyhow::Result<BackendActivation> {
+    select_backend(name)?;
+    let (daemon_reload, confirmation) = reload_and_confirm().await?;
+    Ok(BackendActivation {
         daemon_reload,
         confirmation,
     })
@@ -365,6 +408,7 @@ pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
         )),
         line(format!("model id:       {}", report.model_id)),
         line(format!("model path:     {}", report.model_path)),
+        line(format!("backend pref:   {}", report.preferred_backend)),
         line(format!("backend:        {}", report.inference_backend)),
         line(format!("device:         {}", report.inference_device)),
         line(format!(

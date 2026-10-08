@@ -30,7 +30,8 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     let _lock = acquire_instance_lock(&sock_path)?;
     prepare_dependencies(&config).await?;
 
-    let backend = crate::inference::backend_info();
+    let preference = crate::inference::BackendPreference::parse(&config.model.preferred_backend)?;
+    let backend = crate::inference::preferred_backend_info(preference);
     tracing::info!(
         model_id = %config.model.active_model,
         inference_backend = %backend.backend,

@@ -556,7 +556,10 @@ impl App {
 
     fn open_setting(&mut self, setting: SettingId) {
         self.screen = match setting {
-            SettingId::Model => Screen::Model(screens::ModelScreen::new(&self.config)),
+            SettingId::Model => Screen::Model(screens::ModelScreen::new(
+                &self.config,
+                crate::inference::backend_choices(),
+            )),
             SettingId::Microphone => {
                 let mut screen = screens::MicrophoneScreen::new(&self.capabilities, &self.config);
                 screen.start_preview();
@@ -809,10 +812,28 @@ impl App {
                     screen.move_selection(1);
                 }
             }
+            KeyCode::Tab | KeyCode::BackTab => {
+                if let Screen::Model(screen) = &mut self.screen {
+                    screen.toggle_focus();
+                }
+            }
             KeyCode::Enter if self.pending.is_none() => {
                 if let Screen::Model(screen) = &self.screen {
-                    let id = screen.selected_id().to_string();
-                    self.start_model_activation(id);
+                    match screen.focus {
+                        screens::ModelFocus::Catalog => {
+                            let id = screen.selected_id().to_string();
+                            self.start_model_activation(id);
+                        }
+                        screens::ModelFocus::Backend => {
+                            if let Some(name) = screen.selected_backend() {
+                                self.spawn_pending(
+                                    "Backend change",
+                                    backend_activation_task(name),
+                                    None,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -1145,12 +1166,15 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(5),
+                Constraint::Length(screen.backend_widget_height()),
                 Constraint::Length(3),
                 Constraint::Length(1),
             ])
             .split(area);
 
         frame.render_widget(screen.list_widget(chunks[0].height), chunks[0]);
+        frame.render_widget(screen.backend_widget(), chunks[1]);
+        let chunks = &chunks[1..];
 
         match &self.pending {
             Some(pending) if pending.progress.is_some() => {
@@ -1180,7 +1204,7 @@ impl App {
         }
 
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter activate  Esc back  q quit"),
+            Paragraph::new("↑/↓ choose  Tab switch list  Enter activate  Esc back  q quit"),
             chunks[2],
         );
     }
@@ -1539,6 +1563,47 @@ async fn model_activation_task(id: String, progress: Arc<Mutex<(u64, u64)>>) -> 
         }
         Err(error) => vec![OutputLine {
             text: error.to_string(),
+            is_error: true,
+        }],
+    }
+}
+
+async fn backend_activation_task(name: &'static str) -> Vec<OutputLine> {
+    match commands::activate_backend(name).await {
+        Ok(activation) => {
+            let succeeded = activation.succeeded();
+            let mut lines = vec![if succeeded {
+                OutputLine {
+                    text: format!("inference backend '{name}' active"),
+                    is_error: false,
+                }
+            } else {
+                OutputLine {
+                    text: format!(
+                        "inference backend '{name}' saved but NOT confirmed - see details below"
+                    ),
+                    is_error: true,
+                }
+            }];
+            lines.push(match &activation.daemon_reload {
+                None => OutputLine {
+                    text: "daemon: not running (config saved; applies on next start)".to_string(),
+                    is_error: false,
+                },
+                Some(Ok(())) => OutputLine {
+                    text: "daemon: reloaded".to_string(),
+                    is_error: false,
+                },
+                Some(Err(error)) => OutputLine {
+                    text: format!("daemon reload failed: {error}"),
+                    is_error: true,
+                },
+            });
+            lines.extend(commands::format_doctor_lines(&activation.confirmation));
+            lines
+        }
+        Err(error) => vec![OutputLine {
+            text: format!("{error:#}"),
             is_error: true,
         }],
     }

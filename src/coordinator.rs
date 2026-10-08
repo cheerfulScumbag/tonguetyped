@@ -364,13 +364,18 @@ impl CoordinatorRuntime for ProductionRuntime {
             };
         }
         let mut lifecycle = self.inference.lock().unwrap();
-        let engine_key = config.model.active_model.clone();
+        // A backend change must reload the engine just like a model change.
+        let engine_key = format!(
+            "{}@{}",
+            config.model.active_model, config.model.preferred_backend
+        );
         timings.cold_model_load = !lifecycle.has_model(&engine_key);
         let load_started = Instant::now();
         let engine = match lifecycle.ensure(&engine_key, || {
-            let mut engine = crate::inference::InferenceEngine::new(crate::catalog::model_path(
-                &config.model.active_model,
-            )?);
+            let mut engine = crate::inference::InferenceEngine::new(
+                crate::catalog::model_path(&config.model.active_model)?,
+                crate::inference::BackendPreference::parse(&config.model.preferred_backend)?,
+            );
             engine.load()?;
             Ok(engine)
         }) {
@@ -1091,8 +1096,11 @@ fn reserve_recording(
     inner.signal_tx = Some(signal_tx);
     inner.last_error = None;
     inner.worker_active = true;
+    let preference =
+        crate::inference::BackendPreference::parse(&inner.config.model.preferred_backend)?;
     let timing = Arc::new(Mutex::new(LatencyOperation::new(
         inner.config.model.active_model.clone(),
+        preference,
         clock,
     )));
     inner.active_timing = Some(Arc::clone(&timing));

@@ -1,8 +1,8 @@
 //! State and rendering for the dashboard's interactive sub-screens that
-//! aren't just "run one action and show the result": the model catalog
-//! (navigable list + activation), the daemon actions, and the settings
-//! screens the home screen's Settings panel opens (microphone, activation,
-//! shortcut, transcript output, typing backend, startup, overlay).
+//! aren't just "run one action and show the result": the model screen
+//! (catalog activation + inference backend), the daemon actions, and the
+//! settings screens the home screen's Settings panel opens (microphone,
+//! activation, shortcut, transcript output, typing backend, startup, overlay).
 //!
 //! Every settings screen here only mutates the in-memory `Config` it is
 //! handed (`apply`); the caller (`tui::App`) owns `Config::save` so a failed
@@ -11,35 +11,132 @@
 use crate::audio::{level_to_ratio, MicMonitor};
 use crate::commands;
 use crate::config::{ActivationMode, Config, OutputMethod};
+use crate::inference::BackendChoice;
 use crate::overlay;
 use crate::setup::Capabilities;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
+/// Which of the model screen's two lists the arrow keys and Enter act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModelFocus {
+    Catalog,
+    Backend,
+}
+
 pub(super) struct ModelScreen {
     pub rows: Vec<commands::ModelRow>,
     pub selected: usize,
+    pub focus: ModelFocus,
+    /// Every backend preference with whether it can work here; only the
+    /// usable ones are selectable (`usable_backends`).
+    pub backends: Vec<BackendChoice>,
+    pub backend_selected: usize,
+    pub configured_backend: String,
 }
 
 impl ModelScreen {
-    pub(super) fn new(config: &Config) -> Self {
+    pub(super) fn new(config: &Config, backends: Vec<BackendChoice>) -> Self {
         let rows = commands::model_rows(config);
         let selected = rows.iter().position(|row| row.active).unwrap_or(0);
-        Self { rows, selected }
+        let mut screen = Self {
+            rows,
+            selected,
+            focus: ModelFocus::Catalog,
+            backends,
+            backend_selected: 0,
+            configured_backend: config.model.preferred_backend.clone(),
+        };
+        let configured = screen
+            .usable_backends()
+            .position(|name| name == screen.configured_backend);
+        screen.backend_selected = configured.unwrap_or(0);
+        screen
+    }
+
+    fn usable_backends(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.backends
+            .iter()
+            .filter(|choice| choice.unavailable.is_none())
+            .map(|choice| choice.name)
+    }
+
+    pub(super) fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            ModelFocus::Catalog => ModelFocus::Backend,
+            ModelFocus::Backend => ModelFocus::Catalog,
+        };
     }
 
     pub(super) fn move_selection(&mut self, delta: i32) {
-        let len = self.rows.len() as i32;
+        let (len, current) = match self.focus {
+            ModelFocus::Catalog => (self.rows.len(), &mut self.selected),
+            ModelFocus::Backend => (self.usable_backends().count(), &mut self.backend_selected),
+        };
         if len == 0 {
             return;
         }
-        let next = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
-        self.selected = next;
+        *current = (*current as i32 + delta).clamp(0, len as i32 - 1) as usize;
     }
 
     pub(super) fn selected_id(&self) -> &'static str {
         self.rows[self.selected].id
+    }
+
+    pub(super) fn selected_backend(&self) -> Option<&'static str> {
+        self.usable_backends().nth(self.backend_selected)
+    }
+
+    /// Rows the backend panel needs: one per usable backend, one per
+    /// unavailable backend's reason, plus borders.
+    pub(super) fn backend_widget_height(&self) -> u16 {
+        self.backends.len() as u16 + 2
+    }
+
+    pub(super) fn backend_widget(&self) -> Paragraph<'static> {
+        let focused = self.focus == ModelFocus::Backend;
+        let mut lines: Vec<Line> = self
+            .usable_backends()
+            .enumerate()
+            .map(|(index, name)| {
+                let highlighted = focused && index == self.backend_selected;
+                let marker = if highlighted { "> " } else { "  " };
+                let status = if name == self.configured_backend {
+                    "active"
+                } else {
+                    ""
+                };
+                let text = format!(
+                    "{marker}{:<53} {status}",
+                    crate::inference::backend_preference_label(name)
+                );
+                let style = if highlighted {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(text, style))
+            })
+            .collect();
+        lines.extend(self.backends.iter().filter_map(|choice| {
+            choice.unavailable.as_ref().map(|reason| {
+                let text = if choice.name == self.configured_backend {
+                    format!("  {} (active) unavailable: {reason}", choice.name)
+                } else {
+                    format!("  {} unavailable: {reason}", choice.name)
+                };
+                Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+            })
+        }));
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(focus_border(focused))
+                .title("Inference backend"),
+        )
     }
 
     pub(super) fn list_widget(&self, height: u16) -> Paragraph<'static> {
@@ -48,7 +145,8 @@ impl ModelScreen {
             .iter()
             .enumerate()
             .map(|(index, row)| {
-                let marker = if index == self.selected { "> " } else { "  " };
+                let highlighted = self.focus == ModelFocus::Catalog && index == self.selected;
+                let marker = if highlighted { "> " } else { "  " };
                 let status = if row.active {
                     "active"
                 } else if row.installed {
@@ -63,7 +161,7 @@ impl ModelScreen {
                     commands::human_size(row.size_bytes),
                     status
                 );
-                let style = selection_style(index == self.selected);
+                let style = selection_style(highlighted);
                 Line::from(Span::styled(text, style))
             })
             .collect();
@@ -73,9 +171,18 @@ impl ModelScreen {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(focus_border(self.focus == ModelFocus::Catalog))
                     .title("Model catalog (MODEL ID / QUANT / SIZE / STATUS)"),
             )
             .scroll((scroll, 0))
+    }
+}
+
+fn focus_border(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
     }
 }
 
@@ -712,6 +819,102 @@ mod tests {
                 ),
             ],
             typing_backends: vec!["wtype".to_string(), "enigo".to_string()],
+            inference_backends: Vec::new(),
         }
+    }
+
+    fn choices() -> Vec<BackendChoice> {
+        vec![
+            BackendChoice {
+                name: "auto",
+                unavailable: None,
+            },
+            BackendChoice {
+                name: "cpu",
+                unavailable: None,
+            },
+            BackendChoice {
+                name: "cuda",
+                unavailable: Some("compiled without".to_string()),
+            },
+            BackendChoice {
+                name: "vulkan",
+                unavailable: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn backend_list_starts_on_the_configured_backend_and_skips_unavailable_ones() {
+        let mut config = Config::default();
+        config.model.preferred_backend = "vulkan".to_string();
+        let mut screen = ModelScreen::new(&config, choices());
+        assert_eq!(screen.focus, ModelFocus::Catalog);
+        assert_eq!(screen.selected_backend(), Some("vulkan"));
+
+        screen.toggle_focus();
+        screen.move_selection(-1);
+        assert_eq!(screen.selected_backend(), Some("cpu"));
+        screen.move_selection(-5);
+        assert_eq!(screen.selected_backend(), Some("auto"));
+        screen.move_selection(10);
+        assert_eq!(screen.selected_backend(), Some("vulkan"));
+    }
+
+    #[test]
+    fn arrow_keys_only_move_the_focused_list() {
+        let mut screen = ModelScreen::new(&Config::default(), choices());
+        let catalog_start = screen.selected;
+        screen.toggle_focus();
+        screen.move_selection(1);
+        assert_eq!(screen.selected, catalog_start);
+        assert_eq!(screen.selected_backend(), Some("cpu"));
+
+        screen.toggle_focus();
+        screen.move_selection(1);
+        assert_eq!(screen.selected_backend(), Some("cpu"));
+    }
+
+    fn rendered_backend_widget(config: &Config, backends: Vec<BackendChoice>) -> String {
+        let screen = ModelScreen::new(config, backends);
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(screen.backend_widget(), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn model_screen_marks_an_unavailable_configured_backend_active() {
+        let mut config = Config::default();
+        config.model.preferred_backend = "cuda".to_string();
+        let text = rendered_backend_widget(&config, choices());
+        assert!(
+            text.contains("cuda (active) unavailable"),
+            "an unavailable backend that is still the saved pin must be marked active:\n{text}"
+        );
+    }
+
+    #[test]
+    fn model_screen_does_not_mark_an_unrelated_unavailable_backend_active() {
+        let text = rendered_backend_widget(&Config::default(), choices());
+        assert!(
+            text.contains("cuda unavailable"),
+            "the unavailable backend should still be listed:\n{text}"
+        );
+        assert!(
+            !text.contains("cuda (active)"),
+            "only the saved pin may be marked active:\n{text}"
+        );
     }
 }

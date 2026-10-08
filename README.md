@@ -76,7 +76,8 @@ behavior:
 tonguetyped setup
 ```
 
-The setup flow discovers microphones and typing backends before presenting choices.
+The setup flow discovers microphones, typing backends, and inference backends
+before presenting choices.
 When both stdin and stdout are a terminal, `setup` opens an interactive Ratatui
 console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc`
 returns to the previous one, and `q` quits without saving. The microphone step
@@ -88,7 +89,12 @@ to change an already-bound shortcut, press `Ctrl+R` to open the desktop's
 own native "press your new shortcut" dialog instead. After the model step, the
 console fetches the selected GGUF model file if it isn't already installed,
 with progress shown before continuing - the same file every backend (CPU or
-an accelerator) requests, so there is only ever one model to fetch.
+an accelerator) requests, so there is only ever one model to fetch. It then
+offers the inference backend step, listing the backends this build and host
+can use; a backend that can't run here is shown with its reason instead of
+being selectable, except a configured backend that has become unusable, which
+stays in the list marked unavailable so stepping through the step can't
+silently replace it.
 Piped or non-interactive stdin/stdout (scripts, tests, CI) falls back to the
 original line-based prompts, reading newline-separated answers from stdin
 and leaving model downloads to the daemon or `tonguetyped model install`.
@@ -182,10 +188,12 @@ Its home screen is a settings overview - one row each for Model, Microphone,
 Activation, Shortcut, Transcript output, Typing backend, Startup, and Overlay,
 showing the current value - above a list of the remaining commands below.
 Selecting a settings row opens a screen that edits just that area, with the same
-live microphone preview and shortcut test/native dialog as `tonguetyped setup`.
-`start` and `stop` are omitted from the dashboard's list in favor of `toggle` and
-`cancel` for recording control, but every subcommand remains directly invocable
-on its own, and `tonguetyped --help` still lists them all.
+live microphone preview and shortcut test/native dialog as `tonguetyped setup`,
+and the Model screen also selects the inference backend (`Tab` switches between
+the model catalog and the backend list). `start` and `stop` are
+omitted from the dashboard's list in favor of `toggle` and `cancel` for recording
+control, but every subcommand remains directly invocable on its own, and
+`tonguetyped --help` still lists them all.
 
 ## Commands
 
@@ -220,8 +228,9 @@ When history is enabled, TongueTyped stores transcript text in
 
 ## Latency diagnostics
 
-`tonguetyped doctor` reports the selected model ID and the detected inference
-backend and device. It also prints its own build identifier - the git commit it
+`tonguetyped doctor` reports the selected model ID, the configured backend
+preference, and the detected inference backend and device. It also prints its
+own build identifier - the git commit it
 was built from - and compares it with the build the running daemon reports,
 flagging a daemon left running from an older build. `tonguetyped --version`
 prints this binary's identifier, and `tonguetyped status` the daemon's. The
@@ -263,7 +272,9 @@ cargo run --release --example transcribe_benchmark -- \
   recording.wav --runs 5
 ```
 
-Pass `--vad-model PATH` to include production VAD before each inference run. The
+Pass `--vad-model PATH` to include production VAD before each inference run.
+Pass `--backend NAME` (`auto`, `cpu`, `vulkan`, `cuda`, `rocm`, or `metal`;
+default `auto`) to force one inference backend. The
 benchmark writes one JSON record containing raw runs, median, p95, model and
 audio SHA-256 hashes, host CPU, thread count, backend, device, and a competing
 load warning. It does not print transcript text. Compare builds with the same
@@ -300,25 +311,33 @@ cargo build --release --features gpu-vulkan   # or gpu-cuda, gpu-rocm, gpu-metal
 ```
 
 `InferenceEngine::load` always requests an explicit backend (never letting the
-library auto-select), trying accelerators in a fixed priority order (CUDA,
-ROCm, Vulkan, Metal) before an unconditional, always-available explicit CPU
-request - every attempt loads the exact same configured GGUF file, so a
-fallback never substitutes a different model or model family. The flake's
-`packages.default` enables `gpu-vulkan`, which gives `nix build` and
+library auto-select). By default (`model.preferred_backend = "auto"`), it tries
+accelerators in a fixed priority order (CUDA, ROCm, Vulkan, Metal) before an
+unconditional, always-available explicit CPU request. Set any other value -
+`cpu`, `vulkan`, `cuda`, `rocm`, or `metal` - to pin `load` to that one backend
+instead: if it can't run here (the feature wasn't compiled in, or no usable
+device or driver was found), the load fails with a named error rather than
+quietly running on a different backend. `tonguetyped setup` and the dashboard's
+Model screen both offer this choice, showing any backend this build and host
+can't use as unavailable. Every attempt loads the exact same configured
+GGUF file, so a fallback never substitutes a different model or model family.
+The flake's `packages.default` enables `gpu-vulkan`, which gives `nix build` and
 `nix profile install` accelerated inference on Vulkan-capable systems while
 keeping the tested CPU fallback on systems without a usable GPU or an
 installed GGUF model. Building `gpu-cuda` on NixOS additionally needs
 `cudaPackages.cudatoolkit` and the driver's `/run/opengl-driver/lib` on the
 link path; the flake's devShell and `build.rs` set this up automatically.
 
-If the configured model's GGUF file is missing, or every backend fails to
+If the configured model's GGUF file is missing, or the backend in play fails to
 load or run it, `InferenceEngine::load` returns an error (no silent partial
-success). `tonguetyped doctor` and the daemon's startup log report whichever
+success). `tonguetyped doctor` reports the configured preference and whichever
 backend actually ended up active (`transcribe.cpp/cpu`,
 `transcribe.cpp/vulkan`, `transcribe.cpp/cuda`, `transcribe.cpp/rocm`, or
 `transcribe.cpp/metal`) and its device - read directly off the loaded model,
-not guessed from which Cargo features were compiled in. `doctor` separately
-lists every backend kind this build and host can use (CUDA, ROCm, Vulkan,
+not guessed from which Cargo features were compiled in. With no model loaded,
+doctor and the daemon's startup log report the pinned backend, or the `auto`
+chain's capability probe. `doctor` separately lists every backend kind this
+build and host can use (CUDA, ROCm, Vulkan,
 Metal, CPU) in inference priority order, so a compiled-in accelerator with no
 usable device shows as unavailable next to the always-available CPU fallback.
 `daemon.rs::prepare_dependencies` fetches the configured model synchronously

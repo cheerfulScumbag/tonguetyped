@@ -104,11 +104,16 @@ pub struct LatencyOperation {
     history: Duration,
     cold_model_load: bool,
     backend: Option<crate::inference::BackendInfo>,
+    preference: crate::inference::BackendPreference,
     terminal: bool,
 }
 
 impl LatencyOperation {
-    pub fn new(model_id: String, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(
+        model_id: String,
+        preference: crate::inference::BackendPreference,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let sequence = NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
         Self {
             clock,
@@ -124,6 +129,7 @@ impl LatencyOperation {
             history: Duration::ZERO,
             cold_model_load: false,
             backend: None,
+            preference,
             terminal: false,
         }
     }
@@ -200,7 +206,7 @@ impl LatencyOperation {
         let backend = self
             .backend
             .clone()
-            .unwrap_or_else(crate::inference::cached_backend_info);
+            .unwrap_or_else(|| crate::inference::cached_preferred_backend_info(self.preference));
         Some(LatencyRecord {
             operation_id: self.operation_id.clone(),
             outcome: outcome.to_string(),
@@ -247,7 +253,11 @@ mod tests {
     #[test]
     fn aggregates_phases_with_a_monotonic_fake_clock_once() {
         let clock = Arc::new(FakeClock::default());
-        let mut operation = LatencyOperation::new("model-a".to_string(), clock.clone());
+        let mut operation = LatencyOperation::new(
+            "model-a".to_string(),
+            crate::inference::BackendPreference::Auto,
+            clock.clone(),
+        );
         operation.mark_stop_received();
 
         for (phase, milliseconds) in [

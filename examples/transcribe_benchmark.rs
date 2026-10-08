@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use tonguetyped::inference::InferenceEngine;
+use tonguetyped::inference::{BackendPreference, InferenceEngine};
 
 #[derive(Parser)]
 #[command(about = "Benchmark cold model loading and repeated warm inference")]
@@ -21,6 +21,9 @@ struct Args {
     /// Apply production VAD with this Silero model before each run
     #[arg(long)]
     vad_model: Option<PathBuf>,
+    /// Inference backend: auto, cpu, vulkan, cuda, rocm, or metal
+    #[arg(long, default_value = "auto")]
+    backend: String,
 }
 
 #[derive(Serialize)]
@@ -59,7 +62,8 @@ fn main() -> anyhow::Result<()> {
     let samples = read_wav_samples(&args.wav)?;
     let audio_seconds = samples.len() as f64 / 16_000.0;
 
-    let mut engine = InferenceEngine::new(args.model.clone());
+    let mut engine =
+        InferenceEngine::new(args.model.clone(), BackendPreference::parse(&args.backend)?);
     let started = Instant::now();
     engine.load()?;
     let load_time = started.elapsed();
