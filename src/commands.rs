@@ -416,12 +416,12 @@ fn daemon_build_line(own_build: &str, daemon_build: &DaemonBuild) -> OutputLine 
             "daemon build:   unknown - the daemon predates build reporting, so it is an \
              older build; {RESTART}"
         )),
+        DaemonBuild::Reported(build) if own_build.ends_with("(unknown)") => line(format!(
+            "daemon build:   {build} - this binary records no git commit ({own_build}), so it \
+             cannot confirm whether the daemon is the same build"
+        )),
         DaemonBuild::Reported(build) if build != own_build => error_line(format!(
             "daemon build:   {build} - differs from this binary ({own_build}); {RESTART}"
-        )),
-        DaemonBuild::Reported(build) if own_build.ends_with("(unknown)") => line(format!(
-            "daemon build:   {build} (same version, but neither records a git commit, so \
-             cannot confirm it is the same build)"
         )),
         DaemonBuild::Reported(build) => {
             line(format!("daemon build:   {build} (matches this binary)"))
@@ -513,9 +513,15 @@ mod tests {
     #[test]
     fn daemon_build_without_commit_is_not_claimed_to_match() {
         let own = "0.1.0 (unknown)";
-        let line = daemon_build_line(own, &DaemonBuild::Reported(own.into()));
-        assert!(!line.text.contains("matches this binary"));
-        assert!(line.text.contains("cannot confirm"));
+        let same = daemon_build_line(own, &DaemonBuild::Reported(own.into()));
+        assert!(!same.is_error);
+        assert!(!same.text.contains("matches this binary"));
+        assert!(same.text.contains("cannot confirm"));
+
+        let differing = daemon_build_line(own, &DaemonBuild::Reported("0.1.0 (a1b2c3d)".into()));
+        assert!(!differing.is_error);
+        assert!(!differing.text.contains("differs from this binary"));
+        assert!(differing.text.contains("cannot confirm"));
     }
 
     #[test]
