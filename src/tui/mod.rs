@@ -333,11 +333,6 @@ impl App {
                 is_error: true,
             }],
         };
-        // Model and backend changes save the config from the spawned task;
-        // pick them up so the status strip and the next Model screen agree.
-        if let Ok(reloaded) = Config::load() {
-            self.config = reloaded;
-        }
         self.screen = Screen::Info {
             title: title.to_string(),
             lines,

@@ -150,7 +150,7 @@ pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static 
 pub(crate) struct Capabilities {
     pub(crate) microphones: Vec<(String, String)>,
     pub(crate) typing_backends: Vec<String>,
-    inference_backends: Vec<crate::inference::BackendChoice>,
+    pub(crate) inference_backends: Vec<crate::inference::BackendChoice>,
 }
 
 impl Capabilities {
