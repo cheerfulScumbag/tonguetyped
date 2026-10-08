@@ -49,11 +49,12 @@ fn git_commit() -> Option<String> {
     }
 
     let hash = git(&manifest_dir, &["rev-parse", "--short=7", "HEAD"])?;
-    let dirty = git(
-        &manifest_dir,
-        &["status", "--porcelain", "--untracked-files=no"],
-    )
-    .is_some();
+    // Untracked (non-gitignored) files count as dirty too, since a new
+    // source file wired in via a `mod` statement compiles into the binary
+    // without being committed. An edit to a file outside the
+    // rerun-if-changed list above (a doc or test-only change) won't refresh
+    // this flag until something that list does watch also changes.
+    let dirty = git(&manifest_dir, &["status", "--porcelain"]).is_some();
     Some(if dirty { format!("{hash}-dirty") } else { hash })
 }
 
