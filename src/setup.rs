@@ -72,6 +72,36 @@ fn fetch_requirement(
     })
 }
 
+/// Shared state a background shortcut-test thread reports into, polled by
+/// the dashboard's Shortcut screen - same shape as `ReconfigureHandle` above.
+pub(crate) struct ShortcutTestHandle {
+    pub result: Arc<Mutex<Option<Result<crate::activation::ShortcutTestOutcome, String>>>>,
+}
+
+/// Spawns a background thread that drives `activation::test_shortcut_binding`
+/// to completion and reports its outcome through the returned handle. Runs
+/// its own single-threaded tokio runtime, same as `reconfigure_shortcut_async`
+/// below.
+pub(crate) fn shortcut_test_async(keybind: String) -> ShortcutTestHandle {
+    let result = Arc::new(Mutex::new(None));
+    let result_for_thread = result.clone();
+    std::thread::spawn(move || {
+        let outcome = run_shortcut_test(keybind);
+        if let Ok(mut guard) = result_for_thread.lock() {
+            *guard = Some(outcome);
+        }
+    });
+    ShortcutTestHandle { result }
+}
+
+fn run_shortcut_test(keybind: String) -> Result<crate::activation::ShortcutTestOutcome, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(crate::activation::test_shortcut_binding(&keybind))
+}
+
 /// Shared state a background shortcut-reconfigure thread reports into,
 /// polled by the setup console's render loop - same shape as
 /// `ProvisionHandle` above and `console::ConsoleState`'s microphone level
@@ -118,12 +148,12 @@ pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static 
 
 #[derive(Debug)]
 pub(crate) struct Capabilities {
-    microphones: Vec<(String, String)>,
-    typing_backends: Vec<String>,
+    pub(crate) microphones: Vec<(String, String)>,
+    pub(crate) typing_backends: Vec<String>,
 }
 
 impl Capabilities {
-    fn discover() -> anyhow::Result<Self> {
+    pub(crate) fn discover() -> anyhow::Result<Self> {
         let mut microphones = vec![(
             "default".to_string(),
             "System default microphone".to_string(),
@@ -144,17 +174,62 @@ impl Capabilities {
         })
     }
 
-    fn microphone_index(&self, selected: &str) -> usize {
-        self.microphones
-            .iter()
-            .position(|(value, label)| {
-                value == selected
-                    || label == selected
-                    || label
-                        .strip_suffix(" (current default)")
-                        .is_some_and(|name| name == selected)
-            })
-            .unwrap_or(0)
+    /// Discovery for surfaces (the dashboard) that must still open when audio
+    /// enumeration fails: falls back to just the system-default microphone,
+    /// whose own preview error is then surfaced in the microphone screen.
+    pub(crate) fn discover_or_default() -> Self {
+        Self::discover().unwrap_or_else(|error| {
+            tracing::warn!("audio device discovery failed: {error}");
+            Self {
+                microphones: vec![(
+                    "default".to_string(),
+                    "System default microphone".to_string(),
+                )],
+                typing_backends: Vec::new(),
+            }
+        })
+    }
+
+    pub(crate) fn microphone_index(&self, selected: &str) -> usize {
+        self.microphone_position(selected).unwrap_or(0)
+    }
+
+    /// The display label for `selected`, resolving both stable device ids and
+    /// legacy stored names the same way `microphone_index` does, and falling
+    /// back to the stored value for a device that is no longer present.
+    pub(crate) fn microphone_label(&self, selected: &str) -> String {
+        self.microphone_position(selected)
+            .map(|index| self.microphones[index].1.clone())
+            .unwrap_or_else(|| selected.to_string())
+    }
+
+    fn microphone_position(&self, selected: &str) -> Option<usize> {
+        self.microphones.iter().position(|(value, label)| {
+            value == selected
+                || label == selected
+                || label
+                    .strip_suffix(" (current default)")
+                    .is_some_and(|name| name == selected)
+        })
+    }
+
+    /// The transcript-output choices, in the order both configuration UIs
+    /// offer them: keep-in-app first, type-into-the-focused-application only
+    /// when at least one typing backend is actually available.
+    pub(crate) fn output_labels(&self) -> Vec<String> {
+        let mut labels = vec!["Keep transcripts in TongueTyped".to_string()];
+        if !self.typing_backends.is_empty() {
+            labels.push("Type into the focused application".to_string());
+        }
+        labels
+    }
+
+    /// The typing-backend choices: explicit automatic selection first, then
+    /// every backend detected on this machine.
+    pub(crate) fn typing_backend_values(&self) -> Vec<String> {
+        let mut values = vec!["auto".to_string()];
+        values.extend(self.typing_backends.iter().cloned());
+        values
     }
 }
 

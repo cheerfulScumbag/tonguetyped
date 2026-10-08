@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TongueTyped dashboard - current home screen (BEFORE, do not redesign)</title>
+<style>
+  /*
+    FAITHFUL REPRODUCTION ONLY. This file renders what running bare
+    `tonguetyped` already shows today in a real terminal (src/tui/mod.rs,
+    100 cols x 32 rows), approximated in HTML/CSS as a fixed-size
+    terminal-emulator grid. It is the "before" state for the settings-menu
+    SuperDesign work. Do NOT add anything here that the Rust dashboard does
+    not already render: no new rows, no new colors, no icons. The settings
+    menu redesign happens in separate SuperDesign drafts branched FROM a
+    project created with this file as the baseline, never by editing this
+    file toward the new design.
+
+    Terminal approximation: 100 cols x 32 rows, monospace, default terminal
+    background/foreground, with the 4 semantic ANSI colors the dashboard
+    actually uses (cyan/green/red/yellow) per .superdesign/design-system.md.
+    Ratatui's default Block border glyphs (BorderType::Plain: ─ │ ┌ ┐ └ ┘) are
+    reproduced literally as text, not CSS borders, since that is what the
+    terminal actually draws. The centered logo lines below carry their real
+    computed left margin as leading spaces, exactly as the Rust code emits
+    them at this width.
+  */
+  :root {
+    --bg: #0c0c0c;
+    --fg: #d4d4d4;
+    --cyan: #29e6e6;
+    --green: #2ecc71;
+    --red: #ff5c57;
+    --yellow: #f3f99d;
+    --col-width: 9.6px;
+    --row-height: 20px;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .terminal {
+    width: calc(100 * var(--col-width));
+    margin: 24px auto;
+    background: var(--bg);
+    font-family: "DejaVu Sans Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: var(--row-height);
+    white-space: pre;
+    padding: 8px 10px;
+    box-sizing: content-box;
+  }
+  .cyan-bold { color: var(--cyan); font-weight: bold; }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .yellow { color: var(--yellow); }
+  .selected-row { color: var(--cyan); font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="terminal">
+<span class="cyan-bold">  ████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗</span>
+<span class="cyan-bold">  ╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗</span>
+<span class="cyan-bold">     ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║</span>
+<span class="cyan-bold">     ██║   ██║   ██║██║╚██╗██║██║   ██║██║   ██║██╔══╝     ██║     ╚██╔╝  ██╔═══╝ ██╔══╝  ██║  ██║</span>
+<span class="cyan-bold">     ██║   ╚██████╔╝██║ ╚████║╚██████╔╝╚██████╔╝███████╗   ██║      ██║   ██║     ███████╗██████╔╝</span>
+<span class="cyan-bold">     ╚═╝    ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚═╝     ╚══════╝╚═════╝</span>
+<span>                                                                                                   </span>
+<span class="cyan-bold">                                ░▒▓  S P E A K .  T Y P E .  R E P E A T .  ▓▒░</span>
+<span>Daemon: <span class="red">not running</span>   Model: <span class="cyan-bold">whisper-small-q5_k_m</span></span>
+<span>┌Commands──────────────────────────────────────────────────────────────────────────────────────────┐</span>
+<span>│<span class="selected-row">&gt; setup          Configure TongueTyped interactively</span>                                              │</span>
+<span>│  daemon         Start the daemon process                                                         │</span>
+<span>│  toggle         Toggle recording on/off                                                          │</span>
+<span>│  cancel         Cancel current recording or processing                                           │</span>
+<span>│  status         Get daemon status                                                                │</span>
+<span>│  reload         Reload daemon configuration                                                      │</span>
+<span>│  last-result    Return the most recent transcription                                             │</span>
+<span>│  doctor         Run system diagnostics                                                           │</span>
+<span>│  shortcut-test  Bind the desktop shortcut and wait for you to actually press it                  │</span>
+<span>│  autostart      Manage desktop-session autostart                                                 │</span>
+<span>│  model          Manage the GGUF speech model catalog used for inference                          │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>│                                                                                                  │</span>
+<span>└──────────────────────────────────────────────────────────────────────────────────────────────────┘</span>
+<span>↑/↓ navigate  Enter select  q quit</span>
+</div>
+</body>
+</html>

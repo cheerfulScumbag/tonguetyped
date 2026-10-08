@@ -1,6 +1,10 @@
 use super::{Capabilities, ModelRequirement, ProvisionHandle, ReconfigureHandle, SetupOutcome};
-use crate::audio;
+use crate::audio::{self, level_to_ratio};
 use crate::config::{ActivationMode, Config, OutputMethod};
+use crate::overlay::{
+    POSITION_VALUES as OVERLAY_POSITION_VALUES, STREAMING_LABELS as OVERLAY_STREAMING_LABELS,
+    STYLE_LABELS as OVERLAY_STYLE_LABELS, STYLE_VALUES as OVERLAY_STYLE_VALUES,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -13,10 +17,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::io;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-const MIC_PREVIEW_SETTLE_TIME: Duration = Duration::from_millis(250);
 const LOGO: &str = r#"████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗
 ╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗
    ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║
@@ -27,34 +29,9 @@ const LOGO: &str = r#"████████╗ ██████╗ ██�
                               ░▒▓  S P E A K .  T Y P E .  R E P E A T .  ▓▒░"#;
 const LOGO_HEIGHT: u16 = 8;
 
-const ACTIVATION_LABELS: [&str; 2] = [
-    "Hold the shortcut while speaking",
-    "Press once to start and again to stop",
-];
-const STARTUP_LABELS: [&str; 2] = ["Start manually", "Start TongueTyped when you sign in"];
+const ACTIVATION_LABELS: [&str; 2] = crate::config::ACTIVATION_MODE_LABELS;
+const STARTUP_LABELS: [&str; 2] = crate::config::STARTUP_LABELS;
 const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
-const OVERLAY_POSITION_VALUES: [&str; 7] = [
-    "top-left",
-    "top",
-    "top-right",
-    "center",
-    "bottom-left",
-    "bottom",
-    "bottom-right",
-];
-// Mirrors Handy's (github.com/cjpais/Handy) distinction between a minimal
-// recording pill and a busier "Live" panel with a reactive waveform once
-// streaming transcription is active - see `OverlayConfig::streaming_indicator`
-// for why this is a synthetic animation rather than a true audio-reactive one.
-const OVERLAY_STREAMING_LABELS: [&str; 2] = [
-    "Simple pulse",
-    "Streaming waveform (live-capture indicator)",
-];
-// Matches `OverlayConfig::style`'s accepted values 1:1 (`overlay::style_for`'s
-// match arms) - these three were reviewed as Superdesign mockups and
-// approved by the captain.
-const OVERLAY_STYLE_VALUES: [&str; 3] = ["badge", "minimal", "pill"];
-const OVERLAY_STYLE_LABELS: [&str; 3] = ["Badge", "Minimal", "Pill"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepKind {
@@ -126,12 +103,7 @@ struct ConsoleState {
     shortcut_handle: Option<ReconfigureHandle>,
     shortcut_feedback: Option<Result<String, String>>,
     error: Option<String>,
-    mic_level: Arc<Mutex<f32>>,
-    mic_recorder: Option<audio::AudioRecorder>,
-    mic_recorder_index: Option<usize>,
-    mic_restart_at: Option<Instant>,
-    mic_error: Option<String>,
-    mic_stream_error: Arc<Mutex<Option<String>>>,
+    mic_monitor: audio::MicMonitor,
     download_queue: Vec<ModelRequirement>,
     download_active_label: Option<String>,
     download_handle: Option<ProvisionHandle>,
@@ -151,11 +123,10 @@ impl ConsoleState {
             .unwrap_or(0);
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
-        let output_labels = output_labels(&capabilities);
+        let output_labels = capabilities.output_labels();
         let output_selection =
             usize::from(config.output.method == OutputMethod::Type && output_labels.len() > 1);
-        let mut backend_values = vec!["auto".to_string()];
-        backend_values.extend(capabilities.typing_backends.iter().cloned());
+        let backend_values = capabilities.typing_backend_values();
         let backend_selection = backend_values
             .iter()
             .position(|backend| backend == &config.output.typing_backend)
@@ -194,12 +165,7 @@ impl ConsoleState {
             shortcut_handle: None,
             shortcut_feedback: None,
             error: None,
-            mic_level: Arc::new(Mutex::new(0.0)),
-            mic_recorder: None,
-            mic_recorder_index: None,
-            mic_restart_at: None,
-            mic_error: None,
-            mic_stream_error: Arc::new(Mutex::new(None)),
+            mic_monitor: audio::MicMonitor::new(),
             download_queue: Vec::new(),
             download_active_label: None,
             download_handle: None,
@@ -521,75 +487,20 @@ impl ConsoleState {
     /// list, not just the one last confirmed, so switching the selection is audible
     /// feedback before the user commits to it.
     fn sync_mic_monitor(&mut self) {
-        self.mic_restart_at = None;
         if self.step != StepKind::Microphone {
-            self.mic_recorder = None;
-            self.mic_recorder_index = None;
-            self.mic_error = None;
+            self.mic_monitor.stop();
             return;
-        }
-        if self.mic_recorder_index == Some(self.mic_selection) {
-            return;
-        }
-        self.mic_recorder = None;
-        if let Ok(mut level) = self.mic_level.lock() {
-            *level = 0.0;
-        }
-        self.mic_error = None;
-        if let Ok(mut guard) = self.mic_stream_error.lock() {
-            *guard = None;
         }
         let device_name = self.capabilities.microphones[self.mic_selection].0.clone();
-        let level = self.mic_level.clone();
-        let callback: audio::LevelCallback = Arc::new(move |value| {
-            if let Ok(mut guard) = level.lock() {
-                *guard = value;
-            }
-        });
-        let stream_error = self.mic_stream_error.clone();
-        let error_callback: audio::ErrorCallback = Arc::new(move |message| {
-            if let Ok(mut guard) = stream_error.lock() {
-                *guard = Some(message);
-            }
-        });
-        match audio::AudioRecorder::new(&device_name, 16_000, Some(callback), Some(error_callback))
-        {
-            Ok(mut recorder) => match recorder.start() {
-                Ok(()) => self.mic_recorder = Some(recorder),
-                Err(err) => self.mic_error = Some(err.to_string()),
-            },
-            Err(err) => self.mic_error = Some(err.to_string()),
-        }
-        self.mic_recorder_index = Some(self.mic_selection);
+        self.mic_monitor.sync(self.mic_selection, &device_name);
     }
 
     fn defer_mic_monitor(&mut self) {
-        self.mic_recorder = None;
-        self.mic_recorder_index = None;
-        self.mic_error = None;
-        if let Ok(mut guard) = self.mic_stream_error.lock() {
-            *guard = None;
-        }
-        if let Ok(mut level) = self.mic_level.lock() {
-            *level = 0.0;
-        }
-        self.mic_restart_at = Some(Instant::now() + MIC_PREVIEW_SETTLE_TIME);
+        self.mic_monitor.defer_restart();
     }
 
     fn refresh_mic_monitor(&mut self) {
-        let stream_error = self
-            .mic_stream_error
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take());
-        if let Some(message) = stream_error {
-            self.mic_error = Some(message);
-            self.mic_recorder = None;
-        }
-        if self
-            .mic_restart_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+        if self.mic_monitor.poll() {
             self.sync_mic_monitor();
         }
     }
@@ -906,7 +817,7 @@ impl ConsoleState {
             chunks[0],
         );
 
-        if let Some(error) = &self.mic_error {
+        if let Some(error) = self.mic_monitor.error() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     format!("Unavailable: {error}"),
@@ -918,7 +829,7 @@ impl ConsoleState {
             return;
         }
 
-        let level = self.mic_level.lock().map(|guard| *guard).unwrap_or(0.0);
+        let level = self.mic_monitor.level();
         let ratio = level_to_ratio(level);
         let color = if ratio > 0.85 {
             Color::Red
@@ -1033,14 +944,6 @@ impl ConsoleState {
     }
 }
 
-fn output_labels(capabilities: &Capabilities) -> Vec<String> {
-    let mut labels = vec!["Keep transcripts in TongueTyped".to_string()];
-    if !capabilities.typing_backends.is_empty() {
-        labels.push("Type into the focused application".to_string());
-    }
-    labels
-}
-
 fn list_paragraph<'a>(
     labels: &[String],
     selected: usize,
@@ -1070,17 +973,10 @@ fn list_paragraph<'a>(
         .scroll((scroll, 0))
 }
 
-fn level_to_ratio(level: f32) -> f64 {
-    if level <= 0.0 {
-        return 0.0;
-    }
-    let db = 20.0 * level.log10();
-    ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn no_mic_capabilities() -> Capabilities {
         Capabilities {
@@ -1236,22 +1132,6 @@ mod tests {
     }
 
     #[test]
-    fn silence_maps_to_empty_gauge() {
-        assert_eq!(level_to_ratio(0.0), 0.0);
-    }
-
-    #[test]
-    fn full_scale_maps_to_full_gauge() {
-        assert_eq!(level_to_ratio(1.0), 1.0);
-    }
-
-    #[test]
-    fn quiet_signal_is_between_bounds() {
-        let ratio = level_to_ratio(0.01);
-        assert!(ratio > 0.0 && ratio < 1.0);
-    }
-
-    #[test]
     fn rapid_mic_navigation_defers_preview_restart_until_selection_settles() {
         let capabilities = Capabilities {
             microphones: vec![
@@ -1263,14 +1143,14 @@ mod tests {
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
         state.step = StepKind::Microphone;
-        state.mic_recorder_index = Some(0);
+        state.mic_monitor.simulate_active_preview(0);
 
         state.move_selection(1);
         state.move_selection(1);
 
         assert_eq!(state.mic_selection, 2);
-        assert_eq!(state.mic_recorder_index, None);
-        assert!(state.mic_restart_at.is_some());
+        assert_eq!(state.mic_monitor.active_index(), None);
+        assert!(state.mic_monitor.restart_pending());
     }
 
     #[test]
@@ -1281,17 +1161,17 @@ mod tests {
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
         state.step = StepKind::Microphone;
-        state.mic_recorder_index = Some(0);
+        state.mic_monitor.simulate_active_preview(0);
 
         // Simulate what AudioRecorder's error_callback does from its background
         // audio thread when a device disconnects mid-stream.
-        *state.mic_stream_error.lock().unwrap() = Some("Device disconnected".to_string());
+        state.mic_monitor.inject_stream_error("Device disconnected");
 
         state.refresh_mic_monitor();
 
-        assert_eq!(state.mic_error, Some("Device disconnected".to_string()));
-        assert!(state.mic_recorder.is_none());
-        assert!(state.mic_stream_error.lock().unwrap().is_none());
+        assert_eq!(state.mic_monitor.error(), Some("Device disconnected"));
+        assert!(!state.mic_monitor.has_open_stream());
+        assert!(!state.mic_monitor.has_pending_stream_error());
     }
 
     #[test]
@@ -1305,19 +1185,21 @@ mod tests {
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
         state.step = StepKind::Microphone;
-        state.mic_recorder_index = Some(0);
+        state.mic_monitor.simulate_active_preview(0);
 
         // Device 0 reports an async error from its background audio thread, but
         // the user navigates to device 1 before refresh_mic_monitor() drains it.
-        *state.mic_stream_error.lock().unwrap() = Some("Device 0 disconnected".to_string());
+        state
+            .mic_monitor
+            .inject_stream_error("Device 0 disconnected");
         state.move_selection(1);
 
         assert_eq!(state.mic_selection, 1);
-        assert!(state.mic_stream_error.lock().unwrap().is_none());
+        assert!(!state.mic_monitor.has_pending_stream_error());
 
         state.refresh_mic_monitor();
 
-        assert_eq!(state.mic_error, None);
+        assert_eq!(state.mic_monitor.error(), None);
     }
 
     #[test]

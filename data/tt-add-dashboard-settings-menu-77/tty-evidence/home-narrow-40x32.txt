@@ -1,0 +1,32 @@
+              TONGUETYPED
+          Speak. Type. Repeat.
+Daemon: not running   Model: whisper-sma
+┌Settings──────────────────────────────┐
+│> Model              whisper-small-q5_│
+│  Microphone         System default mi│
+│  Activation         hold             │
+│  Shortcut           Super+O          │
+│  Transcript output  keep in TongueTyp│
+│  Typing backend     auto             │
+│  Startup            start manually   │
+│  Overlay            enabled, top-righ│
+└──────────────────────────────────────┘
+┌Commands──────────────────────────────┐
+│  setup          Configure TongueTyped│
+│  daemon         Start the daemon proc│
+│  toggle         Toggle recording on/o│
+│  cancel         Cancel current record│
+│  status         Get daemon status    │
+│  reload         Reload daemon configu│
+│  last-result    Return the most recen│
+│  doctor         Run system diagnostic│
+│  shortcut-test  Bind the desktop shor│
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘
+↑/↓ navigate  Enter select  q quit

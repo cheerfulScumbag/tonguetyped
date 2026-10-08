@@ -3,6 +3,13 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use rubato::{FftFixedIn, Resampler};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long the microphone preview waits after the highlighted device
+/// changes before opening the new stream: rapid navigation is not meaningful
+/// audible feedback, only the settled choice is, and tearing streams down and
+/// recreating them on every keystroke produced real device-open churn.
+pub const MIC_PREVIEW_SETTLE_TIME: Duration = Duration::from_millis(250);
 
 pub struct AudioDevice {
     pub id: String,
@@ -334,6 +341,168 @@ fn compute_rms(samples: &[f32]) -> f32 {
     mean_sq.sqrt()
 }
 
+/// Maps a raw RMS level to the 0..1 fraction an input-level gauge shows,
+/// on a -60 dB..0 dB scale. Shared by the setup console and the dashboard's
+/// Microphone screen so both gauges respond identically.
+pub fn level_to_ratio(level: f32) -> f64 {
+    if level <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * level.log10();
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f64
+}
+
+/// Owns the live microphone-preview stream for a caller-owned device list,
+/// shared by the setup console's Microphone step and the dashboard's
+/// Microphone screen so the settle-delay, async-error-routing and
+/// stream-restart behavior cannot drift between the two UIs.
+///
+/// The caller drives it like this: `defer_restart()` on every highlight
+/// change, `poll()` once per frame, `sync()` with the currently highlighted
+/// device when `poll()` reports the settle delay elapsed (or when entering
+/// the screen), and `stop()` when leaving it.
+#[derive(Default)]
+pub struct MicMonitor {
+    level: Arc<Mutex<f32>>,
+    stream_error: Arc<Mutex<Option<String>>>,
+    recorder: Option<AudioRecorder>,
+    active_index: Option<usize>,
+    restart_at: Option<Instant>,
+    error: Option<String>,
+}
+
+impl MicMonitor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Index of the device whose preview stream is currently bound, if any.
+    pub fn active_index(&self) -> Option<usize> {
+        self.active_index
+    }
+
+    /// Whether a deferred restart is waiting out the settle delay.
+    pub fn restart_pending(&self) -> bool {
+        self.restart_at.is_some()
+    }
+
+    pub fn level(&self) -> f32 {
+        self.level.lock().map(|guard| *guard).unwrap_or(0.0)
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Stops the preview and schedules a restart after the settle delay.
+    pub fn defer_restart(&mut self) {
+        self.recorder = None;
+        self.active_index = None;
+        self.error = None;
+        if let Ok(mut guard) = self.stream_error.lock() {
+            *guard = None;
+        }
+        if let Ok(mut level) = self.level.lock() {
+            *level = 0.0;
+        }
+        self.restart_at = Some(Instant::now() + MIC_PREVIEW_SETTLE_TIME);
+    }
+
+    /// Starts (or keeps) the preview on `index`/`device_id`, cancelling any
+    /// deferred restart. A device whose stream cannot be opened surfaces the
+    /// failure through `error()` instead of failing the whole UI.
+    pub fn sync(&mut self, index: usize, device_id: &str) {
+        self.restart_at = None;
+        if self.active_index == Some(index) {
+            return;
+        }
+        self.recorder = None;
+        self.active_index = None;
+        self.error = None;
+        if let Ok(mut level) = self.level.lock() {
+            *level = 0.0;
+        }
+        if let Ok(mut guard) = self.stream_error.lock() {
+            *guard = None;
+        }
+        let level = self.level.clone();
+        let callback: LevelCallback = Arc::new(move |value| {
+            if let Ok(mut guard) = level.lock() {
+                *guard = value;
+            }
+        });
+        let stream_error = self.stream_error.clone();
+        let error_callback: ErrorCallback = Arc::new(move |message| {
+            if let Ok(mut guard) = stream_error.lock() {
+                *guard = Some(message);
+            }
+        });
+        match AudioRecorder::new(device_id, 16_000, Some(callback), Some(error_callback)) {
+            Ok(mut recorder) => match recorder.start() {
+                Ok(()) => self.recorder = Some(recorder),
+                Err(err) => self.error = Some(err.to_string()),
+            },
+            Err(err) => self.error = Some(err.to_string()),
+        }
+        self.active_index = Some(index);
+    }
+
+    /// Drops the preview stream entirely (leaving the screen or step).
+    pub fn stop(&mut self) {
+        self.restart_at = None;
+        self.recorder = None;
+        self.active_index = None;
+        self.error = None;
+        if let Ok(mut guard) = self.stream_error.lock() {
+            *guard = None;
+        }
+        if let Ok(mut level) = self.level.lock() {
+            *level = 0.0;
+        }
+    }
+
+    /// Per-frame maintenance: routes a background stream error into
+    /// `error()`, and reports whether a deferred restart's settle delay has
+    /// elapsed. The monitor cannot know the caller's device list, so on
+    /// `true` the caller calls `sync` with the currently highlighted device.
+    pub fn poll(&mut self) -> bool {
+        let stream_error = self
+            .stream_error
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some(message) = stream_error {
+            self.error = Some(message);
+            self.recorder = None;
+        }
+        self.restart_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
+#[cfg(test)]
+impl MicMonitor {
+    /// Pretends a preview stream is already open on `index`, so tests can
+    /// exercise navigation/error routing without a real audio device.
+    pub(crate) fn simulate_active_preview(&mut self, index: usize) {
+        self.active_index = Some(index);
+    }
+
+    /// Simulates what `AudioRecorder`'s error callback does from its
+    /// background audio thread when a device disconnects mid-stream.
+    pub(crate) fn inject_stream_error(&mut self, message: &str) {
+        *self.stream_error.lock().unwrap() = Some(message.to_string());
+    }
+
+    pub(crate) fn has_pending_stream_error(&self) -> bool {
+        self.stream_error.lock().unwrap().is_some()
+    }
+
+    pub(crate) fn has_open_stream(&self) -> bool {
+        self.recorder.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +512,22 @@ mod tests {
         let samples = vec![0.0f32; 100];
         let rms = compute_rms(&samples);
         assert_eq!(rms, 0.0);
+    }
+
+    #[test]
+    fn silence_maps_to_empty_gauge() {
+        assert_eq!(level_to_ratio(0.0), 0.0);
+    }
+
+    #[test]
+    fn full_scale_maps_to_full_gauge() {
+        assert_eq!(level_to_ratio(1.0), 1.0);
+    }
+
+    #[test]
+    fn quiet_signal_is_between_bounds() {
+        let ratio = level_to_ratio(0.01);
+        assert!(ratio > 0.0 && ratio < 1.0);
     }
 
     #[test]

@@ -1,0 +1,32 @@
+┌Microphone────────────────────────────────────────────────────────────────────────────────────────┐
+│> System default microphone                                                                       │
+│  Discard all samples (playback) or generate zero samples (capture)                               │
+│  PipeWire Sound Server                                                                           │
+│  Default ALSA Output (currently PipeWire Media Server) (current default)                         │
+│  USB Microphone, USB Audio                                                                       │
+│  USB Microphone, USB Audio                                                                       │
+│  USB Microphone, USB Audio                                                                       │
+│  USB Microphone, USB Audio                                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Input level───────────────────────────────────────────────────────────────────────────────────────┐
+│Unavailable: failed to query supported configs                                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑/↓ choose  Enter apply  Esc back  q quit
