@@ -91,14 +91,8 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
 
     // Without a loaded model, report what would be used: the pinned backend
     // (never substituted by another), or the auto chain's capability probe.
-    let backend = match (active_backend, preference) {
-        (Some(backend), _) => backend,
-        (None, crate::inference::BackendPreference::Only(_)) => crate::inference::BackendInfo {
-            backend: format!("transcribe.cpp/{}", config.model.preferred_backend),
-            device: "not loaded".to_string(),
-        },
-        (None, crate::inference::BackendPreference::Auto) => crate::inference::backend_info(),
-    };
+    let backend =
+        active_backend.unwrap_or_else(|| crate::inference::preferred_backend_info(preference));
 
     Ok(DoctorReport {
         compositor,

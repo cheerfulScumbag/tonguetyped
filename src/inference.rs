@@ -203,6 +203,35 @@ pub fn cached_backend_info() -> BackendInfo {
         })
 }
 
+/// The backend a preference would use when no model has actually loaded yet,
+/// for reporting: a pinned preference reports that backend by name (it is
+/// never substituted by another), while `auto` reports the hardware-capability
+/// probe. Blocks on the first call for `auto`, exactly like `backend_info`.
+pub fn preferred_backend_info(preference: BackendPreference) -> BackendInfo {
+    match preference {
+        BackendPreference::Only(backend) => pinned_backend_info(backend),
+        BackendPreference::Auto => backend_info(),
+    }
+}
+
+/// Non-blocking counterpart to `preferred_backend_info`, for hot paths.
+pub fn cached_preferred_backend_info(preference: BackendPreference) -> BackendInfo {
+    match preference {
+        BackendPreference::Only(backend) => pinned_backend_info(backend),
+        BackendPreference::Auto => cached_backend_info(),
+    }
+}
+
+fn pinned_backend_info(backend: transcribe_cpp::Backend) -> BackendInfo {
+    BackendInfo {
+        backend: format!(
+            "transcribe.cpp/{}",
+            selectable_backend_for(backend).map_or("unknown", |entry| entry.name)
+        ),
+        device: "not loaded".to_string(),
+    }
+}
+
 /// Whether one backend kind can be used on this build and host.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct BackendAvailability {
@@ -578,5 +607,19 @@ mod tests {
         let engine = engine(BackendPreference::Auto);
         assert!(engine.active_model_path().is_none());
         assert!(engine.active_backend_info().is_none());
+    }
+
+    #[test]
+    fn pinned_preference_reports_its_own_backend_before_loading() {
+        for (name, expected) in [("cpu", "transcribe.cpp/cpu"), ("vulkan", "transcribe.cpp/vulkan")] {
+            let preference = BackendPreference::parse(name).unwrap();
+            for info in [
+                preferred_backend_info(preference),
+                cached_preferred_backend_info(preference),
+            ] {
+                assert_eq!(info.backend, expected);
+                assert_eq!(info.device, "not loaded");
+            }
+        }
     }
 }

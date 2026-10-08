@@ -1096,8 +1096,11 @@ fn reserve_recording(
     inner.signal_tx = Some(signal_tx);
     inner.last_error = None;
     inner.worker_active = true;
+    let preference =
+        crate::inference::BackendPreference::parse(&inner.config.model.preferred_backend)?;
     let timing = Arc::new(Mutex::new(LatencyOperation::new(
         inner.config.model.active_model.clone(),
+        preference,
         clock,
     )));
     inner.active_timing = Some(Arc::clone(&timing));
