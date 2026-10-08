@@ -7,7 +7,11 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "tonguetyped", version, about = "Linux dictation application")]
+#[command(
+    name = "tonguetyped",
+    version = crate::build_info::VERSION,
+    about = "Linux dictation application"
+)]
 pub struct Cli {
     /// Running with no subcommand opens the interactive dashboard
     /// (`crate::tui::run`) instead of erroring - every subcommand below

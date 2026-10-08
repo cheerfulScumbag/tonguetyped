@@ -112,6 +112,9 @@
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
         BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.glibc.dev}/include";
         CMAKE_POLICY_VERSION_MINIMUM = "3.5";
+        # `src = ./.` copies the tree without `.git`, so build.rs can't run
+        # git itself; hand it the flake's commit for `--version`/`doctor`.
+        TONGUETYPED_BUILD_COMMIT = self.shortRev or self.dirtyShortRev or "unknown";
         ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
         ORT_PREFER_DYNAMIC_LINK = "1";
 

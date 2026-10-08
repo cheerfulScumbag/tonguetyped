@@ -6,7 +6,7 @@
 //! daemon process.
 
 use crate::config::Config;
-use crate::doctor::DoctorReport;
+use crate::doctor::{DaemonBuild, DoctorReport};
 use crate::ipc::{self, Request, Response};
 use crate::model::{DownloadManager, DownloadOutcome, ProgressCallback};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -291,9 +291,16 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
             operation_error,
             shortcut_status,
             activation_error,
+            build,
         } => {
             let mut lines = vec![
                 line(format!("state:            {state}")),
+                line(format!(
+                    "daemon build:     {}",
+                    build
+                        .as_deref()
+                        .unwrap_or("unknown (predates build reporting)")
+                )),
                 line(format!("activation mode:  {activation_mode}")),
                 line(format!(
                     "shortcut status:  {}",
@@ -323,6 +330,8 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
 /// printed it, shared with the dashboard's Doctor screen.
 pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
     let mut lines = vec![
+        line(format!("build:          {}", report.build)),
+        daemon_build_line(&report.build, &report.daemon_build),
         line(format!("compositor:     {}", report.compositor)),
         line(format!(
             "overlay:        {}",
@@ -358,6 +367,10 @@ pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
         line(format!("model path:     {}", report.model_path)),
         line(format!("backend:        {}", report.inference_backend)),
         line(format!("device:         {}", report.inference_device)),
+        line(format!(
+            "backends:       {}",
+            format_backend_availability(&report.backend_availability)
+        )),
     ];
     if let Some(error) = &report.model_error {
         lines.push(error_line(format!("model error:    {error}")));
@@ -391,6 +404,47 @@ pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
         lines.push(error_line(format!("shortcut error:  {error}")));
     }
     lines
+}
+
+/// Compares the running daemon's build with this binary's, so a daemon left
+/// running from an older build is called out instead of silently trusted.
+fn daemon_build_line(own_build: &str, daemon_build: &DaemonBuild) -> OutputLine {
+    const RESTART: &str = "run `tonguetyped daemon restart` to pick up this build";
+    match daemon_build {
+        DaemonBuild::NotRunning => line("daemon build:   not running"),
+        DaemonBuild::Unreported => error_line(format!(
+            "daemon build:   unknown - the daemon predates build reporting, so it is an \
+             older build; {RESTART}"
+        )),
+        DaemonBuild::Reported(build) if build != own_build => error_line(format!(
+            "daemon build:   {build} - differs from this binary ({own_build}); {RESTART}"
+        )),
+        DaemonBuild::Reported(build) if own_build.ends_with("(unknown)") => line(format!(
+            "daemon build:   {build} (same version, but neither records a git commit, so \
+             cannot confirm it is the same build)"
+        )),
+        DaemonBuild::Reported(build) => {
+            line(format!("daemon build:   {build} (matches this binary)"))
+        }
+    }
+}
+
+/// Renders every backend kind's availability in load-priority order, e.g.
+/// `available: vulkan, cpu; unavailable: cuda, rocm, metal`.
+fn format_backend_availability(backends: &[crate::inference::BackendAvailability]) -> String {
+    let kinds = |available: bool| {
+        let kinds: Vec<&str> = backends
+            .iter()
+            .filter(|backend| backend.available == available)
+            .map(|backend| backend.kind.as_str())
+            .collect();
+        if kinds.is_empty() {
+            "none".to_string()
+        } else {
+            kinds.join(", ")
+        }
+    };
+    format!("available: {}; unavailable: {}", kinds(true), kinds(false))
 }
 
 #[cfg(test)]
@@ -433,6 +487,62 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn daemon_build_mismatch_is_flagged_with_a_restart_hint() {
+        let own = "0.1.0 (b2c3d4e)";
+        let older = daemon_build_line(own, &DaemonBuild::Reported("0.1.0 (a1b2c3d)".into()));
+        assert!(older.is_error);
+        assert!(older.text.contains("differs from this binary"));
+        assert!(older.text.contains("tonguetyped daemon restart"));
+
+        let unreported = daemon_build_line(own, &DaemonBuild::Unreported);
+        assert!(unreported.is_error);
+        assert!(unreported.text.contains("older build"));
+
+        let same = daemon_build_line(own, &DaemonBuild::Reported(own.into()));
+        assert!(!same.is_error);
+        assert!(same.text.contains("matches this binary"));
+
+        let not_running = daemon_build_line(own, &DaemonBuild::NotRunning);
+        assert!(!not_running.is_error);
+        assert!(not_running.text.contains("not running"));
+    }
+
+    #[test]
+    fn daemon_build_without_commit_is_not_claimed_to_match() {
+        let own = "0.1.0 (unknown)";
+        let line = daemon_build_line(own, &DaemonBuild::Reported(own.into()));
+        assert!(!line.text.contains("matches this binary"));
+        assert!(line.text.contains("cannot confirm"));
+    }
+
+    #[test]
+    fn backend_availability_lists_both_available_and_unavailable_kinds() {
+        let backend = |kind: &str, available| crate::inference::BackendAvailability {
+            kind: kind.to_string(),
+            available,
+        };
+        assert_eq!(
+            format_backend_availability(&[
+                backend("cuda", false),
+                backend("vulkan", true),
+                backend("cpu", true),
+            ]),
+            "available: vulkan, cpu; unavailable: cuda"
+        );
+        assert_eq!(
+            format_backend_availability(&[backend("cpu", true)]),
+            "available: cpu; unavailable: none"
+        );
+    }
+
+    #[test]
+    fn status_without_build_from_an_older_daemon_still_decodes() {
+        let frame = r#"{"type":"status","state":"idle","activation_mode":"hold","operation_error":null,"shortcut_status":"available","activation_error":null}"#;
+        let response: Response = ipc::decode_frame(frame).unwrap();
+        assert!(matches!(response, Response::Status { build: None, .. }));
     }
 
     #[test]

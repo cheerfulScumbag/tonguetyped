@@ -35,6 +35,11 @@ pub enum Response {
         operation_error: Option<String>,
         shortcut_status: ShortcutStatus,
         activation_error: Option<String>,
+        /// The daemon's `build_info::VERSION`. `None` when talking to a daemon
+        /// built before it started reporting this, which by definition is an
+        /// older build than any client that knows about the field.
+        #[serde(default)]
+        build: Option<String>,
     },
     LastResult {
         text: String,

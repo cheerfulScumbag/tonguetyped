@@ -1,6 +1,7 @@
 pub mod activation;
 pub mod audio;
 pub mod autostart;
+pub mod build_info;
 pub mod catalog;
 pub mod cli;
 pub mod commands;
