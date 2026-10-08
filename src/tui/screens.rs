@@ -538,7 +538,7 @@ fn next_value(values: &[&str], current: &str) -> String {
     values[(index + 1) % values.len()].to_string()
 }
 
-fn selection_style(selected: bool) -> Style {
+pub(super) fn selection_style(selected: bool) -> Style {
     if selected {
         Style::default()
             .fg(Color::Cyan)

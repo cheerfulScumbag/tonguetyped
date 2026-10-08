@@ -21,6 +21,8 @@
 mod logo;
 mod screens;
 
+use screens::selection_style;
+
 use crate::cli::Cli;
 use crate::commands::{self, OutputLine};
 use crate::config::{Config, OutputMethod};
@@ -1343,16 +1345,6 @@ impl App {
             Paragraph::new("↑/↓ choose  Enter change  Esc back  q quit"),
             chunks[2],
         );
-    }
-}
-
-fn selection_style(selected: bool) -> Style {
-    if selected {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
     }
 }
 
