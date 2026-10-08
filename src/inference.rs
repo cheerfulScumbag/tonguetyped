@@ -611,7 +611,10 @@ mod tests {
 
     #[test]
     fn pinned_preference_reports_its_own_backend_before_loading() {
-        for (name, expected) in [("cpu", "transcribe.cpp/cpu"), ("vulkan", "transcribe.cpp/vulkan")] {
+        for (name, expected) in [
+            ("cpu", "transcribe.cpp/cpu"),
+            ("vulkan", "transcribe.cpp/vulkan"),
+        ] {
             let preference = BackendPreference::parse(name).unwrap();
             for info in [
                 preferred_backend_info(preference),
