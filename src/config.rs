@@ -652,10 +652,17 @@ fn atomic_write_at(path: &Path, temporary: &Path, content: &[u8]) -> anyhow::Res
     result
 }
 
+/// Serializes tests that redirect config resolution by setting the
+/// process-wide `XDG_CONFIG_HOME` env var (`Config::load`/`config_path`
+/// resolve it via `directories::BaseDirs`), so tests in other modules that
+/// need a temp configuration directory can share the same lock instead of
+/// racing this one.
+#[cfg(test)]
+pub(crate) static XDG_CONFIG_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     #[test]
     fn defaults_are_valid_and_match_stage_one_contract() {
@@ -776,11 +783,6 @@ mod tests {
         let config: Config = raw.try_into().unwrap();
         assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
     }
-
-    // `Config::load`/`config_path` resolve `XDG_CONFIG_HOME` via
-    // `directories::BaseDirs`, a process-wide env var - same shape as
-    // `setup.rs`'s `XDG_DATA_HOME_LOCK` guarding `XDG_DATA_HOME`.
-    static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn load_migrates_and_persists_a_pre_consolidation_config_file_on_disk() {

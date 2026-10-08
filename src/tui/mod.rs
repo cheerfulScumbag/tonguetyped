@@ -335,6 +335,14 @@ impl App {
             title: title.to_string(),
             lines,
         };
+        // A background action may have written config.toml itself
+        // (`commands::activate_model`'s `commands::select_model` is the one
+        // such writer). Refresh the in-memory config so a later
+        // `save_settings_config` serializes the on-disk state instead of
+        // clobbering it with a stale copy.
+        if let Ok(reloaded) = Config::load() {
+            self.config = reloaded;
+        }
     }
 
     /// Per-frame maintenance for screens with background work: the
@@ -1652,5 +1660,57 @@ mod tests {
             app.shortcut_test.is_none(),
             "a delivered result must clear the handle"
         );
+    }
+
+    #[test]
+    fn a_settings_save_after_model_activation_does_not_revert_the_active_model() {
+        let _guard = crate::config::XDG_CONFIG_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-tui-model-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("tonguetyped")).unwrap();
+
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+
+        let initial = Config::default();
+        initial.save().unwrap();
+        let mut app = App::new(initial);
+
+        // `commands::activate_model` saves a different model to config.toml
+        // behind the dashboard's back (via `commands::select_model`) before
+        // the model-activation background action reports completion.
+        let activated = "whisper-tiny-q5_k_m";
+        let mut behind_the_back = Config::default();
+        behind_the_back.model.active_model = activated.to_string();
+        behind_the_back.save().unwrap();
+
+        app.apply_pending_result(Ok(Vec::new()));
+        assert_eq!(
+            app.config.model.active_model, activated,
+            "the dashboard must refresh its in-memory config after a background write"
+        );
+
+        // Any later settings save must persist the activated model rather than
+        // reverting it to the pre-activation value.
+        app.save_settings_config();
+        assert_eq!(
+            Config::load().unwrap().model.active_model,
+            activated,
+            "a settings save must not clobber the model activated behind the dashboard's back"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
