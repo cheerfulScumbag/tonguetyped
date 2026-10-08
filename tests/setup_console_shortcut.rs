@@ -152,20 +152,25 @@ impl Drop for Session {
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 const KEY_CTRL_R: &[u8] = b"\x12";
+const KEY_BACKSPACE: &[u8] = b"\x7f";
 
-#[test]
-fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
-    let sandbox = Sandbox::new("reconfigure");
-    let mut session = Session::spawn(&sandbox, 100, 32);
-
+fn advance_to_shortcut_step(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
     session.send(KEY_ENTER); // Model -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
     session.send(KEY_ENTER); // Microphone -> Activation
     session.wait_for("Activation", Duration::from_secs(5));
     session.send(KEY_ENTER); // Activation -> Shortcut
+    session.wait_for("Shortcut", Duration::from_secs(5));
+}
 
-    let shortcut_screen = session.wait_for("Shortcut", Duration::from_secs(5));
+#[test]
+fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
+    let sandbox = Sandbox::new("reconfigure");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+
+    advance_to_shortcut_step(&mut session);
+    let shortcut_screen = session.visible_text();
     assert!(
         shortcut_screen.contains("Ctrl+R set via system dialog"),
         "Shortcut step hint should advertise the new Ctrl+R reconfigure path:\n{shortcut_screen}"
@@ -203,5 +208,56 @@ fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
     assert!(
         revisited_screen.contains("Reconfigure failed:"),
         "feedback from the last reconfigure attempt should still be visible on re-entry:\n{revisited_screen}"
+    );
+}
+
+#[test]
+fn pty_shortcut_step_accepts_a_bare_key_with_no_modifier() {
+    let sandbox = Sandbox::new("bare-key");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+
+    advance_to_shortcut_step(&mut session);
+
+    // Clear the pre-filled default ("Super+O") and type a bare key with no
+    // modifier at all, exactly the "Right Alt" case the captain asked for.
+    for _ in 0.."Super+O".len() {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(b"Alt_R");
+    session.send(KEY_ENTER);
+
+    // Advancing past Shortcut must succeed with no "Invalid shortcut"
+    // error - the underlying portal has no modifier requirement.
+    let next_screen = session.wait_for("Transcript output", Duration::from_secs(5));
+    assert!(
+        !next_screen.contains("Invalid shortcut"),
+        "a bare key with no modifier must be accepted:\n{next_screen}"
+    );
+}
+
+#[test]
+fn pty_shortcut_step_rejects_a_dangling_modifier() {
+    let sandbox = Sandbox::new("dangling-modifier");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+
+    advance_to_shortcut_step(&mut session);
+
+    // Loosening the no-modifier case must not loosen validation of a
+    // genuinely malformed shortcut (a modifier with no key after it).
+    for _ in 0.."Super+O".len() {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(b"Ctrl+");
+    session.send(KEY_ENTER);
+
+    let error_screen = session.wait_for("Invalid shortcut", Duration::from_secs(5));
+    assert!(
+        error_screen.contains("activation.keybind must contain a key"),
+        "should surface the specific validation error:\n{error_screen}"
+    );
+    // Must stay on the Shortcut step rather than silently advancing.
+    assert!(
+        error_screen.contains("Shortcut"),
+        "a rejected shortcut must keep the user on the Shortcut step:\n{error_screen}"
     );
 }

@@ -731,7 +731,7 @@ impl ConsoleState {
                 "Waiting for the system shortcut dialog...  Esc back"
             }
             StepKind::Shortcut => {
-                "Type modifiers+key (e.g. Ctrl+Shift+Space)  Ctrl+R set via system dialog  Enter confirm  Esc back"
+                "Type key or modifiers+key (e.g. Ctrl+Shift+Space, F13)  Ctrl+R set via system dialog  Enter confirm  Esc back"
             }
             StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
             StepKind::Downloading if !self.downloads_finished() => "Fetching...  Esc back  q quit",
@@ -961,7 +961,8 @@ impl ConsoleState {
             }
         } else {
             lines.push(Line::from(
-                "Combine modifiers (Ctrl, Alt, Shift, Super) with a key, e.g. Ctrl+Shift+Space - \
+                "Type a key, optionally with modifiers (Ctrl, Alt, Shift, Super), e.g. \
+                 Ctrl+Shift+Space, or a bare key such as F13 or Alt_R (Right Alt) - \
                  only used the first time this shortcut is ever bound.",
             ));
             lines.push(Line::from(

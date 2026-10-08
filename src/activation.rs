@@ -192,9 +192,9 @@ pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
     let key = parts
         .pop()
         .filter(|key| !key.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("activation.keybind must contain modifiers and a key"))?;
-    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
-        anyhow::bail!("activation.keybind must contain modifiers and a key");
+        .ok_or_else(|| anyhow::anyhow!("activation.keybind must contain a key"))?;
+    if parts.iter().any(|part| part.is_empty()) {
+        anyhow::bail!("activation.keybind has an empty modifier");
     }
 
     let mut modifiers = Vec::new();
@@ -211,11 +211,11 @@ pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
         }
         modifiers.push(modifier);
     }
-    Ok(format!(
-        "{}+{}",
-        modifiers.join("+"),
-        key.to_ascii_lowercase()
-    ))
+    let key = key.to_ascii_lowercase();
+    if modifiers.is_empty() {
+        return Ok(key);
+    }
+    Ok(format!("{}+{key}", modifiers.join("+")))
 }
 
 pub async fn listen(
@@ -334,6 +334,18 @@ mod tests {
         assert!(portal_trigger("Hyper+O").is_err());
         assert!(portal_trigger("Meta+O").is_err());
         assert!(portal_trigger("Control+O").is_err());
+    }
+
+    #[test]
+    fn accepts_bare_key_without_modifier() {
+        assert_eq!(portal_trigger("F13").unwrap(), "f13");
+        assert_eq!(portal_trigger("Alt_R").unwrap(), "alt_r");
+        assert_eq!(portal_trigger(" F13 ").unwrap(), "f13");
+        assert!(portal_trigger("").is_err());
+        assert!(portal_trigger("+").is_err());
+        assert!(portal_trigger("+F13").is_err());
+        assert!(portal_trigger("Ctrl+").is_err());
+        assert!(portal_trigger("Ctrl++F13").is_err());
     }
 
     #[test]
