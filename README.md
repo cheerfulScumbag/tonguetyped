@@ -219,7 +219,11 @@ When history is enabled, TongueTyped stores transcript text in
 ## Latency diagnostics
 
 `tonguetyped doctor` reports the selected model ID and the detected inference
-backend and device. The daemon logs the same inference configuration at startup.
+backend and device. It also prints its own build identifier - the git commit it
+was built from - and compares it with the build the running daemon reports,
+flagging a daemon left running from an older build. `tonguetyped --version`
+prints this binary's identifier, and `tonguetyped status` the daemon's. The
+daemon logs the same inference configuration at startup.
 
 After each dictation finishes or is cancelled, the daemon writes one structured
 `tonguetyped::latency` event at the `info` level. The event identifies the model,
@@ -311,7 +315,10 @@ success). `tonguetyped doctor` and the daemon's startup log report whichever
 backend actually ended up active (`transcribe.cpp/cpu`,
 `transcribe.cpp/vulkan`, `transcribe.cpp/cuda`, `transcribe.cpp/rocm`, or
 `transcribe.cpp/metal`) and its device - read directly off the loaded model,
-not guessed from which Cargo features were compiled in.
+not guessed from which Cargo features were compiled in. `doctor` separately
+lists every backend kind this build and host can use (CUDA, ROCm, Vulkan,
+Metal, CPU) in inference priority order, so a compiled-in accelerator with no
+usable device shows as unavailable next to the always-available CPU fallback.
 `daemon.rs::prepare_dependencies` fetches the configured model synchronously
 at startup if it is missing, matching the historical CPU path's zero-config
 behavior (now also covering
