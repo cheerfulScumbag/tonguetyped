@@ -123,10 +123,12 @@ impl ModelScreen {
             .collect();
         lines.extend(self.backends.iter().filter_map(|choice| {
             choice.unavailable.as_ref().map(|reason| {
-                Line::from(Span::styled(
-                    format!("  {} unavailable: {reason}", choice.name),
-                    Style::default().fg(Color::DarkGray),
-                ))
+                let text = if choice.name == self.configured_backend {
+                    format!("  {} (active) unavailable: {reason}", choice.name)
+                } else {
+                    format!("  {} unavailable: {reason}", choice.name)
+                };
+                Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
             })
         }));
         Paragraph::new(lines).block(
@@ -871,5 +873,48 @@ mod tests {
         screen.toggle_focus();
         screen.move_selection(1);
         assert_eq!(screen.selected_backend(), Some("cpu"));
+    }
+
+    fn rendered_backend_widget(config: &Config, backends: Vec<BackendChoice>) -> String {
+        let screen = ModelScreen::new(config, backends);
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(screen.backend_widget(), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn model_screen_marks_an_unavailable_configured_backend_active() {
+        let mut config = Config::default();
+        config.model.preferred_backend = "cuda".to_string();
+        let text = rendered_backend_widget(&config, choices());
+        assert!(
+            text.contains("cuda (active) unavailable"),
+            "an unavailable backend that is still the saved pin must be marked active:\n{text}"
+        );
+    }
+
+    #[test]
+    fn model_screen_does_not_mark_an_unrelated_unavailable_backend_active() {
+        let text = rendered_backend_widget(&Config::default(), choices());
+        assert!(
+            text.contains("cuda unavailable"),
+            "the unavailable backend should still be listed:\n{text}"
+        );
+        assert!(
+            !text.contains("cuda (active)"),
+            "only the saved pin may be marked active:\n{text}"
+        );
     }
 }

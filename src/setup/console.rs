@@ -124,14 +124,21 @@ impl ConsoleState {
             .iter()
             .position(|name| name == &config.model.active_model)
             .unwrap_or(0);
-        // Only choices that can work on this build and host are selectable;
-        // `render_inference_backend` explains why the rest are missing.
+        // Only choices that can work on this build and host are selectable,
+        // with one exception: a configured backend that can't run here stays
+        // in the list so the step opens on it and never silently replaces the
+        // saved pin with `auto`. It is shown as unavailable.
         let mut inference_backend_values: Vec<&'static str> = capabilities
             .inference_backends
             .iter()
             .filter(|choice| choice.unavailable.is_none())
             .map(|choice| choice.name)
             .collect();
+        if let Some(configured) = capabilities.inference_backends.iter().find(|choice| {
+            choice.name == config.model.preferred_backend && choice.unavailable.is_some()
+        }) {
+            inference_backend_values.push(configured.name);
+        }
         if inference_backend_values.is_empty() {
             inference_backend_values.push("auto");
         }
@@ -192,6 +199,13 @@ impl ConsoleState {
             download_log: Vec::new(),
             downloading_needed: false,
         }
+    }
+
+    fn backend_unavailable(&self, name: &str) -> bool {
+        self.capabilities
+            .inference_backends
+            .iter()
+            .any(|choice| choice.name == name && choice.unavailable.is_some())
     }
 
     fn run_loop(
@@ -422,8 +436,10 @@ impl ConsoleState {
                 }
             }
             StepKind::InferenceBackend => {
-                self.config.model.preferred_backend =
-                    self.inference_backend_values[self.inference_backend_selection].to_string();
+                let selected = self.inference_backend_values[self.inference_backend_selection];
+                if !self.backend_unavailable(selected) {
+                    self.config.model.preferred_backend = selected.to_string();
+                }
             }
             StepKind::Microphone => {
                 self.config.audio.microphone =
@@ -825,10 +841,13 @@ impl ConsoleState {
     }
 
     fn render_inference_backend(&self, frame: &mut Frame, area: Rect) {
+        // A configured backend that can't run here is shown in the list above
+        // (marked unavailable); the panel below only explains the rest.
         let unavailable: Vec<Line> = self
             .capabilities
             .inference_backends
             .iter()
+            .filter(|choice| !self.inference_backend_values.contains(&choice.name))
             .filter_map(|choice| {
                 choice.unavailable.as_ref().map(|reason| {
                     Line::from(Span::styled(
@@ -853,7 +872,14 @@ impl ConsoleState {
         let labels: Vec<String> = self
             .inference_backend_values
             .iter()
-            .map(|name| crate::inference::backend_preference_label(name).to_string())
+            .map(|name| {
+                let label = crate::inference::backend_preference_label(name);
+                if self.backend_unavailable(name) {
+                    format!("{label} (unavailable here)")
+                } else {
+                    label.to_string()
+                }
+            })
             .collect();
         frame.render_widget(
             list_paragraph(
@@ -1255,23 +1281,41 @@ mod tests {
         assert_eq!(state.prev_step(), Some(StepKind::InferenceBackend));
     }
 
-    #[test]
-    fn a_configured_backend_that_is_unavailable_here_starts_the_step_on_auto() {
-        let mut config = Config::default();
-        config.model.preferred_backend = "cuda".to_string();
-        let capabilities = capabilities_with_backends(&[
+    fn capabilities_with_unavailable_cuda() -> Capabilities {
+        capabilities_with_backends(&[
             ("auto", None),
             ("cpu", None),
             (
                 "cuda",
                 Some("no usable cuda device or driver was found on this host"),
             ),
-        ]);
-        let state = ConsoleState::new(config, capabilities);
+        ])
+    }
+
+    #[test]
+    fn a_configured_backend_that_is_unavailable_here_stays_selected_and_is_not_overwritten() {
+        let mut config = Config::default();
+        config.model.preferred_backend = "cuda".to_string();
+        let mut state = ConsoleState::new(config, capabilities_with_unavailable_cuda());
         assert_eq!(
             state.inference_backend_values[state.inference_backend_selection],
-            "auto"
+            "cuda"
         );
+
+        // Stepping through the backend step without changing anything must
+        // leave the saved pin alone rather than replacing it with `auto`.
+        state.step = StepKind::InferenceBackend;
+        state.advance().unwrap();
+        assert_eq!(state.config.model.preferred_backend, "cuda");
+
+        // Choosing a backend that does work here still saves normally.
+        let mut config = Config::default();
+        config.model.preferred_backend = "cuda".to_string();
+        let mut state = ConsoleState::new(config, capabilities_with_unavailable_cuda());
+        state.step = StepKind::InferenceBackend;
+        state.move_selection(-1);
+        state.advance().unwrap();
+        assert_eq!(state.config.model.preferred_backend, "cpu");
 
         let mut config = Config::default();
         config.model.preferred_backend = "cpu".to_string();
