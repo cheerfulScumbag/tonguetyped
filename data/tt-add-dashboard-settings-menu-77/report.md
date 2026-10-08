@@ -36,9 +36,10 @@ approved per-screen decisions.
 
 All follow the existing dashboard pattern (bordered list, `> ` cyan-bold
 selection, Enter applies, Esc back, own one-line footer) and only mutate the
-in-memory `Config` via `apply`; `App::save_settings_config` is the single
-place that calls `Config::save`, so every screen reports the same green
-saved/red failed result line.
+in-memory `Config` via `apply`; `App::save_settings_config` is the shared
+feedback path for the `apply`-style screens, so every screen reports the same
+green saved/red failed result line (the Shortcut outcome handlers save
+directly, and the Startup path saves through `autostart::update`).
 
 | Area | Screen behavior |
 | ---- | --------------- |

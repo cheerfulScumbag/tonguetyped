@@ -151,8 +151,10 @@ current value, above a Commands panel. `src/cli.rs` holds the clap
 never disagree with `--help`; `model`/`autostart` are clap commands deliberately
 filtered out of `home_items()` because they are Settings-panel rows instead. The
 settings screens (`src/tui/screens.rs`) only mutate the in-memory `Config` via
-`apply`; `App::save_settings_config` is the one place that calls `Config::save`, so
-success/failure feedback stays uniform. `src/commands.rs` is the one shared
+`apply`; `App::save_settings_config` is the shared feedback path those screens
+report through, so success/failure feedback stays uniform, though the Shortcut
+outcome handlers save directly and the Startup path saves via
+`autostart::update`. `src/commands.rs` is the one shared
 command-implementation layer both `main.rs`'s CLI dispatch and the dashboard call
 into (IPC send/format, model catalog rows, `activate_model`'s
 download+save+reload+confirm composition) - add new shared command logic there, not
