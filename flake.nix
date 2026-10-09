@@ -34,12 +34,17 @@
           alsa-lib
           spirv-headers
           xdotool
-          # wtype: the Wayland typing helper; wl-clipboard: Wayland clipboard
-          # tools. Both are bundled into the installed binary's PATH below so
-          # a normal install has them without the user discovering and
-          # installing them manually; present in the dev shell too so
-          # `cargo run`/tests match the packaged behavior.
+          # wtype: the wlroots Wayland typing helper; dotool: the helper that
+          # types through /dev/uinput on KWin and other compositors wtype
+          # cannot reach; wl-clipboard: Wayland clipboard tools. All are
+          # bundled into the installed binary's PATH below so a normal install
+          # has them without the user discovering and installing them
+          # manually; present in the dev shell too so `cargo run`/tests match
+          # the packaged behavior. dotool still needs write access to
+          # /dev/uinput (the `input` group or a udev rule), which the install
+          # does not grant.
           wtype
+          dotool
           wl-clipboard
           openssl
           # libwayland-client.so: the layer-shell overlay's Wayland connection
@@ -135,6 +140,7 @@
             --prefix PATH : ${pkgs.lib.makeBinPath [
               pkgs.libcanberra-gtk3
               pkgs.wtype
+              pkgs.dotool
               pkgs.wl-clipboard
             ]}
         '';

@@ -94,7 +94,7 @@ pub fn probe_type_backend() -> String {
     if enigo_available() {
         return "enigo".to_string();
     }
-    if helper_self_test("dotool") {
+    if dotool_available() {
         return "dotool".to_string();
     }
     "none".to_string()
@@ -108,42 +108,91 @@ pub fn list_available_backends() -> Vec<String> {
     if enigo_available() {
         backends.push("enigo".to_string());
     }
-    if helper_self_test("dotool") {
+    if dotool_available() {
         backends.push("dotool".to_string());
     }
     backends
 }
 
 pub fn has_any_type_backend() -> bool {
-    helper_self_test("wtype") || enigo_available() || helper_self_test("dotool")
+    helper_self_test("wtype") || enigo_available() || dotool_available()
 }
 
 pub fn type_backend_available(backend: &str) -> bool {
     match backend {
         "auto" => has_any_type_backend(),
-        "wtype" | "dotool" => helper_self_test(backend),
+        "wtype" => helper_self_test("wtype"),
+        "dotool" => dotool_available(),
         "enigo" => enigo_available(),
         _ => false,
     }
 }
 
 /// The warning the configuration UIs and the daemon startup log show when no
-/// typing helper is usable, naming what to install for this session type.
-/// `enigo` needs no install - it is built in - so the missing piece is always
-/// one of the two external helpers, `wtype` on Wayland or `dotool` elsewhere.
+/// typing helper is usable, naming the one helper to install for this
+/// compositor. `enigo` needs no install - it is built in - so the missing
+/// piece is always one of the two external helpers: `wtype`, which types
+/// through the Wayland virtual-keyboard protocol that only wlroots-based
+/// compositors implement, or `dotool`, which types through `/dev/uinput` and
+/// so works on KDE's KWin and other compositors too.
 /// The restart note is real, not boilerplate: `cached_auto_backend` and the
 /// daemon process both memoize the probe, so a helper installed while
 /// TongueTyped is running is not picked up until it restarts.
 pub fn typing_helper_warning() -> &'static str {
-    if session_is_wayland() {
+    warning_for(recommended_helper())
+}
+
+/// The external helper to name for this session: `wtype` only on a Wayland
+/// session whose compositor is wlroots-based (sway, Hyprland, niri, ...),
+/// which implements the `zwp_virtual_keyboard_manager_v1` protocol `wtype`
+/// needs. Everywhere else - KDE's KWin, other Wayland compositors, and X11 -
+/// `dotool` is the helper that can work.
+fn recommended_helper() -> &'static str {
+    if session_is_wayland() && compositor_is_wlroots() {
+        "wtype"
+    } else {
+        "dotool"
+    }
+}
+
+fn warning_for(helper: &str) -> &'static str {
+    if helper == "wtype" {
         "No typing helper found - install wtype, then restart TongueTyped."
     } else {
-        "No typing helper found - install dotool, then restart TongueTyped."
+        "No typing helper found - install dotool (needs /dev/uinput access), then restart TongueTyped."
     }
 }
 
 fn session_is_wayland() -> bool {
     std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland")
+}
+
+/// Whether this session's desktop identifies a wlroots-based compositor, the
+/// only family that implements the `zwp_virtual_keyboard_manager_v1` protocol
+/// `wtype` types through. KWin advertises `KDE`, not a wlroots name, so it
+/// takes the `dotool` branch.
+fn compositor_is_wlroots() -> bool {
+    let desktops: Vec<String> = [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .iter()
+    .filter_map(|key| std::env::var(key).ok())
+    .collect();
+    desktop_names_are_wlroots(&desktops)
+}
+
+/// Pure core of `compositor_is_wlroots`, kept separate so it is testable
+/// without mutating the process-global environment.
+fn desktop_names_are_wlroots(desktops: &[String]) -> bool {
+    const WLROOTS: [&str; 7] = [
+        "sway", "hyprland", "niri", "wlroots", "river", "wayfire", "labwc",
+    ];
+    desktops.iter().any(|desktop| {
+        let desktop = desktop.to_ascii_lowercase();
+        WLROOTS.iter().any(|name| desktop.contains(name))
+    })
 }
 
 fn enigo_available() -> bool {
@@ -152,6 +201,20 @@ fn enigo_available() -> bool {
     }
     use enigo::{Enigo, Settings};
     Enigo::new(&Settings::default()).is_ok()
+}
+
+/// Whether `dotool` is present *and* can actually inject. It types through
+/// `/dev/uinput`, so a binary that is installed but whose user cannot open
+/// that device (no `input` group membership or matching udev rule) would
+/// silently type nothing - a plain binary-exists check is not enough. Opening
+/// the device for writing is side-effect-free: a virtual device is only
+/// created by a later `UI_DEV_CREATE` ioctl, so this probe leaks no node.
+fn dotool_available() -> bool {
+    helper_self_test("dotool") && device_is_writable(std::path::Path::new("/dev/uinput"))
+}
+
+fn device_is_writable(path: &std::path::Path) -> bool {
+    std::fs::OpenOptions::new().write(true).open(path).is_ok()
 }
 
 fn write_dotool_commands(
@@ -214,6 +277,60 @@ mod tests {
             warning.contains("install wtype") || warning.contains("install dotool"),
             "the warning must say what to install: {warning}"
         );
+    }
+
+    #[test]
+    fn wlroots_compositors_recommend_wtype_and_others_dotool() {
+        // Only wlroots-based compositors implement the virtual-keyboard
+        // protocol wtype needs; KDE's KWin and everything else must get
+        // dotool instead.
+        for (desktop, wlroots) in [
+            ("sway", true),
+            ("Hyprland", true),
+            ("niri", true),
+            ("wlroots", true),
+            ("KDE", false),
+            ("GNOME", false),
+            ("ubuntu:GNOME", false),
+        ] {
+            let names = vec![desktop.to_string()];
+            assert_eq!(desktop_names_are_wlroots(&names), wlroots, "{desktop}");
+        }
+    }
+
+    #[test]
+    fn dotool_warning_states_the_uinput_requirement() {
+        let dotool = warning_for("dotool");
+        assert!(dotool.contains("install dotool"));
+        assert!(
+            dotool.contains("/dev/uinput"),
+            "the dotool warning must state its device requirement: {dotool}"
+        );
+        let wtype = warning_for("wtype");
+        assert!(wtype.contains("install wtype"));
+        assert!(!wtype.contains("dotool"));
+        assert!(!dotool.contains("wtype"));
+    }
+
+    #[test]
+    fn device_is_writable_reflects_real_write_access() {
+        let dir = std::env::temp_dir().join(format!(
+            "tt-uinput-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("uinput");
+        std::fs::write(&file, b"").unwrap();
+        assert!(device_is_writable(&file), "a writable file must pass");
+        assert!(
+            !device_is_writable(&dir.join("missing")),
+            "a missing device must fail the dotool probe"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

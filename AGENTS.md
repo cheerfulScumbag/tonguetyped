@@ -147,22 +147,35 @@ dictation's output phase before this, measured at just over 2s in the same real
 
 The typing helpers are runtime dependencies of the packaged app, not optional
 discoveries: `flake.nix`'s `packages.default` `postFixup` `wrapProgram` prepends
-`wtype` and `wl-clipboard` to the installed binary's PATH (the devShell carries
-them too), `Cargo.toml`'s deb metadata recommends both, and the `PKGBUILD`
-depends on both (`xdotool` already covers the built-in X11 `enigo` backend).
-When no helper actually works, the shared configuration UIs never silently drop
-the "Type into the focused application" choice: `Capabilities::typing_helper_warning()`
-(`src/setup.rs`, wrapping `output::typing_helper_warning()`'s session-aware
-install hint) renders as a warning line in the dashboard's Transcript output
-and Typing backend screens and as the setup console's Output-step footer, and
-choosing type without a working helper is refused (dashboard `OutputScreen::apply`
+`wtype`, `dotool`, and `wl-clipboard` to the installed binary's PATH (the
+devShell carries them too), the `PKGBUILD` depends on all three, and
+`Cargo.toml`'s deb metadata recommends `wtype`/`wl-clipboard` only (Debian has
+no `dotool` package; `xdotool` already covers the built-in X11 `enigo` backend).
+`output::typing_helper_warning()` is compositor-aware, not "install wtype on
+Wayland": `wtype` types through the virtual-keyboard protocol only wlroots
+compositors implement, so `output::desktop_names_are_wlroots` maps
+`XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`/`DESKTOP_SESSION` (sway, Hyprland,
+niri, ...) to a `wtype` hint and every other session - KDE's KWin above all -
+to `dotool`. `output::dotool_available()` is a real usability check, not a
+binary-exists check: it also requires `/dev/uinput` to be writable, since a
+`dotool` that cannot open that device (no `input` group or udev rule) types
+nothing; the open is side-effect-free. A protocol-based typing path that would
+avoid `/dev/uinput` entirely (the KDE Wayland RemoteDesktop portal) is a
+possible future direction, deliberately not implemented here. When no helper
+actually works, the
+shared configuration UIs never silently drop the "Type into the focused
+application" choice: `Capabilities::typing_helper_warning()` (`src/setup.rs`)
+renders as a warning line in the dashboard's Transcript output and Typing
+backend screens and as the setup console's Output-step footer, and choosing
+type without a working helper is refused (dashboard `OutputScreen::apply`
 returns `Err` for the result line; both setup flows stay on the step) instead of
 saving a method that can never type. A helper installed while TongueTyped is
 running is not picked up until a restart - `cached_auto_backend` and the
 dashboard's `Capabilities` memoize the probe forever - so the warning says so.
 `tests/tui_dashboard.rs`'s PTY sandbox isolates PATH and pins
-`XDG_SESSION_TYPE=wayland` for deterministic helper detection; a test that wants
-a helper drops a stub in via `Sandbox::install_typing_helper`.
+`XDG_SESSION_TYPE=wayland` plus `XDG_CURRENT_DESKTOP=KDE`; a test that wants a
+helper drops a stub in via `Sandbox::install_typing_helper` (a bare `dotool`
+stub would no longer count, since the probe also checks `/dev/uinput`).
 
 Running bare `tonguetyped` (no subcommand) opens the dashboard (`src/tui/`,
 `CLI`'s `command` field is `Option<Commands>` - see `data/tt-tui-dashboard-1/report.md`

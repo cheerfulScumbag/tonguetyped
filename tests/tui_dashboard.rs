@@ -75,10 +75,13 @@ impl Sandbox {
         // Isolate typing-helper detection from the host machine: only the
         // sandbox's own bin directory is on PATH, and the session type is
         // pinned to Wayland so the X11-only `enigo` backend can never sneak
-        // in on a developer's desktop. Tests that need a typing helper drop
-        // a stub into `bin` via `install_typing_helper`.
+        // in on a developer's desktop. The compositor is pinned to KDE so the
+        // install warning names dotool (wtype cannot work on KWin); tests that
+        // need a typing helper drop a stub into `bin` via
+        // `install_typing_helper`.
         cmd.env("PATH", &self.bin);
         cmd.env("XDG_SESSION_TYPE", "wayland");
+        cmd.env("XDG_CURRENT_DESKTOP", "KDE");
         cmd.env("NO_COLOR", "1");
         cmd.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
     }
@@ -789,8 +792,8 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
 #[test]
 fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     // The sandbox PATH has no typing helper and the session is pinned to
-    // Wayland, so this is the exact "no helper installed" state the warning
-    // exists for.
+    // Wayland + KDE, so this is the exact "no helper installed" state the
+    // warning exists for, and it must name dotool (wtype cannot work on KWin).
     let sandbox = Sandbox::new("output-no-helper");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
@@ -809,7 +812,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
         "the type choice must not be dropped silently:\n{screen}"
     );
     assert!(
-        screen.contains("install wtype"),
+        screen.contains("install dotool"),
         "the screen must say what to install:\n{screen}"
     );
 
@@ -823,7 +826,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     session.send(KEY_ENTER);
     let refused = session.wait_for("Cannot apply", Duration::from_secs(3));
     assert!(
-        refused.contains("install wtype"),
+        refused.contains("install dotool"),
         "the install warning must stay visible next to the refusal:\n{refused}"
     );
     assert!(
