@@ -39,6 +39,7 @@ struct Sandbox {
     config_home: std::path::PathBuf,
     data_home: std::path::PathBuf,
     runtime_dir: std::path::PathBuf,
+    bin: std::path::PathBuf,
 }
 
 impl Sandbox {
@@ -47,9 +48,11 @@ impl Sandbox {
         let config_home = root.join("config");
         let data_home = root.join("data");
         let runtime_dir = root.join("runtime");
+        let bin = root.join("bin");
         std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
         std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
         std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
         let entry = tonguetyped::catalog::find(tonguetyped::catalog::DEFAULT_MODEL_ID).unwrap();
         std::fs::write(
             data_home.join("tonguetyped/models").join(entry.filename),
@@ -61,6 +64,7 @@ impl Sandbox {
             config_home,
             data_home,
             runtime_dir,
+            bin,
         }
     }
 
@@ -68,8 +72,27 @@ impl Sandbox {
         cmd.env("XDG_CONFIG_HOME", &self.config_home);
         cmd.env("XDG_DATA_HOME", &self.data_home);
         cmd.env("XDG_RUNTIME_DIR", &self.runtime_dir);
+        // Isolate typing-helper detection from the host machine: only the
+        // sandbox's own bin directory is on PATH, and the session type is
+        // pinned to Wayland so the X11-only `enigo` backend can never sneak
+        // in on a developer's desktop. Tests that need a typing helper drop
+        // a stub into `bin` via `install_typing_helper`.
+        cmd.env("PATH", &self.bin);
+        cmd.env("XDG_SESSION_TYPE", "wayland");
         cmd.env("NO_COLOR", "1");
         cmd.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
+    }
+
+    /// Puts an executable stub on the sandbox PATH so `helper_self_test`
+    /// finds a working typing helper of the given name.
+    fn install_typing_helper(&self, name: &str) {
+        let helper = self.bin.join(name);
+        std::fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     fn config_contents(&self) -> String {
@@ -713,6 +736,7 @@ fn pty_microphone_screen_lists_devices_with_a_level_panel() {
 #[test]
 fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     let sandbox = Sandbox::new("output-setting");
+    sandbox.install_typing_helper("wtype");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
@@ -722,20 +746,20 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     }
     session.wait_for("> Transcript output", Duration::from_secs(3));
     session.send(KEY_ENTER);
-    session.wait_for("Keep transcripts in TongueTyped", Duration::from_secs(3));
+    let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
+    assert!(
+        screen.contains("Keep transcripts in TongueTyped"),
+        "both choices must be listed:\n{screen}"
+    );
+    assert!(
+        !screen.contains("No typing helper found"),
+        "a working helper must not warn:\n{screen}"
+    );
 
-    // "Type into the focused application" only exists when at least one
-    // typing helper was detected, so the environment decides whether there is
-    // a second choice to exercise here.
-    if session
-        .visible_text()
-        .contains("Type into the focused application")
-    {
-        session.send(KEY_DOWN);
-        session.send(KEY_ENTER);
-        session.wait_for("Transcript output saved.", Duration::from_secs(3));
-        assert!(sandbox.config_contents().contains("method = \"type\""));
-    }
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    assert!(sandbox.config_contents().contains("method = \"type\""));
 
     // Typing backend is the sixth Settings row.
     session.send(KEY_ESC);
@@ -743,19 +767,89 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     session.send(KEY_DOWN);
     session.wait_for("> Typing backend", Duration::from_secs(3));
     session.send(KEY_ENTER);
-    let backend_screen = session.wait_for(
-        "Only used when transcripts are typed into the focused application.",
-        Duration::from_secs(3),
+    let backend_screen = session.wait_for("> auto", Duration::from_secs(3));
+    assert!(
+        backend_screen.contains("wtype"),
+        "the detected helper must be listed:\n{backend_screen}"
     );
     assert!(
-        backend_screen.contains("> auto"),
-        "the configured backend should be selected:\n{backend_screen}"
+        !backend_screen.contains("No typing helper found"),
+        "a detected helper must not warn:\n{backend_screen}"
     );
+    session.send(KEY_DOWN);
     session.send(KEY_ENTER);
     session.wait_for("Typing backend saved.", Duration::from_secs(3));
     assert!(sandbox
         .config_contents()
-        .contains("typing_backend = \"auto\""));
+        .contains("typing_backend = \"wtype\""));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
+    // The sandbox PATH has no typing helper and the session is pinned to
+    // Wayland, so this is the exact "no helper installed" state the warning
+    // exists for.
+    let sandbox = Sandbox::new("output-no-helper");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Transcript output is the fifth Settings row.
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    // The type choice stays listed and the warning names what to install.
+    let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
+    assert!(
+        screen.contains("Keep transcripts in TongueTyped"),
+        "the type choice must not be dropped silently:\n{screen}"
+    );
+    assert!(
+        screen.contains("install wtype"),
+        "the screen must say what to install:\n{screen}"
+    );
+
+    // Choosing it is refused with an explanation, nothing is saved, and the
+    // install warning stays visible above the refusal.
+    session.send(KEY_DOWN);
+    session.wait_for(
+        "> Type into the focused application",
+        Duration::from_secs(3),
+    );
+    session.send(KEY_ENTER);
+    let refused = session.wait_for("Cannot apply", Duration::from_secs(3));
+    assert!(
+        refused.contains("install wtype"),
+        "the install warning must stay visible next to the refusal:\n{refused}"
+    );
+    assert!(
+        !refused.contains("Transcript output saved."),
+        "a refused choice must not report a save:\n{refused}"
+    );
+
+    // Keep still applies and persists normally.
+    session.send(KEY_UP);
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    assert!(sandbox.config_contents().contains("method = \"none\""));
+
+    // The Typing backend screen explains the empty helper list too.
+    session.send(KEY_ESC);
+    session.wait_for("Settings", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.wait_for("> Typing backend", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    let backend_screen = session.wait_for("> auto", Duration::from_secs(3));
+    assert!(
+        backend_screen.contains("No typing helper found"),
+        "the empty helper list must be explained:\n{backend_screen}"
+    );
+    session.send(KEY_ENTER);
+    session.wait_for("Typing backend saved.", Duration::from_secs(3));
 
     session.quit_and_wait();
 }

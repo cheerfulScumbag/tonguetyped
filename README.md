@@ -22,9 +22,16 @@ nix develop
 cargo build --release
 ```
 
-For direct typing, install at least one supported backend: `wtype`, an X11
-environment supported by `enigo`, or `dotool`. Automatic backend selection tries
-them in that order. TongueTyped never uses the clipboard as a typing fallback.
+Typing into the focused application uses one of three backends: `wtype` on
+Wayland, `enigo` in an X11 session, or `dotool`. Automatic backend selection
+tries them in that order, and only a backend that actually works is ever used.
+The packaged installs carry the Wayland tools with them - the Nix package
+bundles `wtype` and `wl-clipboard` into its wrapper, the .deb recommends both,
+and the Arch package depends on both - so a normal install can type out of the
+box and has the Wayland clipboard tools available. When no typing helper is
+available, the dashboard and the setup wizard say so and name what to install
+(`wtype` on Wayland, otherwise `dotool`) instead of hiding the typing options.
+TongueTyped never uses the clipboard as a typing fallback.
 
 ## Installation
 

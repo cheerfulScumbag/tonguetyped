@@ -9,6 +9,12 @@ license = "MIT"
 [package.metadata.deb]
 maintainer = "cheerfulScumbag <164391367+cheerfulScumbag@users.noreply.github.com>"
 depends = "$auto"
+# The Wayland typing helper and clipboard tools: installed by default with the
+# package so typing into the focused application works out of the box on
+# Wayland (X11 uses the built-in enigo backend). Recommends rather than
+# Depends because the deb targets releases as old as Debian bullseye, which
+# has no wtype package.
+recommends = "wtype, wl-clipboard"
 section = "utils"
 priority = "optional"
 
