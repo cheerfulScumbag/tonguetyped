@@ -31,6 +31,8 @@ fn run_setup(
         // wtype.
         .env("XDG_SESSION_TYPE", "wayland")
         .env("XDG_CURRENT_DESKTOP", desktop)
+        .env("XDG_SESSION_DESKTOP", desktop)
+        .env("DESKTOP_SESSION", desktop)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

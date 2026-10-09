@@ -82,6 +82,8 @@ impl Sandbox {
         cmd.env("PATH", &self.bin);
         cmd.env("XDG_SESSION_TYPE", "wayland");
         cmd.env("XDG_CURRENT_DESKTOP", "KDE");
+        cmd.env("XDG_SESSION_DESKTOP", "KDE");
+        cmd.env("DESKTOP_SESSION", "KDE");
         cmd.env("NO_COLOR", "1");
         cmd.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
     }
