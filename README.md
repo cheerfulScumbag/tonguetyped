@@ -102,10 +102,10 @@ console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc
 returns to the previous one, and `q` quits without saving. The microphone step
 shows a live input level meter for whichever microphone is currently
 highlighted after navigation settles, so you can compare devices without
-restarting audio capture for every keypress. On the shortcut step, typing a
-new combination only takes effect the first time a shortcut is ever bound;
-to change an already-bound shortcut, press `Ctrl+R` to open the desktop's
-own native "press your new shortcut" dialog instead. After the model step, the
+restarting audio capture for every keypress. The shortcut step has no key to
+type: TongueTyped registers the dictation action with your desktop and never
+picks a key, so press `Ctrl+R` to set or change it in the desktop's own native
+"press your new shortcut" dialog. After the model step, the
 console fetches the selected GGUF model file if it isn't already installed,
 with progress shown before continuing - the same file every backend (CPU or
 an accelerator) requests, so there is only ever one model to fetch. It then
@@ -153,7 +153,7 @@ transcripts directly. To test typing explicitly, focus a disposable text field
 and run `cargo run -- doctor --test-type`. The regular `doctor` command checks
 the compositor, microphone, model, and typing backends without injecting text
 or requesting shortcut authorization. Run `cargo run -- shortcut-test`
-explicitly, then press the configured shortcut; the command waits up to 15
+explicitly, then press the shortcut you have bound; the command waits up to 15
 seconds and reports whether the press was actually detected.
 
 ## Desktop feedback
