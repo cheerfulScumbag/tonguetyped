@@ -1033,12 +1033,18 @@ impl Coordinator {
     /// fatal - the in-memory value still reflects reality for this run.
     pub fn record_activation_binding(&self, reported: String) {
         let reported = crate::activation::keybind_label(&reported);
-        let mut inner = self.state.lock().unwrap();
-        if inner.config.activation.keybind == reported {
-            return;
+        {
+            let mut inner = self.state.lock().unwrap();
+            if inner.config.activation.keybind == reported {
+                return;
+            }
+            inner.config.activation.keybind = reported.clone();
         }
-        inner.config.activation.keybind = reported;
-        if let Err(error) = inner.config.save() {
+        let persisted = Config::load().and_then(|mut on_disk| {
+            on_disk.activation.keybind = reported;
+            on_disk.save()
+        });
+        if let Err(error) = persisted {
             tracing::warn!(
                 "could not persist the activation binding reported by the desktop: {error}"
             );
