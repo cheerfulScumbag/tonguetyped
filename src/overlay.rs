@@ -984,18 +984,12 @@ fn paint_minimal(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator:
 
     match phase {
         Phase::Recording if streaming_indicator => {
-            // `Minimal` has no filled disc, just the ring drawn above, so the
-            // waveform must stay inside the ring's inner edge
-            // (`ring_radius - ring_thickness / 2`). Centering a box of
-            // ~0.63*ring_radius half-diagonal on the ring center keeps it
-            // clear of the outline.
-            let max_bar_height = ring_radius * 0.6;
             paint_waveform_bars(
                 canvas,
                 cx,
-                cy + max_bar_height * 0.5,
-                ring_radius * 1.1,
-                max_bar_height,
+                cy + ring_radius * 0.5,
+                ring_radius * 1.5,
+                ring_radius * 0.9,
                 color,
                 t,
             );
@@ -1054,16 +1048,12 @@ fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bo
 
     match phase {
         Phase::Recording if streaming_indicator => {
-            // Fit the bars inside the capsule rather than spilling past its
-            // rounded ends: a centered box narrower than the capsule and about
-            // half its height keeps every bar within the shape.
-            let max_bar_height = half_height * 0.85;
             paint_waveform_bars(
                 canvas,
                 cx,
-                cy + max_bar_height * 0.5,
-                half_width * 1.2,
-                max_bar_height,
+                cy + half_height * 0.6,
+                half_width * 1.5,
+                half_height * 1.3,
                 GLYPH_COLOR,
                 t,
             );
