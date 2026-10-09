@@ -61,12 +61,7 @@ fn setup_writes_a_complete_configuration_without_color() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let output = run_setup(
-        &root,
-        "\n\n2\nCtrl+Shift+Space\n2\n2\n2\n\n",
-        Some(&bin),
-        "KDE",
-    );
+    let output = run_setup(&root, "\n\n2\n2\n2\n2\n\n", Some(&bin), "KDE");
     assert!(
         output.status.success(),
         "{}",
@@ -83,7 +78,10 @@ fn setup_writes_a_complete_configuration_without_color() {
         config.activation.mode,
         tonguetyped::config::ActivationMode::Toggle
     );
-    assert_eq!(config.activation.keybind, "Ctrl+Shift+Space");
+    assert_eq!(
+        config.activation.keybind, "",
+        "setup must never choose a shortcut; the desktop owns the binding"
+    );
     assert_eq!(
         config.output.method,
         tonguetyped::config::OutputMethod::Type
@@ -95,7 +93,7 @@ fn setup_writes_a_complete_configuration_without_color() {
         include_str!("../data/tonguetyped.desktop")
     );
 
-    let output = run_setup(&root, "\n\n\n\n\n\n1\n\n", Some(&bin), "KDE");
+    let output = run_setup(&root, "\n\n\n\n\n1\n\n", Some(&bin), "KDE");
     assert!(
         output.status.success(),
         "{}",
@@ -118,7 +116,7 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
     // helper and the compositor is KDE: the setup must refuse it with the
     // install warning, naming dotool (wtype cannot work on KWin), re-prompt,
     // then accept 1 (keep in TongueTyped) and finish normally.
-    let output = run_setup(&root, "\n\n\n\n2\n1\n\n\n", Some(&bin), "KDE");
+    let output = run_setup(&root, "\n\n\n2\n1\n\n\n", Some(&bin), "KDE");
     assert!(
         output.status.success(),
         "{}",

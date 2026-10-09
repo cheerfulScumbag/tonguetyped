@@ -219,11 +219,18 @@ position/style value lists (`overlay::POSITION_VALUES`/`STYLE_VALUES`/
 `STYLE_LABELS`/`STREAMING_LABELS`) and the activation/startup choice labels
 (`config::ACTIVATION_MODE_LABELS`/`STARTUP_LABELS`) are imported by both UIs. Add a
 new choice/value there, not as a second copy in either UI. The dashboard's Shortcut
-screen is the one screen where `q` is a literal keybinding character (not quit),
-like the console's shortcut step; its portal test and native reconfigure dialog run
-through `setup::shortcut_test_async`/`reconfigure_shortcut_async` handles polled by
-`App::poll_shortcut_handles` each frame, and only a successful test or dialog
-persists the typed keybind.
+screen and the console's shortcut step have no editable key field: TongueTyped
+registers the `"Start or stop dictation"` action with the desktop and never chooses
+a key, so the only way to set one is the desktop's own dialog. `activation::
+bind_activation_shortcut` therefore passes no `preferred_trigger` (passing one made
+KDE store it as the action's "Default shortcut" and display the app-chosen `Meta+O`
+beside the user's real binding); `config.activation.keybind` now holds only what the
+portal reports is bound, `activation::listen` refreshes it after binding (via
+`Coordinator::record_activation_binding`), and both UIs render it through
+`activation::keybind_display` (which turns KDE's `Meta` into the app's `Super`). The
+portal test and native reconfigure dialog run through `setup::shortcut_test_async`/
+`reconfigure_shortcut_async` handles polled by `App::poll_shortcut_handles` each
+frame, and only the dialog's reported trigger is what gets persisted.
 
 A ratatui app that ever loads an inference model (Doctor, Model-activation) while
 holding raw mode/the alternate screen must keep **two** independent things off the

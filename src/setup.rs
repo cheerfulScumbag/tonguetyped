@@ -82,11 +82,11 @@ pub(crate) struct ShortcutTestHandle {
 /// to completion and reports its outcome through the returned handle. Runs
 /// its own single-threaded tokio runtime, same as `reconfigure_shortcut_async`
 /// below.
-pub(crate) fn shortcut_test_async(keybind: String) -> ShortcutTestHandle {
+pub(crate) fn shortcut_test_async() -> ShortcutTestHandle {
     let result = Arc::new(Mutex::new(None));
     let result_for_thread = result.clone();
     std::thread::spawn(move || {
-        let outcome = run_shortcut_test(keybind);
+        let outcome = run_shortcut_test();
         if let Ok(mut guard) = result_for_thread.lock() {
             *guard = Some(outcome);
         }
@@ -94,12 +94,12 @@ pub(crate) fn shortcut_test_async(keybind: String) -> ShortcutTestHandle {
     ShortcutTestHandle { result }
 }
 
-fn run_shortcut_test(keybind: String) -> Result<crate::activation::ShortcutTestOutcome, String> {
+fn run_shortcut_test() -> Result<crate::activation::ShortcutTestOutcome, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    runtime.block_on(crate::activation::test_shortcut_binding(&keybind))
+    runtime.block_on(crate::activation::test_shortcut_binding())
 }
 
 /// Shared state a background shortcut-reconfigure thread reports into,
@@ -116,11 +116,11 @@ pub(crate) struct ReconfigureHandle {
 /// to completion and reports its outcome through the returned handle. Runs
 /// its own single-threaded tokio runtime, same as `fetch_requirement` below,
 /// rather than borrowing the caller's (the console has none to borrow).
-pub(crate) fn reconfigure_shortcut_async(keybind: String) -> ReconfigureHandle {
+pub(crate) fn reconfigure_shortcut_async() -> ReconfigureHandle {
     let result = Arc::new(Mutex::new(None));
     let result_for_thread = result.clone();
     std::thread::spawn(move || {
-        let outcome = run_reconfigure(keybind);
+        let outcome = run_reconfigure();
         if let Ok(mut guard) = result_for_thread.lock() {
             *guard = Some(outcome);
         }
@@ -128,13 +128,13 @@ pub(crate) fn reconfigure_shortcut_async(keybind: String) -> ReconfigureHandle {
     ReconfigureHandle { result }
 }
 
-fn run_reconfigure(keybind: String) -> Result<String, String> {
+fn run_reconfigure() -> Result<String, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
     runtime
-        .block_on(crate::activation::reconfigure_shortcut(&keybind))
+        .block_on(crate::activation::reconfigure_shortcut())
         .map(|outcome| outcome.trigger_description)
 }
 
@@ -413,13 +413,12 @@ fn configure(
     };
 
     ui.section(output, 4, "Shortcut")?;
-    let Some(shortcut) =
-        prompt_shortcut(input, output, errors, config.activation.keybind.as_str())?
-    else {
-        return Ok(SetupOutcome::Cancelled);
-    };
-    config.activation.keybind = shortcut;
-    config.activation.keybind_status = "untested".to_string();
+    writeln!(
+        output,
+        "TongueTyped no longer picks a shortcut for you. After setup, run `tonguetyped` and \
+         open the Shortcut screen to choose one in your desktop's own shortcut dialog, or set \
+         it from your desktop's keyboard settings."
+    )?;
 
     ui.section(output, 5, "Transcript output")?;
     let output_labels = capabilities.output_labels();
@@ -495,7 +494,12 @@ fn configure(
     writeln!(
         output,
         "  Activation:  {} with {}",
-        config.activation.mode, config.activation.keybind
+        config.activation.mode,
+        if config.activation.keybind.is_empty() {
+            "no shortcut set yet".to_string()
+        } else {
+            crate::activation::keybind_label(&config.activation.keybind)
+        }
     )?;
     writeln!(output, "  Output:      {}", config.output.method)?;
     writeln!(
@@ -556,33 +560,6 @@ fn choose(
             "Invalid choice. Enter a number from 1 to {}.",
             labels.len()
         )?;
-    }
-}
-
-fn prompt_shortcut(
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-    errors: &mut impl Write,
-    default: &str,
-) -> anyhow::Result<Option<String>> {
-    loop {
-        write!(output, "Shortcut [{default}]: ")?;
-        output.flush()?;
-        let Some(answer) = read_answer(input)? else {
-            return Ok(None);
-        };
-        if is_cancel(&answer) {
-            return Ok(None);
-        }
-        let shortcut = if answer.is_empty() {
-            default.to_string()
-        } else {
-            answer
-        };
-        match crate::activation::portal_trigger(&shortcut) {
-            Ok(_) => return Ok(Some(shortcut)),
-            Err(error) => writeln!(errors, "Invalid shortcut: {error}")?,
-        }
     }
 }
 

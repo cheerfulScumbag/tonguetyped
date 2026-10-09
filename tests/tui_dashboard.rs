@@ -725,7 +725,7 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
 }
 
 #[test]
-fn pty_shortcut_screen_edits_the_keybinding_and_reports_portal_failures_inline() {
+fn pty_shortcut_screen_offers_the_system_dialog_and_reports_portal_failures_inline() {
     let sandbox = Sandbox::new("shortcut-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
@@ -737,36 +737,25 @@ fn pty_shortcut_screen_edits_the_keybinding_and_reports_portal_failures_inline()
     session.wait_for("> Shortcut", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
-    session.wait_for("Shortcut: Super+O_", Duration::from_secs(3));
-    session.wait_for("Test shortcut - press it now", Duration::from_secs(3));
-
-    // Backspace edits the raw value (typing is literal on this screen).
-    session.send(b"\x7f");
-    let edited = session.wait_for("Shortcut: Super+_", Duration::from_secs(3));
+    // No app-chosen default: with nothing bound the screen says so and the
+    // only way to set a key is the desktop's own dialog.
+    session.wait_for("Currently bound: (none set yet)", Duration::from_secs(3));
+    let screen = session.wait_for("Set shortcut via system dialog", Duration::from_secs(3));
     assert!(
-        edited.contains("A successful test saves the typed shortcut."),
-        "the idle hint should explain that testing saves:\n{edited}"
+        !screen.contains("Super+O"),
+        "the Shortcut screen must never show an app-chosen default:\n{screen}"
     );
 
-    // Ctrl+R with an invalid value is rejected inline before any portal call.
-    session.send(b"\x12");
-    session.wait_for("Invalid shortcut", Duration::from_secs(3));
-
-    // Repair the value, then Ctrl+R again: the sandbox has no session bus, so
-    // the portal failure must surface inline and the screen must stay usable.
-    session.send(b"O");
-    session.wait_for("Shortcut: Super+O_", Duration::from_secs(3));
+    // Ctrl+R opens the system dialog: the sandbox has no session bus, so the
+    // portal failure must surface inline and the screen must stay usable.
     session.send(b"\x12");
     let failed = session.wait_for("Reconfigure failed", Duration::from_secs(10));
     assert!(
         failed.contains("Shortcut"),
         "the failure should render inside the Shortcut panel:\n{failed}"
     );
-    session.send(b"X");
-    session.wait_for("Shortcut: Super+OX_", Duration::from_secs(3));
 
-    // `q` is a literal keybinding character on this screen, so leave to Home
-    // before quitting.
+    // The screen remains navigable afterwards.
     session.send(KEY_ESC);
     session.wait_for("Settings", Duration::from_secs(3));
     session.quit_and_wait();

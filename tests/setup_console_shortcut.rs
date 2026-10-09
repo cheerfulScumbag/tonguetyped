@@ -152,7 +152,6 @@ impl Drop for Session {
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 const KEY_CTRL_R: &[u8] = b"\x12";
-const KEY_BACKSPACE: &[u8] = b"\x7f";
 
 fn advance_to_shortcut_step(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
@@ -175,15 +174,15 @@ fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
     let shortcut_screen = session.visible_text();
     assert!(
         shortcut_screen.contains("Ctrl+R set via system dialog"),
-        "Shortcut step hint should advertise the new Ctrl+R reconfigure path:\n{shortcut_screen}"
+        "Shortcut step hint should advertise the Ctrl+R dialog path:\n{shortcut_screen}"
     );
     assert!(
-        shortcut_screen.contains("Super+O"),
-        "Shortcut step should start pre-filled with the configured default keybind:\n{shortcut_screen}"
+        !shortcut_screen.contains("Super+O"),
+        "Shortcut step must not pre-fill or imply an app-chosen default:\n{shortcut_screen}"
     );
     assert!(
-        !shortcut_screen.contains("Currently bound:"),
-        "an untested keybind must not claim a real bound trigger yet:\n{shortcut_screen}"
+        shortcut_screen.contains("Shortcut: (none set yet)"),
+        "with nothing bound the step should say so:\n{shortcut_screen}"
     );
 
     // Trigger the real `activation::reconfigure_shortcut` code path. With no
@@ -214,52 +213,19 @@ fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
 }
 
 #[test]
-fn pty_shortcut_step_accepts_a_bare_key_with_no_modifier() {
-    let sandbox = Sandbox::new("bare-key");
+fn pty_shortcut_step_continues_when_no_shortcut_is_bound() {
+    let sandbox = Sandbox::new("no-binding");
     let mut session = Session::spawn(&sandbox, 100, 32);
 
     advance_to_shortcut_step(&mut session);
+    session.wait_for("Ctrl+R set via system dialog", Duration::from_secs(5));
 
-    // Clear the pre-filled default ("Super+O") and type a bare key with no
-    // modifier at all, exactly the "Right Alt" case the captain asked for.
-    for _ in 0.."Super+O".len() {
-        session.send(KEY_BACKSPACE);
-    }
-    session.send(b"Alt_R");
+    // Enter continues without setting anything - the binding is the desktop's
+    // to own, so the wizard must not block on a key it never chose.
     session.send(KEY_ENTER);
-
-    // Advancing past Shortcut must succeed with no "Invalid shortcut"
-    // error - the underlying portal has no modifier requirement.
     let next_screen = session.wait_for("Transcript output", Duration::from_secs(5));
     assert!(
         !next_screen.contains("Invalid shortcut"),
-        "a bare key with no modifier must be accepted:\n{next_screen}"
-    );
-}
-
-#[test]
-fn pty_shortcut_step_rejects_a_dangling_modifier() {
-    let sandbox = Sandbox::new("dangling-modifier");
-    let mut session = Session::spawn(&sandbox, 100, 32);
-
-    advance_to_shortcut_step(&mut session);
-
-    // Loosening the no-modifier case must not loosen validation of a
-    // genuinely malformed shortcut (a modifier with no key after it).
-    for _ in 0.."Super+O".len() {
-        session.send(KEY_BACKSPACE);
-    }
-    session.send(b"Ctrl+");
-    session.send(KEY_ENTER);
-
-    let error_screen = session.wait_for("Invalid shortcut", Duration::from_secs(5));
-    assert!(
-        error_screen.contains("activation.keybind must contain a key"),
-        "should surface the specific validation error:\n{error_screen}"
-    );
-    // Must stay on the Shortcut step rather than silently advancing.
-    assert!(
-        error_screen.contains("Shortcut"),
-        "a rejected shortcut must keep the user on the Shortcut step:\n{error_screen}"
+        "continuing with no binding must never be rejected:\n{next_screen}"
     );
 }

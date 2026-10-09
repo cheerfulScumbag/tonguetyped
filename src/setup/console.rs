@@ -102,7 +102,6 @@ struct ConsoleState {
     overlay_position_selection: usize,
     overlay_style_selection: usize,
     overlay_streaming_selection: usize,
-    shortcut_input: String,
     shortcut_handle: Option<ReconfigureHandle>,
     shortcut_feedback: Option<Result<String, String>>,
     error: Option<String>,
@@ -168,7 +167,6 @@ impl ConsoleState {
             .position(|value| *value == config.overlay.style)
             .unwrap_or(0);
         let overlay_streaming_selection = usize::from(config.overlay.streaming_indicator);
-        let shortcut_input = config.activation.keybind.clone();
 
         Self {
             config,
@@ -189,7 +187,6 @@ impl ConsoleState {
             overlay_position_selection,
             overlay_style_selection,
             overlay_streaming_selection,
-            shortcut_input,
             shortcut_handle: None,
             shortcut_feedback: None,
             error: None,
@@ -296,12 +293,6 @@ impl ConsoleState {
         match key.code {
             KeyCode::Enter => return self.advance(),
             KeyCode::Esc => return Ok(self.retreat()),
-            KeyCode::Backspace => {
-                self.shortcut_input.pop();
-            }
-            KeyCode::Char(c) => {
-                self.shortcut_input.push(c);
-            }
             _ => {}
         }
         Ok(ControlFlow::Continue)
@@ -454,25 +445,9 @@ impl ConsoleState {
                 };
             }
             StepKind::Shortcut => {
-                let shortcut = self.shortcut_input.trim().to_string();
-                match crate::activation::portal_trigger(&shortcut) {
-                    Ok(_) => {
-                        // Only invalidate a known-real binding (learned from
-                        // a completed reconfigure, see
-                        // `refresh_shortcut_reconfigure`) when the typed
-                        // value actually changed - otherwise leave it so the
-                        // Confirm screen keeps showing the real trigger
-                        // instead of reverting to "untested".
-                        if shortcut != self.config.activation.keybind {
-                            self.config.activation.keybind_status = "untested".to_string();
-                        }
-                        self.config.activation.keybind = shortcut;
-                    }
-                    Err(err) => {
-                        self.error = Some(format!("Invalid shortcut: {err}"));
-                        return Ok(ControlFlow::Continue);
-                    }
-                }
+                // The binding is set entirely by the desktop's own dialog
+                // (`Ctrl+R` -> `start_shortcut_reconfigure`); there is no
+                // typed value to validate or store, so Enter just continues.
             }
             StepKind::Output => {
                 if self.output_selection == 0 {
@@ -583,22 +558,16 @@ impl ConsoleState {
     }
 
     /// Starts the portal's native "press your new shortcut" dialog in the
-    /// background (`setup::reconfigure_shortcut_async`) - the only way to
-    /// actually change the "activation" shortcut once it has ever been
-    /// bound before, since the desktop ignores `preferred_trigger` after
-    /// that (see `activation::bind_activation_shortcut`'s doc comment).
+    /// background (`setup::reconfigure_shortcut_async`) - the only way to set
+    /// the "activation" shortcut, since TongueTyped registers no default
+    /// trigger.
     fn start_shortcut_reconfigure(&mut self) {
         if self.shortcut_handle.is_some() {
             return;
         }
-        let shortcut = self.shortcut_input.trim().to_string();
-        if let Err(err) = crate::activation::portal_trigger(&shortcut) {
-            self.error = Some(format!("Invalid shortcut: {err}"));
-            return;
-        }
         self.error = None;
         self.shortcut_feedback = None;
-        self.shortcut_handle = Some(super::reconfigure_shortcut_async(shortcut));
+        self.shortcut_handle = Some(super::reconfigure_shortcut_async());
     }
 
     /// Polled every render tick while a reconfigure dialog is in flight,
@@ -613,7 +582,7 @@ impl ConsoleState {
         };
         self.shortcut_handle = None;
         if let Ok(trigger_description) = &outcome {
-            self.config.activation.keybind_status = trigger_description.clone();
+            self.config.activation.keybind = crate::activation::keybind_label(trigger_description);
         }
         self.shortcut_feedback = Some(outcome);
     }
@@ -702,9 +671,7 @@ impl ConsoleState {
             StepKind::Shortcut if self.shortcut_handle.is_some() => {
                 "Waiting for the system shortcut dialog...  Esc back"
             }
-            StepKind::Shortcut => {
-                "Type key or modifiers+key (e.g. Ctrl+Shift+Space, F13)  Ctrl+R set via system dialog  Enter confirm  Esc back"
-            }
+            StepKind::Shortcut => "Ctrl+R set via system dialog  Enter continue  Esc back",
             StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
             StepKind::Downloading if !self.downloads_finished() => "Fetching...  Esc back  q quit",
             StepKind::Downloading => "Enter continue  Esc back  q quit",
@@ -970,13 +937,10 @@ impl ConsoleState {
     }
 
     fn render_shortcut(&self, frame: &mut Frame, area: Rect) {
-        let mut lines = vec![Line::from(format!("Shortcut: {}_", self.shortcut_input))];
-        if self.config.activation.keybind_status != "untested" {
-            lines.push(Line::from(format!(
-                "Currently bound: {}",
-                self.config.activation.keybind_status
-            )));
-        }
+        let mut lines = vec![Line::from(format!(
+            "Shortcut: {}",
+            crate::activation::keybind_display(&self.config.activation.keybind)
+        ))];
         lines.push(Line::from(""));
         if self.shortcut_handle.is_some() {
             lines.push(Line::from(Span::styled(
@@ -986,7 +950,10 @@ impl ConsoleState {
         } else if let Some(feedback) = &self.shortcut_feedback {
             match feedback {
                 Ok(trigger_description) => lines.push(Line::from(Span::styled(
-                    format!("Shortcut bound: {trigger_description}"),
+                    format!(
+                        "Shortcut bound: {}",
+                        crate::activation::keybind_label(trigger_description)
+                    ),
                     Style::default().fg(Color::Green),
                 ))),
                 Err(error) => lines.push(Line::from(Span::styled(
@@ -994,15 +961,15 @@ impl ConsoleState {
                     Style::default().fg(Color::Red),
                 ))),
             }
+        } else if self.config.activation.keybind.is_empty() {
+            lines.push(Line::from(
+                "No shortcut set yet. TongueTyped registers the dictation action with the \
+                 desktop and never picks a key - press Ctrl+R to choose one in your desktop's \
+                 own shortcut dialog.",
+            ));
         } else {
             lines.push(Line::from(
-                "Type a key, optionally with modifiers (Ctrl, Alt, Shift, Super), e.g. \
-                 Ctrl+Shift+Space, or a bare key such as F13 or Alt_R (Right Alt) - \
-                 only used the first time this shortcut is ever bound.",
-            ));
-            lines.push(Line::from(
-                "Already bound before? Ctrl+R opens your desktop's own shortcut dialog so you \
-                 can set the real trigger.",
+                "Ctrl+R opens your desktop's own shortcut dialog to change this binding.",
             ));
         }
         frame.render_widget(
@@ -1026,11 +993,7 @@ impl ConsoleState {
             Line::from(format!(
                 "Activation:  {} with {}",
                 self.config.activation.mode,
-                if self.config.activation.keybind_status == "untested" {
-                    self.config.activation.keybind.as_str()
-                } else {
-                    self.config.activation.keybind_status.as_str()
-                }
+                crate::activation::keybind_display(&self.config.activation.keybind)
             )),
             Line::from(format!("Output:      {}", self.config.output.method)),
             Line::from(format!(
@@ -1466,10 +1429,7 @@ mod tests {
         state.refresh_shortcut_reconfigure();
 
         assert!(state.shortcut_handle.is_none());
-        assert_eq!(
-            state.config.activation.keybind_status,
-            "Ctrl + Shift + Space"
-        );
+        assert_eq!(state.config.activation.keybind, "Ctrl + Shift + Space");
         assert_eq!(
             state.shortcut_feedback,
             Some(Ok("Ctrl + Shift + Space".to_string()))
@@ -1477,10 +1437,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_reconfigure_reports_the_error_and_leaves_keybind_status_untouched() {
+    fn reconfigure_rewrites_kdes_meta_wording_to_super() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::Shortcut;
-        let previous_status = state.config.activation.keybind_status.clone();
+        state.shortcut_handle = Some(ReconfigureHandle {
+            result: Arc::new(Mutex::new(Some(Ok("Meta+O".to_string())))),
+        });
+
+        state.refresh_shortcut_reconfigure();
+
+        assert_eq!(state.config.activation.keybind, "Super+O");
+    }
+
+    #[test]
+    fn failed_reconfigure_reports_the_error_and_leaves_the_binding_untouched() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        let previous_binding = state.config.activation.keybind.clone();
         state.shortcut_handle = Some(ReconfigureHandle {
             result: Arc::new(Mutex::new(Some(Err("timed out waiting for the shortcut \
                 dialog"
@@ -1490,7 +1463,7 @@ mod tests {
         state.refresh_shortcut_reconfigure();
 
         assert!(state.shortcut_handle.is_none());
-        assert_eq!(state.config.activation.keybind_status, previous_status);
+        assert_eq!(state.config.activation.keybind, previous_binding);
         assert_eq!(
             state.shortcut_feedback,
             Some(Err("timed out waiting for the shortcut dialog".to_string()))
@@ -1498,29 +1471,14 @@ mod tests {
     }
 
     #[test]
-    fn advancing_past_an_unchanged_shortcut_preserves_a_known_real_binding() {
+    fn advancing_past_the_shortcut_step_leaves_the_reported_binding_untouched() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::Shortcut;
-        // Simulate a completed reconfigure: the typed field still reads the
-        // original default, but the real bound trigger is now known.
-        state.config.activation.keybind_status = "Super + O".to_string();
+        state.config.activation.keybind = "Super+O".to_string();
 
         state.advance().unwrap();
 
-        assert_eq!(state.config.activation.keybind_status, "Super + O");
-    }
-
-    #[test]
-    fn advancing_with_an_edited_shortcut_invalidates_the_previously_known_binding() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.config.activation.keybind_status = "Super + O".to_string();
-        state.shortcut_input = "Ctrl+Shift+Space".to_string();
-
-        state.advance().unwrap();
-
-        assert_eq!(state.config.activation.keybind_status, "untested");
-        assert_eq!(state.config.activation.keybind, "Ctrl+Shift+Space");
+        assert_eq!(state.config.activation.keybind, "Super+O");
     }
 
     #[test]

@@ -694,9 +694,6 @@ impl Coordinator {
 
     pub fn validate_reload(&self, config: &Config) -> anyhow::Result<()> {
         config.validate()?;
-        if self.state.lock().unwrap().config.activation.keybind != config.activation.keybind {
-            anyhow::bail!("changing activation.keybind requires a daemon restart");
-        }
         Ok(())
     }
 
@@ -1029,8 +1026,22 @@ impl Coordinator {
         self.last_result.lock().unwrap().clone()
     }
 
-    pub fn activation_keybind(&self) -> String {
-        self.state.lock().unwrap().config.activation.keybind.clone()
+    /// Records the trigger description the desktop reports is bound for the
+    /// activation action, so the stored value always reflects the desktop
+    /// rather than any key TongueTyped chose. Display-only: the daemon never
+    /// binds from it, and a failed save is logged rather than fatal - the
+    /// in-memory value still reflects reality for this run.
+    pub fn record_activation_binding(&self, reported: String) {
+        let mut inner = self.state.lock().unwrap();
+        if inner.config.activation.keybind == reported {
+            return;
+        }
+        inner.config.activation.keybind = reported;
+        if let Err(error) = inner.config.save() {
+            tracing::warn!(
+                "could not persist the activation binding reported by the desktop: {error}"
+            );
+        }
     }
 
     pub fn set_runtime_error(&self, error: String) {

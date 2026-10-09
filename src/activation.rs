@@ -8,6 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const SHORTCUT_ID: &str = "activation";
+/// The human-readable action description the desktop shows in its shortcut
+/// settings. Per the XDG GlobalShortcuts portal spec a `preferred_trigger`
+/// is what the desktop stores as the action's "Default shortcut"; passing
+/// one made KDE display an app-chosen default (`Meta+O`) beside the binding
+/// the user actually set. TongueTyped therefore registers the shortcut with
+/// this description and **no** preferred/default trigger, so the desktop
+/// presents only the user's own binding.
+const SHORTCUT_DESCRIPTION: &str = "Start or stop dictation";
 // A press is a single keystroke - the user either does it within a few
 // seconds or the configured combo doesn't reach this app at all (wrong
 // combo, grabbed by something else, desktop shortcut portal unavailable).
@@ -62,22 +70,18 @@ async fn register_host_app() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Binds the "activation" shortcut on an already-created session, using
-/// `keybind` as the portal's `preferred_trigger` hint. Per the XDG
-/// GlobalShortcuts portal spec, that hint is only honored the very first
-/// time this app ever binds this shortcut id - every later call keeps
-/// whatever trigger the desktop already has on file for it, regardless of
-/// what's passed here. Shared by `listen()`, `test_shortcut_binding()`, and
-/// `reconfigure_shortcut()`, all three of which need a bound shortcut before
-/// they can listen for presses or open the native reconfigure dialog.
+/// Binds the "activation" shortcut on an already-created session with its
+/// id and human description only - no `preferred_trigger`. The return value
+/// is whatever trigger the desktop already has bound for the action (empty
+/// when none), never an app-chosen key. Shared by `listen()`,
+/// `test_shortcut_binding()`, and `reconfigure_shortcut()`, all three of
+/// which need a bound shortcut before they can listen for presses or open
+/// the native reconfigure dialog.
 async fn bind_activation_shortcut<'a>(
     portal: &GlobalShortcuts<'a>,
     session: &Session<'a, GlobalShortcuts<'a>>,
-    keybind: &str,
 ) -> anyhow::Result<String> {
-    let trigger = portal_trigger(keybind)?;
-    let shortcut = NewShortcut::new(SHORTCUT_ID, "Start or stop dictation")
-        .preferred_trigger(Some(trigger.as_str()));
+    let shortcut = NewShortcut::new(SHORTCUT_ID, SHORTCUT_DESCRIPTION);
     let response = portal
         .bind_shortcuts(session, &[shortcut], None)
         .await?
@@ -99,20 +103,20 @@ pub enum ShortcutTestOutcome {
 
 /// Binds the shortcut and then actually listens for it to be pressed (via
 /// the same `receive_activated()` stream `listen()` uses), instead of only
-/// checking that `bind_shortcuts` accepted the registration. The old
-/// behavior reported "shortcut binding available" for any syntactically
-/// valid keybind without ever confirming a press reached the app.
-pub async fn test_shortcut_binding(keybind: &str) -> Result<ShortcutTestOutcome, String> {
-    test_shortcut_binding_inner(keybind)
+/// checking that `bind_shortcuts` accepted the registration. Tests whatever
+/// trigger the desktop currently has bound for the action; the user sets
+/// that trigger through the desktop's own dialog (`reconfigure_shortcut`).
+pub async fn test_shortcut_binding() -> Result<ShortcutTestOutcome, String> {
+    test_shortcut_binding_inner()
         .await
         .map_err(|error| error.to_string())
 }
 
-async fn test_shortcut_binding_inner(keybind: &str) -> anyhow::Result<ShortcutTestOutcome> {
+async fn test_shortcut_binding_inner() -> anyhow::Result<ShortcutTestOutcome> {
     register_host_app().await?;
     let portal = GlobalShortcuts::new().await?;
     let session = portal.create_session().await?;
-    bind_activation_shortcut(&portal, &session, keybind).await?;
+    bind_activation_shortcut(&portal, &session).await?;
 
     let mut activated = portal.receive_activated().await?;
     let wait_for_press = async {
@@ -140,27 +144,25 @@ pub struct ReconfigureOutcome {
 }
 
 /// Opens the desktop's own native "press your new shortcut" dialog
-/// (`GlobalShortcuts::configure_shortcuts`) so the user can actually change
-/// an already-bound shortcut's trigger, then reports back whatever trigger
-/// is really bound afterwards. `preferred_trigger` (what `bind_shortcuts`
-/// alone relies on) cannot do this once a shortcut has ever been bound
-/// before - see the diagnosis in `bind_activation_shortcut`'s doc comment.
-pub async fn reconfigure_shortcut(keybind: &str) -> Result<ReconfigureOutcome, String> {
-    reconfigure_shortcut_inner(keybind)
+/// (`GlobalShortcuts::configure_shortcuts`) so the user can set or change
+/// the activation shortcut's trigger, then reports back whatever trigger is
+/// really bound afterwards. This is the mechanism for setting a key now that
+/// the registration ships no preferred/default trigger, and it works for the
+/// first-ever bind exactly as it does for a rebind.
+pub async fn reconfigure_shortcut() -> Result<ReconfigureOutcome, String> {
+    reconfigure_shortcut_inner()
         .await
         .map_err(|error| error.to_string())
 }
 
-async fn reconfigure_shortcut_inner(keybind: &str) -> anyhow::Result<ReconfigureOutcome> {
+async fn reconfigure_shortcut_inner() -> anyhow::Result<ReconfigureOutcome> {
     register_host_app().await?;
     let portal = GlobalShortcuts::new().await?;
     let session = portal.create_session().await?;
     // `ConfigureShortcuts` requires a session that has already bound at
-    // least one shortcut - this is that bind. Its `preferred_trigger` only
-    // matters if this is the very first time "activation" has ever been
-    // bound for this app; otherwise it's a no-op and the dialog below is
-    // what actually changes the trigger.
-    bind_activation_shortcut(&portal, &session, keybind).await?;
+    // least one shortcut - this is that bind. It carries no preferred
+    // trigger, so the dialog below is the only thing that sets the trigger.
+    bind_activation_shortcut(&portal, &session).await?;
 
     // Subscribe before opening the dialog, not after: the dialog can close
     // (and emit ShortcutsChanged) at any point once ConfigureShortcuts is
@@ -187,40 +189,27 @@ async fn reconfigure_shortcut_inner(keybind: &str) -> anyhow::Result<Reconfigure
     })
 }
 
-pub fn portal_trigger(keybind: &str) -> anyhow::Result<String> {
-    let mut parts: Vec<&str> = keybind.split('+').map(str::trim).collect();
-    let key = parts
-        .pop()
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("activation.keybind must contain a key"))?;
-    if parts.iter().any(|part| part.is_empty()) {
-        anyhow::bail!("activation.keybind has an empty modifier");
-    }
+/// Rewrites the portal's trigger description into TongueTyped's own wording
+/// for display: KDE calls the Super key `Meta`, so `Meta+O` becomes
+/// `Super+O`. The stored value is only ever what the desktop reports is
+/// bound - this is pure display normalization, never something registered
+/// back to the desktop.
+pub fn keybind_label(reported: &str) -> String {
+    reported.replace("Meta", "Super")
+}
 
-    let mut modifiers = Vec::new();
-    for modifier in parts {
-        let modifier = match modifier.to_ascii_lowercase().as_str() {
-            "super" => "LOGO",
-            "ctrl" => "CTRL",
-            "alt" => "ALT",
-            "shift" => "SHIFT",
-            _ => anyhow::bail!("unsupported activation modifier: {modifier}"),
-        };
-        if modifiers.contains(&modifier) {
-            anyhow::bail!("duplicate activation modifier: {modifier}");
-        }
-        modifiers.push(modifier);
+/// The user-facing rendering of whatever the desktop reports is bound:
+/// `keybind_label`, or a friendly placeholder when nothing is bound yet.
+pub fn keybind_display(reported: &str) -> String {
+    if reported.trim().is_empty() {
+        "(none set yet)".to_string()
+    } else {
+        keybind_label(reported)
     }
-    let key = key.to_ascii_lowercase();
-    if modifiers.is_empty() {
-        return Ok(key);
-    }
-    Ok(format!("{}+{key}", modifiers.join("+")))
 }
 
 pub async fn listen(
     coordinator: Arc<Coordinator>,
-    keybind: String,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) -> anyhow::Result<()> {
     if let Err(error) = register_host_app().await {
@@ -237,11 +226,18 @@ pub async fn listen(
         }
     };
     let session = portal.create_session().await?;
-    if let Err(error) = bind_activation_shortcut(&portal, &session, &keybind).await {
-        let message = error.to_string();
-        let _ = ready.send(Err(message.clone()));
-        anyhow::bail!(message);
-    }
+    let reported = match bind_activation_shortcut(&portal, &session).await {
+        Ok(reported) => reported,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = ready.send(Err(message.clone()));
+            anyhow::bail!(message);
+        }
+    };
+    // The registration above is the app's only source of truth for what is
+    // actually bound: persist whatever the desktop reports so `config` never
+    // claims a key TongueTyped chose.
+    coordinator.record_activation_binding(reported);
 
     let mut activated = portal.receive_activated().await?;
     let mut deactivated = portal.receive_deactivated().await?;
@@ -324,28 +320,11 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_configured_keybind_for_portal() {
-        assert_eq!(portal_trigger("Super+O").unwrap(), "LOGO+o");
-        assert_eq!(
-            portal_trigger("Ctrl+Shift+Space").unwrap(),
-            "CTRL+SHIFT+space"
-        );
-        assert!(portal_trigger("Super+Super+O").is_err());
-        assert!(portal_trigger("Hyper+O").is_err());
-        assert!(portal_trigger("Meta+O").is_err());
-        assert!(portal_trigger("Control+O").is_err());
-    }
-
-    #[test]
-    fn accepts_bare_key_without_modifier() {
-        assert_eq!(portal_trigger("F13").unwrap(), "f13");
-        assert_eq!(portal_trigger("Alt_R").unwrap(), "alt_r");
-        assert_eq!(portal_trigger(" F13 ").unwrap(), "f13");
-        assert!(portal_trigger("").is_err());
-        assert!(portal_trigger("+").is_err());
-        assert!(portal_trigger("+F13").is_err());
-        assert!(portal_trigger("Ctrl+").is_err());
-        assert!(portal_trigger("Ctrl++F13").is_err());
+    fn reports_kde_wording_as_the_apps_own_super_modifier() {
+        assert_eq!(keybind_label("Meta+O"), "Super+O");
+        assert_eq!(keybind_label("Ctrl+Meta+Space"), "Ctrl+Super+Space");
+        assert_eq!(keybind_label("Ctrl+Shift+Space"), "Ctrl+Shift+Space");
+        assert_eq!(keybind_label(""), "");
     }
 
     #[test]

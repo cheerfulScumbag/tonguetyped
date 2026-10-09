@@ -57,8 +57,10 @@ The package installs the binary and the
 The second command installs that same entry in your user autostart directory, so
 KDE starts TongueTyped when you next sign in. Sign out and back in after the
 first installation so the desktop portal discovers the Nix profile application
-entry. KDE displays an authorization dialog for the default `Super+O` shortcut
-when TongueTyped starts.
+entry. TongueTyped registers the "Start or stop dictation" action with your
+desktop but does not choose a shortcut for it: set the key from your desktop's
+own shortcut dialog (or the dashboard's Shortcut screen, which opens it for
+you).
 
 Upgrade the profile package without changing the autostart setting:
 
@@ -135,8 +137,9 @@ entry before requesting shortcut authorization so the desktop portal can
 identify the source build. Starting the daemon downloads the selected GGUF
 model to `$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG
 variables are unset, the standard user config and data directories are used. The
-desktop portal may ask you to approve the configured shortcut, which defaults to
-`Super+O` in hold mode.
+desktop portal may ask you to approve the "Start or stop dictation" action; it
+ships with no default key, so set your own in the desktop's shortcut dialog (the
+dashboard's Shortcut screen opens it).
 
 The default output method is `none`, so transcription does not type or copy
 anything. Retrieve the latest result with:
