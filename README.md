@@ -22,16 +22,26 @@ nix develop
 cargo build --release
 ```
 
-Typing into the focused application uses one of three backends: `wtype` on
-Wayland, `enigo` in an X11 session, or `dotool`. Automatic backend selection
-tries them in that order, and only a backend that actually works is ever used.
-The packaged installs carry the Wayland tools with them - the Nix package
-bundles `wtype` and `wl-clipboard` into its wrapper, the .deb recommends both,
-and the Arch package depends on both - so a normal install can type out of the
-box and has the Wayland clipboard tools available. When no typing helper is
-available, the dashboard and the setup wizard say so and name what to install
-(`wtype` on Wayland, otherwise `dotool`) instead of hiding the typing options.
-TongueTyped never uses the clipboard as a typing fallback.
+Typing into the focused application uses one of three backends: `wtype`,
+`enigo` in an X11 session, or `dotool`. Automatic backend selection tries
+them in that order, and only a backend that actually works is ever used.
+`wtype` types through the Wayland virtual-keyboard protocol, which only
+wlroots-based compositors (sway, Hyprland, niri) implement; KDE's KWin and
+other Wayland compositors do not, so `wtype` can never type there. `dotool`
+works on any compositor by typing through `/dev/uinput`, which needs write
+access to that device - membership in the `input` group or a matching udev
+rule - and is not granted by default, so a present `dotool` that cannot open
+`/dev/uinput` is treated as unavailable. The packaged installs carry the
+helpers with them: the Nix package bundles `wtype`, `dotool`, and
+`wl-clipboard` into its wrapper and the Arch package depends on all three, so
+a normal install can type out of the box and has the Wayland clipboard tools
+available; the .deb recommends `wtype` and `wl-clipboard` only - Debian does
+not package `dotool`, so a KDE Wayland user installing from the .deb must
+build `dotool` from source (`go build` from its upstream repository) to type
+on KWin. When no typing helper is available, the dashboard and the
+setup wizard say so and name what to install for this compositor (`dotool` on
+KDE and other non-wlroots compositors, `wtype` on wlroots) instead of hiding
+the typing options. TongueTyped never uses the clipboard as a typing fallback.
 
 ## Installation
 

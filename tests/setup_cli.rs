@@ -16,6 +16,7 @@ fn run_setup(
     config_home: &std::path::Path,
     answers: &str,
     extra_path: Option<&std::path::Path>,
+    desktop: &str,
 ) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tonguetyped"));
     command
@@ -25,7 +26,13 @@ fn run_setup(
         // Pin the session so `enigo` (X11-only) can never count as a typing
         // helper on a developer's desktop, and replace PATH entirely when a
         // bin directory is given so helper detection only sees its stubs.
+        // `desktop` pins the compositor so the install warning is
+        // deterministic: KDE names dotool, a wlroots name such as sway names
+        // wtype.
         .env("XDG_SESSION_TYPE", "wayland")
+        .env("XDG_CURRENT_DESKTOP", desktop)
+        .env("XDG_SESSION_DESKTOP", desktop)
+        .env("DESKTOP_SESSION", desktop)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -54,7 +61,12 @@ fn setup_writes_a_complete_configuration_without_color() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let output = run_setup(&root, "\n\n2\nCtrl+Shift+Space\n2\n2\n2\n\n", Some(&bin));
+    let output = run_setup(
+        &root,
+        "\n\n2\nCtrl+Shift+Space\n2\n2\n2\n\n",
+        Some(&bin),
+        "KDE",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -83,7 +95,7 @@ fn setup_writes_a_complete_configuration_without_color() {
         include_str!("../data/tonguetyped.desktop")
     );
 
-    let output = run_setup(&root, "\n\n\n\n\n\n1\n\n", Some(&bin));
+    let output = run_setup(&root, "\n\n\n\n\n\n1\n\n", Some(&bin), "KDE");
     assert!(
         output.status.success(),
         "{}",
@@ -103,9 +115,10 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
     std::fs::create_dir_all(&bin).unwrap();
 
     // Answer 2 at "Transcript output" (type) while the sandbox PATH has no
-    // helper: the setup must refuse it with the install warning, re-prompt,
+    // helper and the compositor is KDE: the setup must refuse it with the
+    // install warning, naming dotool (wtype cannot work on KWin), re-prompt,
     // then accept 1 (keep in TongueTyped) and finish normally.
-    let output = run_setup(&root, "\n\n\n\n2\n1\n\n\n", Some(&bin));
+    let output = run_setup(&root, "\n\n\n\n2\n1\n\n\n", Some(&bin), "KDE");
     assert!(
         output.status.success(),
         "{}",
@@ -119,11 +132,11 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
         "both transcript output choices must be listed even with no helper:\n{stdout}"
     );
     assert!(
-        stdout.contains("install wtype"),
-        "the warning must say what to install, before the choices:\n{stdout}"
+        stdout.contains("install dotool"),
+        "KDE must be told to install dotool, not wtype:\n{stdout}"
     );
     assert!(
-        stderr.contains("install wtype"),
+        stderr.contains("install dotool"),
         "the refused choice must repeat what to install:\n{stderr}"
     );
 
@@ -138,6 +151,27 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
 }
 
 #[test]
+fn setup_on_a_wlroots_compositor_names_wtype() {
+    let root = root("wlroots-helper");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+
+    // sway is wlroots, so the missing helper to name is wtype, not dotool.
+    let output = run_setup(&root, "\n\n\n\n2\n1\n\n\n", Some(&bin), "sway");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("install wtype"),
+        "a wlroots compositor must be told to install wtype:\n{stdout}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cancellation_preserves_the_existing_file_byte_for_byte() {
     let root = root("cancel");
     let directory = root.join("tonguetyped");
@@ -145,7 +179,7 @@ fn cancellation_preserves_the_existing_file_byte_for_byte() {
     let original = "# keep this comment\n[activation]\nmode = \"toggle\"\n";
     std::fs::write(directory.join("config.toml"), original).unwrap();
 
-    let output = run_setup(&root, "\nq\n", None);
+    let output = run_setup(&root, "\nq\n", None, "KDE");
     assert!(output.status.success());
     assert!(String::from_utf8(output.stdout)
         .unwrap()
@@ -160,7 +194,7 @@ fn cancellation_preserves_the_existing_file_byte_for_byte() {
 #[test]
 fn invalid_answers_are_rejected_and_eof_does_not_write() {
     let root = root("invalid");
-    let output = run_setup(&root, "99\n", None);
+    let output = run_setup(&root, "99\n", None, "KDE");
     assert!(output.status.success());
     assert!(String::from_utf8(output.stderr)
         .unwrap()
@@ -180,7 +214,7 @@ fn successful_write_leaves_only_the_complete_destination() {
     )
     .unwrap();
 
-    let output = run_setup(&root, "\n\n\n\n\n\n\n", None);
+    let output = run_setup(&root, "\n\n\n\n\n\n\n", None, "KDE");
     assert!(output.status.success());
     let entries: Vec<_> = std::fs::read_dir(&directory)
         .unwrap()

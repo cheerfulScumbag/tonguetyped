@@ -22,14 +22,15 @@ license=('custom')
 options=('!debug')
 provides=('tonguetyped')
 conflicts=('tonguetyped')
-# wtype and wl-clipboard are hard dependencies: the AUR package should type
-# into the focused application out of the box on Wayland and ship the Wayland
-# clipboard tools (xdotool already covers the built-in enigo backend on X11).
-# dotool stays optional as the detected alternative.
-depends=('alsa-lib' 'openssl' 'xdotool' 'wtype' 'wl-clipboard')
+# wtype, dotool, and wl-clipboard are hard dependencies: the AUR package
+# should type into the focused application out of the box. wtype covers
+# wlroots Wayland compositors, dotool covers KWin and other compositors wtype
+# cannot reach (it types through /dev/uinput, so the user must be in the
+# `input` group or have a matching udev rule), and xdotool already covers the
+# built-in enigo backend on X11.
+depends=('alsa-lib' 'openssl' 'xdotool' 'wtype' 'dotool' 'wl-clipboard')
 optdepends=(
   'wayland: desktop overlay feedback while recording'
-  'dotool: typing output without a windowing system'
 )
 source=("https://github.com/cheerfulScumbag/tonguetyped/releases/download/v${pkgver}/tonguetyped-v${pkgver}-linux-x86_64")
 sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
