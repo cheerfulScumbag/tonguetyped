@@ -149,8 +149,9 @@ impl ConsoleState {
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = capabilities.output_labels();
-        let output_selection =
-            usize::from(config.output.method == OutputMethod::Type && output_labels.len() > 1);
+        let output_selection = usize::from(
+            config.output.method == OutputMethod::Type && capabilities.has_type_backend(),
+        );
         let backend_values = capabilities.typing_backend_values();
         let backend_selection = backend_values
             .iter()
@@ -369,7 +370,7 @@ impl ConsoleState {
     }
 
     fn has_backend_step(&self) -> bool {
-        self.output_selection == 1 && !self.capabilities.typing_backends.is_empty()
+        self.output_selection == 1 && self.capabilities.has_type_backend()
     }
 
     /// The overlay's position/streaming sub-steps are only worth configuring
@@ -477,6 +478,15 @@ impl ConsoleState {
                 if self.output_selection == 0 {
                     self.config.output.method = OutputMethod::None;
                     self.config.output.typing_backend = "auto".to_string();
+                } else if !self.capabilities.has_type_backend() {
+                    // Only a helper that actually works may be selected: stay
+                    // on this step and explain what to install instead of
+                    // saving an output method that can never type.
+                    self.error = self
+                        .capabilities
+                        .typing_helper_warning()
+                        .map(str::to_string);
+                    return Ok(ControlFlow::Continue);
                 } else {
                     self.config.output.method = OutputMethod::Type;
                 }
@@ -674,6 +684,13 @@ impl ConsoleState {
 
         let footer = if let Some(error) = &self.error {
             Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)))
+        } else if self.step == StepKind::Output {
+            match self.capabilities.typing_helper_warning() {
+                Some(warning) => {
+                    Line::from(Span::styled(warning, Style::default().fg(Color::Yellow)))
+                }
+                None => Line::from(self.hint_text()),
+            }
         } else {
             Line::from(self.hint_text())
         };
@@ -1241,6 +1258,30 @@ mod tests {
         state.downloading_needed = false;
 
         assert_eq!(state.next_step(), Some(StepKind::InferenceBackend));
+    }
+
+    #[test]
+    fn output_step_refuses_typing_without_a_working_helper() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Output;
+        state.output_selection = 1;
+
+        state.advance().unwrap();
+        assert_eq!(
+            state.step,
+            StepKind::Output,
+            "a refused choice must keep the step open"
+        );
+        assert!(
+            state.error.is_some(),
+            "the refusal must say what to install: {:?}",
+            state.error
+        );
+        assert_eq!(state.config.output.method, OutputMethod::None);
+
+        state.output_selection = 0;
+        state.advance().unwrap();
+        assert_eq!(state.step, StepKind::Startup);
     }
 
     fn capabilities_with_backends(backends: &[(&'static str, Option<&str>)]) -> Capabilities {

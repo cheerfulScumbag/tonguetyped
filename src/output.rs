@@ -127,8 +127,27 @@ pub fn type_backend_available(backend: &str) -> bool {
     }
 }
 
+/// The warning the configuration UIs and the daemon startup log show when no
+/// typing helper is usable, naming what to install for this session type.
+/// `enigo` needs no install - it is built in - so the missing piece is always
+/// one of the two external helpers, `wtype` on Wayland or `dotool` elsewhere.
+/// The restart note is real, not boilerplate: `cached_auto_backend` and the
+/// daemon process both memoize the probe, so a helper installed while
+/// TongueTyped is running is not picked up until it restarts.
+pub fn typing_helper_warning() -> &'static str {
+    if session_is_wayland() {
+        "No typing helper found - install wtype, then restart TongueTyped."
+    } else {
+        "No typing helper found - install dotool, then restart TongueTyped."
+    }
+}
+
+fn session_is_wayland() -> bool {
+    std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland")
+}
+
 fn enigo_available() -> bool {
-    if std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland") {
+    if session_is_wayland() {
         return false;
     }
     use enigo::{Enigo, Settings};
@@ -186,6 +205,15 @@ mod tests {
     fn test_probe_returns_string() {
         let backend = probe_type_backend();
         assert!(!backend.is_empty());
+    }
+
+    #[test]
+    fn typing_helper_warning_names_a_helper_to_install() {
+        let warning = typing_helper_warning();
+        assert!(
+            warning.contains("install wtype") || warning.contains("install dotool"),
+            "the warning must say what to install: {warning}"
+        );
     }
 
     #[test]

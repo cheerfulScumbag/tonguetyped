@@ -464,16 +464,22 @@ pub(super) struct OutputScreen {
     pub labels: Vec<String>,
     pub selected: usize,
     pub result: Option<Result<(), String>>,
+    type_backend_available: bool,
+    warning: Option<&'static str>,
 }
 
 impl OutputScreen {
     pub(super) fn new(capabilities: &Capabilities, config: &Config) -> Self {
         let labels = capabilities.output_labels();
-        let selected = usize::from(config.output.method == OutputMethod::Type && labels.len() > 1);
+        let type_backend_available = capabilities.has_type_backend();
+        let selected =
+            usize::from(config.output.method == OutputMethod::Type && type_backend_available);
         Self {
             labels,
             selected,
             result: None,
+            type_backend_available,
+            warning: capabilities.typing_helper_warning(),
         }
     }
 
@@ -486,17 +492,35 @@ impl OutputScreen {
         self.selected = next;
     }
 
-    pub(super) fn apply(&mut self, config: &mut Config) {
+    /// Applies the highlighted choice. "Type into the focused application"
+    /// can only be applied while a helper actually works; choosing it without
+    /// one leaves the configuration untouched and returns the refusal for
+    /// the result line, so the screen explains what to install instead of
+    /// silently saving a method that can never type.
+    pub(super) fn apply(&mut self, config: &mut Config) -> Result<(), String> {
         if self.selected == 0 {
             config.output.method = OutputMethod::None;
             config.output.typing_backend = "auto".to_string();
-        } else {
-            config.output.method = OutputMethod::Type;
+            return Ok(());
         }
+        if !self.type_backend_available {
+            // The standing warning just above the list names what to install;
+            // this line only has to say the choice was refused.
+            return Err("Cannot apply: no typing helper is installed.".to_string());
+        }
+        config.output.method = OutputMethod::Type;
+        Ok(())
     }
 
     pub(super) fn list_widget(&self) -> Paragraph<'static> {
         selection_list("Transcript output", &self.labels, self.selected)
+    }
+
+    /// The install warning shown under the list when no typing helper works,
+    /// or an empty line - the same slot renders either way, so the layout
+    /// does not shift.
+    pub(super) fn warning_line(&self) -> Line<'static> {
+        typing_warning_line(self.warning)
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -509,6 +533,7 @@ pub(super) struct TypingBackendScreen {
     pub values: Vec<String>,
     pub selected: usize,
     pub result: Option<Result<(), String>>,
+    warning: Option<&'static str>,
 }
 
 impl TypingBackendScreen {
@@ -522,6 +547,7 @@ impl TypingBackendScreen {
             values,
             selected,
             result: None,
+            warning: capabilities.typing_helper_warning(),
         }
     }
 
@@ -542,6 +568,12 @@ impl TypingBackendScreen {
 
     pub(super) fn list_widget(&self) -> Paragraph<'static> {
         selection_list("Typing backend", &self.values, self.selected)
+    }
+
+    /// The install warning shown under the list when the helper list is
+    /// empty, or an empty line.
+    pub(super) fn warning_line(&self) -> Line<'static> {
+        typing_warning_line(self.warning)
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -691,6 +723,16 @@ fn result_line(result: &Option<Result<(), String>>, success: &str) -> Line<'stat
     }
 }
 
+/// The yellow install warning the two typing-related settings screens show
+/// when no helper works - or an empty line, so the screen's layout slot
+/// never shifts.
+fn typing_warning_line(warning: Option<&'static str>) -> Line<'static> {
+    match warning {
+        Some(warning) => Line::from(Span::styled(warning, Style::default().fg(Color::Yellow))),
+        None => Line::from(""),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,9 +823,70 @@ mod tests {
         config.output.typing_backend = "wtype".to_string();
         let mut screen = OutputScreen::new(&capabilities, &config);
         screen.selected = 0;
-        screen.apply(&mut config);
+        screen.apply(&mut config).unwrap();
         assert_eq!(config.output.method, OutputMethod::None);
         assert_eq!(config.output.typing_backend, "auto");
+    }
+
+    #[test]
+    fn output_screen_lists_the_type_choice_even_without_a_helper() {
+        let capabilities = capabilities_without_backends();
+        let screen = OutputScreen::new(&capabilities, &Config::default());
+        assert_eq!(
+            screen.labels,
+            vec![
+                "Keep transcripts in TongueTyped".to_string(),
+                "Type into the focused application".to_string(),
+            ],
+            "the type choice must stay listed so the warning can explain it"
+        );
+        assert!(screen.warning.is_some());
+    }
+
+    #[test]
+    fn output_screen_refuses_the_type_choice_without_a_working_helper() {
+        let capabilities = capabilities_without_backends();
+        let mut config = Config::default();
+        config.output.method = OutputMethod::Type;
+        config.output.typing_backend = "auto".to_string();
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        assert_eq!(
+            screen.selected, 0,
+            "a configured-but-unavailable type choice must not be preselected"
+        );
+
+        screen.selected = 1;
+        let refusal = screen.apply(&mut config).unwrap_err();
+        assert!(
+            refusal.contains("Cannot apply"),
+            "the refusal must explain itself: {refusal}"
+        );
+        assert_eq!(
+            config.output.method,
+            OutputMethod::Type,
+            "a refused choice must leave the configuration untouched"
+        );
+    }
+
+    #[test]
+    fn output_screen_applies_the_type_choice_when_a_helper_works() {
+        let capabilities = test_capabilities();
+        let mut config = Config::default();
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        assert!(screen.warning.is_none());
+
+        screen.selected = 1;
+        screen.apply(&mut config).unwrap();
+        assert_eq!(config.output.method, OutputMethod::Type);
+    }
+
+    #[test]
+    fn typing_backend_screen_warns_when_the_helper_list_is_empty() {
+        let capabilities = capabilities_without_backends();
+        let screen = TypingBackendScreen::new(&capabilities, &Config::default());
+        assert_eq!(screen.values, vec!["auto".to_string()]);
+        let warning = screen.warning.expect("no helpers should warn");
+        assert!(warning.contains("install"));
     }
 
     #[test]
@@ -793,6 +896,7 @@ mod tests {
         config.output.typing_backend = "enigo".to_string();
         let screen = TypingBackendScreen::new(&capabilities, &config);
         assert_eq!(screen.values[screen.selected], "enigo");
+        assert!(screen.warning.is_none());
     }
 
     #[test]
@@ -820,6 +924,13 @@ mod tests {
             ],
             typing_backends: vec!["wtype".to_string(), "enigo".to_string()],
             inference_backends: Vec::new(),
+        }
+    }
+
+    fn capabilities_without_backends() -> Capabilities {
+        Capabilities {
+            typing_backends: Vec::new(),
+            ..test_capabilities()
         }
     }
 

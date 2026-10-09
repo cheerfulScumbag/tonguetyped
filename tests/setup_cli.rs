@@ -22,14 +22,15 @@ fn run_setup(
         .arg("setup")
         .env("XDG_CONFIG_HOME", config_home)
         .env("NO_COLOR", "1")
+        // Pin the session so `enigo` (X11-only) can never count as a typing
+        // helper on a developer's desktop, and replace PATH entirely when a
+        // bin directory is given so helper detection only sees its stubs.
+        .env("XDG_SESSION_TYPE", "wayland")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(extra_path) = extra_path {
-        let current_path = std::env::var_os("PATH").unwrap_or_default();
-        let paths =
-            std::iter::once(extra_path.to_path_buf()).chain(std::env::split_paths(&current_path));
-        command.env("PATH", std::env::join_paths(paths).unwrap());
+        command.env("PATH", extra_path);
     }
     let mut child = command.spawn().unwrap();
     child
@@ -92,6 +93,47 @@ fn setup_writes_a_complete_configuration_without_color() {
     let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
     assert!(!config.startup.autostart);
     assert!(!root.join("autostart/tonguetyped.desktop").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
+    let root = root("no-helper");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+
+    // Answer 2 at "Transcript output" (type) while the sandbox PATH has no
+    // helper: the setup must refuse it with the install warning, re-prompt,
+    // then accept 1 (keep in TongueTyped) and finish normally.
+    let output = run_setup(&root, "\n\n\n\n2\n1\n\n\n", Some(&bin));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stdout.contains("Keep transcripts in TongueTyped")
+            && stdout.contains("Type into the focused application"),
+        "both transcript output choices must be listed even with no helper:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("install wtype"),
+        "the warning must say what to install, before the choices:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("install wtype"),
+        "the refused choice must repeat what to install:\n{stderr}"
+    );
+
+    let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert_eq!(
+        config.output.method,
+        tonguetyped::config::OutputMethod::None,
+        "a refused type choice must not be saved"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

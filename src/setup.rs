@@ -187,7 +187,7 @@ impl Capabilities {
                     "default".to_string(),
                     "System default microphone".to_string(),
                 )],
-                typing_backends: Vec::new(),
+                typing_backends: crate::output::list_available_backends(),
                 inference_backends: crate::inference::backend_choices(),
             }
         })
@@ -216,15 +216,32 @@ impl Capabilities {
         })
     }
 
+    /// Whether any typing helper actually works here. The configuration UIs
+    /// use this to keep "type into the focused application" from ever being
+    /// selected on a machine where it would fail (see
+    /// `crate::output::list_available_backends`, which populates
+    /// `typing_backends`).
+    pub(crate) fn has_type_backend(&self) -> bool {
+        !self.typing_backends.is_empty()
+    }
+
+    /// The install warning both configuration UIs show when
+    /// `has_type_backend` is false, or `None` otherwise.
+    pub(crate) fn typing_helper_warning(&self) -> Option<&'static str> {
+        (!self.has_type_backend()).then(crate::output::typing_helper_warning)
+    }
+
     /// The transcript-output choices, in the order both configuration UIs
-    /// offer them: keep-in-app first, type-into-the-focused-application only
-    /// when at least one typing backend is actually available.
+    /// offer them: keep-in-app first, then type-into-the-focused-application.
+    /// The type choice is always listed - the screens explain its
+    /// unavailability via `typing_helper_warning` when no helper works,
+    /// rather than silently dropping it - but it can only be applied when
+    /// `has_type_backend` is true.
     pub(crate) fn output_labels(&self) -> Vec<String> {
-        let mut labels = vec!["Keep transcripts in TongueTyped".to_string()];
-        if !self.typing_backends.is_empty() {
-            labels.push("Type into the focused application".to_string());
-        }
-        labels
+        vec![
+            "Keep transcripts in TongueTyped".to_string(),
+            "Type into the focused application".to_string(),
+        ]
     }
 
     /// The typing-backend choices: explicit automatic selection first, then
@@ -405,19 +422,29 @@ fn configure(
     config.activation.keybind_status = "untested".to_string();
 
     ui.section(output, 5, "Transcript output")?;
-    let mut output_labels = vec!["Keep transcripts in TongueTyped".to_string()];
-    if !capabilities.typing_backends.is_empty() {
-        output_labels.push("Type into the focused application".to_string());
-    } else {
-        writeln!(
-            output,
-            "No supported typing backend was detected; transcripts will stay in TongueTyped."
-        )?;
+    let output_labels = capabilities.output_labels();
+    if let Some(warning) = capabilities.typing_helper_warning() {
+        writeln!(output, "{warning}")?;
     }
     let output_default =
-        usize::from(config.output.method == OutputMethod::Type && output_labels.len() > 1);
-    let Some(output_method) = choose(input, output, errors, &output_labels, output_default)? else {
-        return Ok(SetupOutcome::Cancelled);
+        usize::from(config.output.method == OutputMethod::Type && capabilities.has_type_backend());
+    // Choosing "type" with no working helper is refused with the same warning
+    // rather than silently saved into a configuration that can never type.
+    let output_method = loop {
+        let Some(choice) = choose(input, output, errors, &output_labels, output_default)? else {
+            return Ok(SetupOutcome::Cancelled);
+        };
+        if choice == 1 && !capabilities.has_type_backend() {
+            writeln!(
+                errors,
+                "{}",
+                capabilities
+                    .typing_helper_warning()
+                    .expect("warning exists when no helper does")
+            )?;
+            continue;
+        }
+        break choice;
     };
     if output_method == 0 {
         config.output.method = OutputMethod::None;

@@ -661,7 +661,12 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Screen::TranscriptOutput(screen) = &mut self.screen {
-                    screen.apply(&mut self.config);
+                    if let Err(message) = screen.apply(&mut self.config) {
+                        // Nothing changed, so skip the save (and its success
+                        // feedback): the result line explains the refusal.
+                        screen.result = Some(Err(message));
+                        return;
+                    }
                 }
                 self.save_settings_config();
             }
@@ -1320,13 +1325,15 @@ impl App {
                 Constraint::Min(3),
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(area);
         frame.render_widget(screen.list_widget(), chunks[0]);
-        frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
+        frame.render_widget(Paragraph::new(screen.warning_line()), chunks[1]);
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
-            chunks[2],
+            chunks[3],
         );
     }
 
@@ -1343,6 +1350,7 @@ impl App {
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(area);
         frame.render_widget(screen.list_widget(), chunks[0]);
@@ -1350,10 +1358,11 @@ impl App {
             Paragraph::new("Only used when transcripts are typed into the focused application."),
             chunks[1],
         );
-        frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
+        frame.render_widget(Paragraph::new(screen.warning_line()), chunks[2]);
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[3]);
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
-            chunks[3],
+            chunks[4],
         );
     }
 

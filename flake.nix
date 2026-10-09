@@ -34,6 +34,13 @@
           alsa-lib
           spirv-headers
           xdotool
+          # wtype: the Wayland typing helper; wl-clipboard: Wayland clipboard
+          # tools. Both are bundled into the installed binary's PATH below so
+          # a normal install has them without the user discovering and
+          # installing them manually; present in the dev shell too so
+          # `cargo run`/tests match the packaged behavior.
+          wtype
+          wl-clipboard
           openssl
           # libwayland-client.so: the layer-shell overlay's Wayland connection
           # (src/overlay.rs). Unused, without erroring, on non-Wayland sessions.
@@ -125,7 +132,11 @@
 
         postFixup = ''
           wrapProgram $out/bin/tonguetyped \
-            --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libcanberra-gtk3]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [
+              pkgs.libcanberra-gtk3
+              pkgs.wtype
+              pkgs.wl-clipboard
+            ]}
         '';
 
         doInstallCheck = true;

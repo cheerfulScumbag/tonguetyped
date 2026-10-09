@@ -145,6 +145,25 @@ up the new default.
 dictation's output phase before this, measured at just over 2s in the same real
 `journalctl` latency line referenced above.
 
+The typing helpers are runtime dependencies of the packaged app, not optional
+discoveries: `flake.nix`'s `packages.default` `postFixup` `wrapProgram` prepends
+`wtype` and `wl-clipboard` to the installed binary's PATH (the devShell carries
+them too), `Cargo.toml`'s deb metadata recommends both, and the `PKGBUILD`
+depends on both (`xdotool` already covers the built-in X11 `enigo` backend).
+When no helper actually works, the shared configuration UIs never silently drop
+the "Type into the focused application" choice: `Capabilities::typing_helper_warning()`
+(`src/setup.rs`, wrapping `output::typing_helper_warning()`'s session-aware
+install hint) renders as a warning line in the dashboard's Transcript output
+and Typing backend screens and as the setup console's Output-step footer, and
+choosing type without a working helper is refused (dashboard `OutputScreen::apply`
+returns `Err` for the result line; both setup flows stay on the step) instead of
+saving a method that can never type. A helper installed while TongueTyped is
+running is not picked up until a restart - `cached_auto_backend` and the
+dashboard's `Capabilities` memoize the probe forever - so the warning says so.
+`tests/tui_dashboard.rs`'s PTY sandbox isolates PATH and pins
+`XDG_SESSION_TYPE=wayland` for deterministic helper detection; a test that wants
+a helper drops a stub in via `Sandbox::install_typing_helper`.
+
 Running bare `tonguetyped` (no subcommand) opens the dashboard (`src/tui/`,
 `CLI`'s `command` field is `Option<Commands>` - see `data/tt-tui-dashboard-1/report.md`
 for the original SuperDesign process and `data/tt-add-dashboard-settings-menu-77/report.md`
