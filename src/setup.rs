@@ -187,7 +187,7 @@ impl Capabilities {
                     "default".to_string(),
                     "System default microphone".to_string(),
                 )],
-                typing_backends: Vec::new(),
+                typing_backends: crate::output::list_available_backends(),
                 inference_backends: crate::inference::backend_choices(),
             }
         })
