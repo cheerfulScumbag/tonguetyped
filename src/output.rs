@@ -145,7 +145,7 @@ pub fn type_backend_available(backend: &str) -> bool {
 /// it on every frame while the Output step is open.
 pub fn typing_helper_warning() -> &'static str {
     static WARNING: OnceLock<&'static str> = OnceLock::new();
-    *WARNING.get_or_init(|| {
+    WARNING.get_or_init(|| {
         warning_for(
             recommended_helper(),
             dotool_installed(),
