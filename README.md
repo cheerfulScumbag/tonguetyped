@@ -35,8 +35,10 @@ rule - and is not granted by default, so a present `dotool` that cannot open
 helpers with them: the Nix package bundles `wtype`, `dotool`, and
 `wl-clipboard` into its wrapper and the Arch package depends on all three, so
 a normal install can type out of the box and has the Wayland clipboard tools
-available; the .deb recommends `wtype` and `wl-clipboard` (Debian has no
-`dotool` package). When no typing helper is available, the dashboard and the
+available; the .deb recommends `wtype` and `wl-clipboard` only - Debian does
+not package `dotool`, so a KDE Wayland user installing from the .deb must
+build `dotool` from source (`go build` from its upstream repository) to type
+on KWin. When no typing helper is available, the dashboard and the
 setup wizard say so and name what to install for this compositor (`dotool` on
 KDE and other non-wlroots compositors, `wtype` on wlroots) instead of hiding
 the typing options. TongueTyped never uses the clipboard as a typing fallback.

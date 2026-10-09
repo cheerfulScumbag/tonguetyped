@@ -138,13 +138,20 @@ pub fn type_backend_available(backend: &str) -> bool {
 /// installed but `/dev/uinput` is not writable, the warning names the
 /// permission remedy instead of telling the user to install a binary they
 /// already have.
-/// The restart note is real, not boilerplate: `cached_auto_backend` and the
-/// daemon process both memoize the probe, so a helper installed while
-/// TongueTyped is running is not picked up until it restarts.
+/// The restart note is real, not boilerplate: `cached_auto_backend`, this
+/// warning, and the daemon process all memoize the probe, so a helper
+/// installed while TongueTyped is running is not picked up until it restarts.
+/// The warning is memoized here because the setup console's render path calls
+/// it on every frame while the Output step is open.
 pub fn typing_helper_warning() -> &'static str {
-    let dotool_installed = helper_self_test("dotool");
-    let uinput_writable = device_is_writable(std::path::Path::new("/dev/uinput"));
-    warning_for(recommended_helper(), dotool_installed, uinput_writable)
+    static WARNING: OnceLock<&'static str> = OnceLock::new();
+    *WARNING.get_or_init(|| {
+        warning_for(
+            recommended_helper(),
+            dotool_installed(),
+            device_is_writable(std::path::Path::new("/dev/uinput")),
+        )
+    })
 }
 
 /// The external helper to name for this session: `wtype` only on a Wayland
@@ -210,14 +217,54 @@ fn enigo_available() -> bool {
     Enigo::new(&Settings::default()).is_ok()
 }
 
+/// Whether the `dotool` binary is installed, independent of whether the
+/// current user can open `/dev/uinput`. Running `dotool` to find out cannot
+/// distinguish the two: it opens `/dev/uinput` at startup and exits non-zero
+/// when that open fails, so its self-test reports an installed-but-forbidden
+/// `dotool` as if the binary were missing. The PATH lookup is what makes the
+/// permission remedy in `warning_for` reachable.
+fn dotool_installed() -> bool {
+    binary_on_path("dotool", std::env::var_os("PATH").as_deref())
+}
+
+/// Whether an executable named `name` appears in `path`, the `PATH`
+/// environment value. Kept separate from the environment so the lookup can be
+/// tested against a constructed directory list.
+fn binary_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(path).any(|dir| is_executable_file(&dir.join(name)))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// Whether `dotool` is present *and* can actually inject. It types through
 /// `/dev/uinput`, so a binary that is installed but whose user cannot open
 /// that device (no `input` group membership or matching udev rule) would
-/// silently type nothing - a plain binary-exists check is not enough. Opening
-/// the device for writing is side-effect-free: a virtual device is only
-/// created by a later `UI_DEV_CREATE` ioctl, so this probe leaks no node.
+/// silently type nothing - a plain binary-exists check is not enough. The
+/// device check is also what separates "installed but forbidden" from
+/// "missing", which is why presence above is a PATH lookup rather than a
+/// `dotool` self-test. Opening the device for writing is side-effect-free: a
+/// virtual device is only created by a later `UI_DEV_CREATE` ioctl, so this
+/// probe leaks no node.
 fn dotool_available() -> bool {
-    helper_self_test("dotool") && device_is_writable(std::path::Path::new("/dev/uinput"))
+    dotool_installed() && device_is_writable(std::path::Path::new("/dev/uinput"))
 }
 
 fn device_is_writable(path: &std::path::Path) -> bool {
@@ -362,6 +409,44 @@ mod tests {
         assert!(
             !device_is_writable(&dir.join("missing")),
             "a missing device must fail the dotool probe"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn binary_on_path_finds_an_executable_independently_of_uinput() {
+        // The exact production case: an installed `dotool` must read as
+        // present even when it cannot open /dev/uinput (the state the
+        // permission remedy exists for). Running `dotool` cannot tell that
+        // apart from "not installed", so presence is a PATH lookup.
+        let dir = std::env::temp_dir().join(format!(
+            "tt-dotool-on-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dotool = dir.join("dotool");
+        std::fs::write(&dotool, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dotool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([dir.as_path()]).unwrap();
+        assert!(
+            binary_on_path("dotool", Some(path.as_os_str())),
+            "an executable on PATH must be found without running it"
+        );
+        assert!(
+            !binary_on_path("dotool", Some(std::ffi::OsStr::new("/nonexistent"))),
+            "a name absent from every PATH directory is not installed"
+        );
+        assert!(
+            !binary_on_path("wtype", Some(path.as_os_str())),
+            "only the requested binary counts"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
