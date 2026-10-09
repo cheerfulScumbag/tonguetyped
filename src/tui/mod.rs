@@ -39,7 +39,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::cell::Cell;
 use std::io;
@@ -257,6 +257,11 @@ struct App {
     shortcut_dialog: Option<(String, setup::ReconfigureHandle)>,
     should_quit: bool,
     daemon_status_cache: Cell<Option<(bool, Instant)>>,
+    /// Scroll offset (in wrapped rows) for the current `Screen::Info` pane.
+    /// `render_info` clamps it to the wrapped content height each frame, so
+    /// the key handler can simply increment/decrement it and a transcript
+    /// taller than the pane stays fully reachable.
+    info_scroll: Cell<u16>,
 }
 
 /// How often the home screen's status strip re-probes daemon liveness.
@@ -281,6 +286,7 @@ impl App {
             shortcut_dialog: None,
             should_quit: false,
             daemon_status_cache: Cell::new(None),
+            info_scroll: Cell::new(0),
         }
     }
 
@@ -333,6 +339,7 @@ impl App {
                 is_error: true,
             }],
         };
+        self.info_scroll.set(0);
         self.screen = Screen::Info {
             title: title.to_string(),
             lines,
@@ -799,8 +806,27 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc | KeyCode::Enter => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => self.adjust_info_scroll(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.adjust_info_scroll(1),
+            KeyCode::PageUp => self.adjust_info_scroll(-5),
+            KeyCode::PageDown => self.adjust_info_scroll(5),
+            KeyCode::Home => self.info_scroll.set(0),
+            KeyCode::End => self.info_scroll.set(u16::MAX),
             _ => {}
         }
+    }
+
+    /// `render_info` clamps `info_scroll` to the wrapped content height every
+    /// frame, so moving it without knowing the pane geometry here cannot
+    /// strand the view past the end.
+    fn adjust_info_scroll(&self, delta: i32) {
+        let current = self.info_scroll.get();
+        let next = if delta >= 0 {
+            current.saturating_add(delta.unsigned_abs() as u16)
+        } else {
+            current.saturating_sub(delta.unsigned_abs() as u16)
+        };
+        self.info_scroll.set(next);
     }
 
     fn handle_model_key(&mut self, key: KeyEvent) {
@@ -984,6 +1010,7 @@ impl App {
             self.config = reloaded;
         }
         if let Err(error) = outcome {
+            self.info_scroll.set(0);
             self.screen = Screen::Info {
                 title: "Setup".to_string(),
                 lines: vec![OutputLine {
@@ -999,7 +1026,9 @@ impl App {
         let area = frame.area();
         match &self.screen {
             Screen::Home => self.render_home(frame, area),
-            Screen::Info { title, lines } => render_info(frame, area, title, lines),
+            Screen::Info { title, lines } => {
+                render_info(frame, area, title, lines, &self.info_scroll)
+            }
             Screen::Model(screen) => self.render_model(frame, area, screen),
             Screen::Autostart(screen) => self.render_autostart(frame, area, screen),
             Screen::Daemon(screen) => self.render_daemon(frame, area, screen),
@@ -1384,13 +1413,57 @@ impl App {
     }
 }
 
-fn render_info(frame: &mut Frame, area: Rect, title: &str, lines: &[OutputLine]) {
+/// The Info/result pane shared by every command that reports back to the
+/// dashboard (last-result, status, doctor, model/backend activation, setup
+/// errors). Its content is arbitrary command output - a transcript can be one
+/// very long line - so it must wrap rather than let the widget clip anything
+/// past the pane edge, and it must scroll so wrapped content taller than the
+/// pane stays reachable.
+fn render_info(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    lines: &[OutputLine],
+    scroll: &Cell<u16>,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(area);
 
-    let rendered: Vec<Line> = lines
+    let rendered = rendered_output_lines(lines);
+
+    // Clamp the persistent offset to the wrapped content height. The count is
+    // measured without the block so `line_count` uses this exact inner width -
+    // the rendered `Paragraph`'s text area after its borders - keeping the
+    // clamp consistent with how many rows actually get drawn.
+    let inner_width = chunks[0].width.saturating_sub(2).max(1);
+    let inner_height = chunks[0].height.saturating_sub(2);
+    let wrapped_rows = Paragraph::new(rendered.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(inner_width) as u16;
+    let offset = scroll.get().min(wrapped_rows.saturating_sub(inner_height));
+    scroll.set(offset);
+
+    frame.render_widget(
+        Paragraph::new(rendered)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title.to_string()),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((offset, 0)),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new("↑/↓ scroll  Esc/Enter back  q quit"),
+        chunks[1],
+    );
+}
+
+fn rendered_output_lines(lines: &[OutputLine]) -> Vec<Line<'static>> {
+    lines
         .iter()
         .map(|output| {
             let style = if output.is_error {
@@ -1400,16 +1473,7 @@ fn render_info(frame: &mut Frame, area: Rect, title: &str, lines: &[OutputLine])
             };
             Line::from(Span::styled(output.text.clone(), style))
         })
-        .collect();
-    frame.render_widget(
-        Paragraph::new(rendered).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title.to_string()),
-        ),
-        chunks[0],
-    );
-    frame.render_widget(Paragraph::new("Esc/Enter back  q quit"), chunks[1]);
+        .collect()
 }
 
 async fn ipc_task(request: ipc::Request) -> Vec<OutputLine> {

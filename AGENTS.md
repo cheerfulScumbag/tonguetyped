@@ -225,7 +225,18 @@ cells that changed between frames and jumps the cursor directly between them, so
 naive strip-and-concatenate approach silently merges unrelated rows from different
 redraws into one run-on string with no whitespace between them. `vt100::Parser::
 process` plus `.screen().contents()` tracks real cursor/cell state and returns the
-actual current screen text.
+actual current screen text. `Cargo.toml` enables ratatui's
+`unstable-rendered-line-info` feature only so the dashboard's shared Info/result pane
+(`src/tui/mod.rs::render_info`, backing last-result/status/doctor/activation output)
+can call `Paragraph::line_count` to clamp its scroll offset to the *wrapped* content
+height - command output can be one very long transcript line, so wrapping alone is
+not enough and the pane is scrollable (Up/Down/j/k/PageUp/PageDown/Home/End). The
+offset lives in `App::info_scroll` (`Cell<u16>`) and is clamped inside `render_info`
+each frame, so the key handler never needs the pane geometry. The one PTY test that
+starts a real daemon (`tests/tui_dashboard.rs::open_last_result`) must pass a short
+sandbox tag: a Unix-domain socket path has to fit under `SUN_LEN` (~108 bytes), which
+the longer human-readable tags the other sandboxes use would exceed under Nix's
+already-long `TMPDIR`.
 
 The setup console's step wizard (`src/setup/console.rs`) derives
 `next_step`/`prev_step`/`step_index`/`step_total` from one `step_sequence()` method
