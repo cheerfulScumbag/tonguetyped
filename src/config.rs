@@ -33,12 +33,12 @@ pub struct ActivationConfig {
     #[serde(default = "default_activation_mode")]
     pub mode: ActivationMode,
     /// The dictation shortcut the desktop currently has bound for this app,
-    /// as reported by the global-shortcuts portal (for example KDE's
-    /// `Meta+O`, which the app renders as `Super+O`), or empty when none is
-    /// known yet. TongueTyped never chooses or registers a key: the binding
-    /// belongs to the desktop, so this is only the last value the portal told
-    /// us is bound. Render it with `crate::activation::keybind_display`,
-    /// never parse or re-register it.
+    /// as reported by the global-shortcuts portal and normalized into the
+    /// app's own wording (KDE's `Meta+O` is stored as `Super+O`), or empty
+    /// when none is known yet. TongueTyped never chooses or registers a key:
+    /// the binding belongs to the desktop, so this is only the last value the
+    /// portal told us is bound. Render it with
+    /// `crate::activation::keybind_display`, never parse or re-register it.
     #[serde(default)]
     pub keybind: String,
 }
@@ -526,8 +526,9 @@ fn migrate_legacy_model_config(raw: &mut toml::Value) -> bool {
 /// (so `#[serde(deny_unknown_fields)]` keeps loading old files) and drops a
 /// `keybind` that was never confirmed by the desktop (the old status
 /// `"untested"` meant it was a typed-but-unverified value, never a portal
-/// report); a value the desktop actually reported is kept. Mutates `raw` in
-/// place and returns whether a migration happened.
+/// report). A real reported status is the desktop's own descriptor of what is
+/// bound, so it replaces whatever typed `keybind` sat beside it. Mutates
+/// `raw` in place and returns whether a migration happened.
 fn migrate_legacy_activation_config(raw: &mut toml::Value) -> bool {
     let Some(activation) = raw
         .as_table_mut()
@@ -550,19 +551,13 @@ fn migrate_legacy_activation_config(raw: &mut toml::Value) -> bool {
             activation.remove("keybind");
         }
         Some(reported) => {
-            // A real descriptor was recorded; keep the user-facing `keybind`
-            // if present, otherwise fall back to what the desktop reported.
-            let keybind_missing = activation
-                .get("keybind")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .is_none_or(str::is_empty);
-            if keybind_missing {
-                activation.insert(
-                    "keybind".to_string(),
-                    toml::Value::String(reported.to_string()),
-                );
-            }
+            // A real descriptor was recorded: it is what the desktop actually
+            // has bound, so it is the source of truth and replaces any old
+            // app-chosen/typed `keybind`.
+            activation.insert(
+                "keybind".to_string(),
+                toml::Value::String(crate::activation::keybind_label(reported)),
+            );
         }
     }
     true
@@ -869,6 +864,29 @@ mod tests {
         assert!(migrate_legacy_activation_config(&mut raw));
         let config: Config = raw.try_into().unwrap();
         assert_eq!(config.activation.keybind, "Alt+R");
+    }
+
+    #[test]
+    fn activation_migration_prefers_the_desktop_reported_status() {
+        // Old configs kept the typed/never-confirmed guess in `keybind` and
+        // the desktop's real report in `keybind_status`; the report is what
+        // was actually bound, so it must win.
+        let mut raw: toml::Value = toml::from_str(
+            "[activation]\nkeybind = \"Super+O\"\nkeybind_status = \"Ctrl+Shift+Space\"\n",
+        )
+        .unwrap();
+        assert!(migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "Ctrl+Shift+Space");
+    }
+
+    #[test]
+    fn activation_migration_normalizes_the_reported_status() {
+        let mut raw: toml::Value =
+            toml::from_str("[activation]\nkeybind_status = \"Meta+O\"\n").unwrap();
+        assert!(migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "Super+O");
     }
 
     #[test]

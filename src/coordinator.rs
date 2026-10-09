@@ -1027,11 +1027,12 @@ impl Coordinator {
     }
 
     /// Records the trigger description the desktop reports is bound for the
-    /// activation action, so the stored value always reflects the desktop
-    /// rather than any key TongueTyped chose. Display-only: the daemon never
-    /// binds from it, and a failed save is logged rather than fatal - the
-    /// in-memory value still reflects reality for this run.
+    /// activation action, normalized into the app's own wording so the stored
+    /// value matches what both configuration UIs persist. Display-only: the
+    /// daemon never binds from it, and a failed save is logged rather than
+    /// fatal - the in-memory value still reflects reality for this run.
     pub fn record_activation_binding(&self, reported: String) {
+        let reported = crate::activation::keybind_label(&reported);
         let mut inner = self.state.lock().unwrap();
         if inner.config.activation.keybind == reported {
             return;

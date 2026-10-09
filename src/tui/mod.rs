@@ -700,11 +700,6 @@ impl App {
         }
     }
 
-    /// The Shortcut screen owns raw text input, so `q` and `j`/`k` are
-    /// literal keybinding characters here (same as the setup console's
-    /// shortcut step) - only the arrow keys, Escape, Enter, Ctrl+R and
-    /// Ctrl+C are commands, and everything is inert while the portal test or
-    /// native dialog is in flight except Escape.
     /// The Shortcut screen has no editable text: the binding always comes
     /// from the desktop's own dialog, so the arrow keys, Enter, Ctrl+R,
     /// Escape and `q` are the only commands, and everything is inert while
