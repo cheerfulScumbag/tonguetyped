@@ -309,7 +309,11 @@ Selecting "Daemon" there instead opens a small `Screen::Daemon` sub-screen
 three operations the CLI exposes, so the dashboard is never missing a way to
 stop or restart a daemon it can start. `Request::Shutdown` (`src/ipc.rs`,
 handled in `daemon::dispatch`) cancels any in-flight recording/processing the same
-way a client `cancel` would (not a hard kill), then `daemon::run_daemon`'s accept
+way a client `cancel` would (not a hard kill), then waits
+(`Coordinator::wait_for_worker`) for that worker to actually finish before
+replying - so the engine release below can never block on the inference lock an
+in-flight transcription still holds, which would otherwise stall the daemon past
+`stop_daemon`'s fixed socket-poll deadline. Then `daemon::run_daemon`'s accept
 loop (`tokio::select!` against a `tokio::sync::Notify`) stops taking new
 connections, calls `Coordinator::shutdown()` - which stops and JOINS the
 detached `tonguetyped-idle-unload` timer thread, and only then drops the loaded

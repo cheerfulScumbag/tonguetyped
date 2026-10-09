@@ -582,6 +582,7 @@ pub struct Coordinator {
     feedback: Arc<dyn Feedback>,
     clock: Arc<dyn Clock>,
     latency_sink: Arc<dyn LatencySink>,
+    worker_finished: Arc<tokio::sync::Notify>,
 }
 
 impl Coordinator {
@@ -655,6 +656,7 @@ impl Coordinator {
             feedback,
             clock,
             latency_sink,
+            worker_finished: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -792,6 +794,19 @@ impl Coordinator {
     /// which segfaults. See `CoordinatorRuntime::shutdown`.
     pub fn shutdown(&self) -> anyhow::Result<()> {
         self.runtime.shutdown()
+    }
+
+    /// Wait until the active recording/processing worker has fully finished.
+    /// A `Request::Shutdown` uses this before replying so the daemon's later
+    /// engine release cannot block on the inference lock still held by an
+    /// in-flight transcription.
+    pub async fn wait_for_worker(&self) {
+        loop {
+            if !self.state.lock().unwrap().worker_active {
+                return;
+            }
+            self.worker_finished.notified().await;
+        }
     }
 
     pub fn validate_reload(&self, config: &Config) -> anyhow::Result<()> {
@@ -1179,6 +1194,8 @@ impl Coordinator {
             }
         }
         inner.worker_active = false;
+        drop(inner);
+        self.worker_finished.notify_one();
     }
 }
 

@@ -676,6 +676,54 @@ async fn shutdown_while_idle_still_reports_ok() {
 }
 
 #[tokio::test]
+async fn shutdown_waits_for_in_flight_transcription_then_completes() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    // Releases the blocked transcription even if an assertion below fails, so
+    // a failure exits cleanly instead of hanging the runtime's blocking pool.
+    let _release = TranscriptionReleaseGuard(runtime.clone());
+    let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
+
+    dispatch(&coordinator, Request::Start).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    dispatch(&coordinator, Request::Stop).await;
+    wait_for_flag(&runtime.transcription_started).await;
+
+    let shutdown_coordinator = coordinator.clone();
+    let shutdown =
+        tokio::spawn(async move { dispatch(&shutdown_coordinator, Request::Shutdown).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown replied while a transcription still held the inference lock, \
+         so the daemon's engine release would stall on it"
+    );
+
+    runtime.release_transcription();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown did not complete after the transcription finished")
+            .unwrap(),
+        Response::Ok
+    ));
+
+    let release_coordinator = coordinator.clone();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || release_coordinator.shutdown()),
+    )
+    .await
+    .expect("engine release wedged on the inference lock")
+    .unwrap()
+    .unwrap();
+
+    wait_for_worker_completion(&runtime, owner_count).await;
+    assert!(runtime.outputs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn feedback_distinguishes_cancellation_from_worker_failure() {
     let runtime = Arc::new(TestRuntime::default());
     let feedback = Arc::new(RecordingFeedback::default());

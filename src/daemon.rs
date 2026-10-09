@@ -236,6 +236,13 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
             // of leaving it to die mid-dictation when the process exits.
             // `cancel()` itself already handles the idle case as a no-op.
             let _ = coordinator.handle_command(CoordinatorCommand::Cancel).await;
+            // Wait for the worker to actually finish before replying: the
+            // daemon releases the loaded engine right after the accept loop
+            // ends, and doing that while a transcription still holds the
+            // inference lock would stall shutdown past `stop_daemon`'s socket
+            // poll deadline. Waiting here keeps the delay inside the request
+            // response instead of the socket-removal window.
+            coordinator.wait_for_worker().await;
             return Response::Ok;
         }
         Request::GetLastResult => {
