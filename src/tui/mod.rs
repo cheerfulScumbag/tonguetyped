@@ -396,10 +396,7 @@ impl App {
         match outcome {
             Ok(activation::ShortcutTestOutcome::Pressed) => {
                 screen.status = screens::ShortcutStatus::Message {
-                    text: format!(
-                        "shortcut press detected - {} works",
-                        activation::keybind_display(&self.config.activation.keybind)
-                    ),
+                    text: "shortcut press detected - the binding works".to_string(),
                     is_error: false,
                 };
             }
