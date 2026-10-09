@@ -311,8 +311,10 @@ stop or restart a daemon it can start. `Request::Shutdown` (`src/ipc.rs`,
 handled in `daemon::dispatch`) cancels any in-flight recording/processing the same
 way a client `cancel` would (not a hard kill), then `daemon::run_daemon`'s accept
 loop (`tokio::select!` against a `tokio::sync::Notify`) stops taking new
-connections, releases the instance lock, and only then removes the control
-socket - in that order, since `commands::stop_daemon` treats the socket's
+connections, calls `Coordinator::shutdown()` - which stops and JOINS the
+detached `tonguetyped-idle-unload` timer thread, and only then drops the loaded
+inference engine on the shutdown thread - releases the instance lock, and only
+then removes the control socket - in that order, since `commands::stop_daemon` treats the socket's
 disappearance as proof the old process (and its lock) is gone, and
 `restart_daemon` chains straight into `spawn_daemon` right after. `commands::
 stop_daemon` polls for the socket to actually disappear after sending
@@ -334,6 +336,20 @@ connect. `Path::exists()` alone is not enough: `stop_daemon`/`restart_daemon`
 used to treat the leftover file as proof a daemon was running and tried (and
 failed) to send it `Shutdown`, surfacing a raw connection-refused error
 instead of proceeding straight to `spawn_daemon`.
+
+`IdleUnloadTimer` (`src/coordinator.rs`) spawns a detached
+`tonguetyped-idle-unload` thread that holds an `Arc` clone of the loaded-engine
+mutex and drops the engine on idle timeout, freeing Vulkan buffers through the
+NVIDIA driver. Because that thread was never stopped or joined, the daemon could
+`exit()` while it was still freeing, racing the driver's `exit()`-time teardown
+and segfaulting (reproduced 10/10 by restarting a Vulkan-loaded daemon;
+coredump shows the idle thread in `ggml_vk_destroy_buffer` and the main thread
+in `__run_exit_handlers`). `Coordinator::shutdown` now makes this deterministic:
+it sends a `Shutdown` command the timer handles before any expiry, joins the
+thread, then drops the engine on the shutting-down thread; `IdleUnloadTimer`'s
+`Drop` joins as a fallback, and `apply_idle_unload_policy` refuses to re-arm the
+timer once `shutdown_started` is set (the `reload` race). Any new background
+thread that can drop a loaded engine needs the same join-on-shutdown treatment.
 
 The Cargo version rarely changes, so build identity is the git commit:
 `build.rs` captures it (`-dirty` suffix for uncommitted changes) into

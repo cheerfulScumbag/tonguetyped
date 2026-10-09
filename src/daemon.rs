@@ -91,6 +91,16 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     }
 
     tracing::info!("daemon shutting down");
+    // Release the loaded inference engine (and stop its idle-unload timer)
+    // before removing the socket or exiting. The engine free touches the GPU
+    // driver, so it must happen on this thread while the process is alive;
+    // leaving it to the detached timer thread races exit-time NVIDIA teardown
+    // and segfaults. Doing it before the socket is removed also keeps a
+    // concurrent `restart` from loading a second engine while this one is still
+    // being freed.
+    if let Err(error) = coordinator.shutdown() {
+        tracing::error!("failed to release the inference engine on shutdown: {error}");
+    }
     // Release the instance lock before removing the socket: `stop_daemon`
     // treats socket-absence as proof the process (and its lock) is gone, so
     // a `restart` racing a `spawn_daemon` against a still-held lock is only
