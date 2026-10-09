@@ -16,8 +16,10 @@
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::process::{Child as StdChild, Command as StdCommand, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tonguetyped::history::HistoryStore;
 
 fn sandbox_root(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -98,6 +100,66 @@ impl Sandbox {
     fn config_contents(&self) -> String {
         std::fs::read_to_string(self.config_home.join("tonguetyped/config.toml")).unwrap()
     }
+
+    fn write_config(&self, contents: &str) {
+        std::fs::write(self.config_home.join("tonguetyped/config.toml"), contents).unwrap();
+    }
+
+    fn socket_path(&self) -> std::path::PathBuf {
+        self.runtime_dir.join("tonguetyped/control.sock")
+    }
+
+    /// Seeds the history database the daemon reads its "last result" from, so
+    /// a test can drive a real `last-result` without recording anything.
+    fn seed_history(&self, transcript: &str) {
+        let path = self.data_home.join("tonguetyped/history.db");
+        let store = HistoryStore::new(&path).unwrap();
+        store.insert(transcript, None, "auto").unwrap();
+    }
+}
+
+/// Runs the daemon as a separate process against a sandbox and waits for its
+/// control socket, mirroring `tests/daemon_startup.rs`. Killed on drop.
+struct Daemon(StdChild);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn start_daemon(sandbox: &Sandbox) -> Daemon {
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_tonguetyped"))
+        .arg("daemon")
+        .env("XDG_CONFIG_HOME", &sandbox.config_home)
+        .env("XDG_DATA_HOME", &sandbox.data_home)
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn daemon");
+    let socket = sandbox.socket_path();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        if child.try_wait().unwrap().is_some() {
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("daemon exited before opening its control socket: {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not open its control socket"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Daemon(child)
 }
 
 impl Drop for Sandbox {
@@ -213,6 +275,7 @@ const KEY_DOWN: &[u8] = b"\x1b[B";
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 const KEY_TAB: &[u8] = b"\t";
+const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 
 const SETTING_LABELS: [&str; 8] = [
     "Model",
@@ -920,6 +983,94 @@ fn pty_model_screen_saves_a_pinned_inference_backend_and_reports_it() {
     assert!(
         config.contains("preferred_backend = \"cpu\""),
         "config should pin the CPU backend:\n{config}"
+    );
+
+    session.quit_and_wait();
+}
+
+/// One repeated phrase long enough that a handful of copies overflows a line
+/// in a 100-column pane; the `ZZZTAILZZZ` sentinel marks the very end.
+const TRANSCRIPT_PHRASE: &str = "alpha bravo charlie delta echo foxtrot golf hotel india juliet ";
+
+/// Seeds a long single-line transcript into the daemon's history DB, starts a
+/// daemon against the sandbox, and drives the dashboard to its `last-result`
+/// Info screen - the real dashboard -> daemon -> last-result path with no
+/// recording. The sandbox and daemon are returned so they outlive the session
+/// for the test's duration.
+///
+/// The tag must stay short: this is the only PTY test that starts a daemon, and
+/// a Unix-domain socket path must fit under SUN_LEN (~108 bytes), which the
+/// longer human-readable tags the other sandboxes use would exceed under Nix's
+/// already-long TMPDIR.
+fn open_last_result(tag: &str, transcript: &str) -> (Sandbox, Daemon, Session) {
+    let sandbox = Sandbox::new(tag);
+    sandbox
+        .write_config("[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n");
+    sandbox.seed_history(transcript);
+    let daemon = start_daemon(&sandbox);
+
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("Settings", Duration::from_secs(5));
+    // "last-result" is the seventh Commands row.
+    for _ in 0..FIRST_COMMAND_ROW + 6 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> last-result", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Last result", Duration::from_secs(10));
+    (sandbox, daemon, session)
+}
+
+#[test]
+fn pty_last_result_wraps_a_long_transcript_instead_of_truncating_it() {
+    // A real transcript is a single long line. The Info pane must wrap it so
+    // its tail stays on screen instead of being clipped at the pane edge - the
+    // exact regression.
+    let transcript = format!("{}ZZZTAILZZZ", TRANSCRIPT_PHRASE.repeat(4));
+    assert!(
+        transcript.chars().count() > 200,
+        "the fixture must be a genuinely long single line"
+    );
+    let (_sandbox, _daemon, session) = open_last_result("lr", &transcript);
+
+    // The tail is only visible if the line wrapped rather than being clipped.
+    let wrapped = session.wait_for("ZZZTAILZZZ", Duration::from_secs(5));
+    assert!(
+        wrapped.contains("result:   alpha bravo charlie"),
+        "the head of the wrapped transcript should stay readable:\n{wrapped}"
+    );
+    assert!(
+        wrapped.contains("juliet ZZZTAILZZZ"),
+        "the wrapped tail should stay readable:\n{wrapped}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_last_result_can_be_scrolled_to_text_taller_than_the_pane() {
+    // A transcript that wraps to more rows than the pane is tall must remain
+    // reachable by scrolling, not just wrapped off the bottom.
+    let transcript = format!("{}ZZZTAILZZZ", TRANSCRIPT_PHRASE.repeat(80));
+    let (_sandbox, _daemon, mut session) = open_last_result("lrs", &transcript);
+
+    let initial = session.visible_text();
+    assert!(
+        initial.contains("result:   alpha bravo charlie"),
+        "the top of the transcript should be on screen first:\n{initial}"
+    );
+    assert!(
+        !initial.contains("ZZZTAILZZZ"),
+        "the tail should start below the fold:\n{initial}"
+    );
+
+    for _ in 0..40 {
+        session.send(KEY_PAGE_DOWN);
+    }
+    let scrolled = session.wait_for("ZZZTAILZZZ", Duration::from_secs(5));
+    assert!(
+        scrolled.contains("juliet ZZZTAILZZZ"),
+        "scrolling should bring the tail into view:\n{scrolled}"
     );
 
     session.quit_and_wait();

@@ -55,7 +55,11 @@ futures-util = "0.3"
 libc = "0.2"
 enigo = "0.3"
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
-ratatui = "0.30.2"
+# `unstable-rendered-line-info` exposes `Paragraph::line_count`, which the
+# dashboard's Info/result pane needs to clamp its scroll offset to the wrapped
+# content height (a long single-line transcript wraps to more rows than it has
+# logical lines). See `src/tui/mod.rs::render_info`.
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
 
