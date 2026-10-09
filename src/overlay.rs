@@ -894,12 +894,18 @@ fn paint_badge(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: b
     match phase {
         Phase::Recording if streaming_indicator => {
             fill_circle(canvas, cx, cy, disc_radius, color);
+            // Keep the waveform's bounding box well inside the disc: the
+            // tallest bar reaches `max_bar_height` above the baseline and the
+            // bars span `available_width` across, so centering that box on the
+            // disc center leaves it within the circle's radius (its half
+            // diagonal is ~0.67*disc_radius).
+            let max_bar_height = disc_radius * 0.62;
             paint_waveform_bars(
                 canvas,
                 cx,
-                cy + disc_radius * 0.55,
-                disc_radius * 2.18,
-                disc_radius,
+                cy + max_bar_height * 0.5,
+                disc_radius * 1.2,
+                max_bar_height,
                 GLYPH_COLOR,
                 t,
             );
@@ -1266,6 +1272,79 @@ mod tests {
             badge, minimal,
             "Badge and Minimal should look different at the same size"
         );
+    }
+
+    /// Is `(x, y)` (a pixel center in surface coordinates) inside the filled
+    /// shape a style paints its streaming waveform into? `Badge` is the disc,
+    /// `Minimal` the ring's inner edge (no filled background, just the
+    /// outline), `Pill` the capsule.
+    fn inside_style_shape(style: Style, x: f32, y: f32) -> bool {
+        let (width, height) = surface_size_for(style);
+        let cx = width as f32 / 2.0;
+        let cy = height as f32 / 2.0;
+        match style {
+            Style::Badge => {
+                let radius = width.min(height) as f32 * 0.42;
+                (x - cx).powi(2) + (y - cy).powi(2) <= radius * radius
+            }
+            Style::Minimal => {
+                let ring_radius = width.min(height) as f32 * 0.34;
+                let inner = ring_radius - ring_radius * 0.14 / 2.0;
+                (x - cx).powi(2) + (y - cy).powi(2) <= inner * inner
+            }
+            Style::Pill => {
+                let half_width = width as f32 * 0.46;
+                let half_height = height as f32 * 0.42;
+                let half_segment = (half_width - half_height).max(0.0);
+                let proj_x = x.clamp(cx - half_segment, cx + half_segment);
+                (x - proj_x).powi(2) + (y - cy).powi(2) <= half_height * half_height
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_waveform_bars_stay_inside_every_style_shape() {
+        // Identify the waveform pixels and check every one sits inside the
+        // style's shape. `Badge`/`Pill` draw the bars in opaque white over a
+        // solid phase-colored fill, so those are exactly the pure-white
+        // pixels. `Minimal` draws the bars in the same color as its ring, so
+        // the bars are the phase-colored pixels that move as the animation
+        // advances (the ring itself is static). Every pixel found must be
+        // inside the shape; the pre-fix badge sprawled ~2px past the disc on
+        // each side.
+        const SAMPLES: [f32; 5] = [0.0, 0.13, 0.27, 0.41, 0.55];
+        for style in ALL_STYLES {
+            let (width, height) = surface_size_for(style);
+            let frames: Vec<Vec<u8>> = SAMPLES
+                .iter()
+                .map(|&t| paint_to_pixels(Some(Phase::Recording), t, true, style))
+                .collect();
+            let white_glyph = matches!(style, Style::Badge | Style::Pill);
+            let base = &frames[0];
+            let mut waveform_pixels = 0u32;
+            for y in 0..height {
+                for x in 0..width {
+                    let index = ((y * width + x) * 4) as usize;
+                    let varies = frames
+                        .iter()
+                        .any(|frame| frame[index..index + 4] != base[index..index + 4]);
+                    let glyph = white_glyph && base[index..index + 4] == [255, 255, 255, 255];
+                    if !varies && !glyph {
+                        continue;
+                    }
+                    waveform_pixels += 1;
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    assert!(
+                        inside_style_shape(style, px, py),
+                        "{style:?}: waveform pixel ({x},{y}) painted outside the shape"
+                    );
+                }
+            }
+            assert!(
+                waveform_pixels >= 30,
+                "{style:?}: expected a visible waveform inside the shape, only {waveform_pixels} waveform pixels"
+            );
+        }
     }
 
     #[test]
