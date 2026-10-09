@@ -1327,7 +1327,7 @@ mod tests {
                     let index = ((y * width + x) * 4) as usize;
                     let varies = frames
                         .iter()
-                        .any(|frame| &frame[index..index + 4] != &base[index..index + 4]);
+                        .any(|frame| frame[index..index + 4] != base[index..index + 4]);
                     let glyph = white_glyph && base[index..index + 4] == [255, 255, 255, 255];
                     if !varies && !glyph {
                         continue;
