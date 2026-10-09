@@ -159,7 +159,11 @@ niri, ...) to a `wtype` hint and every other session - KDE's KWin above all -
 to `dotool`. `output::dotool_available()` is a real usability check, not a
 binary-exists check: it also requires `/dev/uinput` to be writable, since a
 `dotool` that cannot open that device (no `input` group or udev rule) types
-nothing; the open is side-effect-free. A protocol-based typing path that would
+nothing; the open is side-effect-free. When no helper works but `dotool` is
+already installed and only `/dev/uinput` is unwritable, `typing_helper_warning()`
+names that permission remedy (add the user to the `input` group or add a udev
+rule) instead of telling the user to install a binary they already have. A
+protocol-based typing path that would
 avoid `/dev/uinput` entirely (the KDE Wayland RemoteDesktop portal) is a
 possible future direction, deliberately not implemented here. When no helper
 actually works, the

@@ -129,17 +129,22 @@ pub fn type_backend_available(backend: &str) -> bool {
 }
 
 /// The warning the configuration UIs and the daemon startup log show when no
-/// typing helper is usable, naming the one helper to install for this
-/// compositor. `enigo` needs no install - it is built in - so the missing
+/// typing helper is usable, naming the one action that makes a helper work for
+/// this compositor. `enigo` needs no install - it is built in - so the missing
 /// piece is always one of the two external helpers: `wtype`, which types
 /// through the Wayland virtual-keyboard protocol that only wlroots-based
 /// compositors implement, or `dotool`, which types through `/dev/uinput` and
-/// so works on KDE's KWin and other compositors too.
+/// so works on KDE's KWin and other compositors too. When `dotool` is already
+/// installed but `/dev/uinput` is not writable, the warning names the
+/// permission remedy instead of telling the user to install a binary they
+/// already have.
 /// The restart note is real, not boilerplate: `cached_auto_backend` and the
 /// daemon process both memoize the probe, so a helper installed while
 /// TongueTyped is running is not picked up until it restarts.
 pub fn typing_helper_warning() -> &'static str {
-    warning_for(recommended_helper())
+    let dotool_installed = helper_self_test("dotool");
+    let uinput_writable = device_is_writable(std::path::Path::new("/dev/uinput"));
+    warning_for(recommended_helper(), dotool_installed, uinput_writable)
 }
 
 /// The external helper to name for this session: `wtype` only on a Wayland
@@ -155,9 +160,11 @@ fn recommended_helper() -> &'static str {
     }
 }
 
-fn warning_for(helper: &str) -> &'static str {
+fn warning_for(helper: &str, dotool_installed: bool, uinput_writable: bool) -> &'static str {
     if helper == "wtype" {
         "No typing helper found - install wtype, then restart TongueTyped."
+    } else if dotool_installed && !uinput_writable {
+        "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or add a udev rule granting write access to /dev/uinput, then restart TongueTyped."
     } else {
         "No typing helper found - install dotool (needs /dev/uinput access), then restart TongueTyped."
     }
@@ -274,8 +281,14 @@ mod tests {
     fn typing_helper_warning_names_a_helper_to_install() {
         let warning = typing_helper_warning();
         assert!(
-            warning.contains("install wtype") || warning.contains("install dotool"),
-            "the warning must say what to install: {warning}"
+            warning.contains("install wtype")
+                || warning.contains("install dotool")
+                || warning.contains("input"),
+            "the warning must name a concrete remedy: {warning}"
+        );
+        assert!(
+            warning.contains("restart TongueTyped"),
+            "the warning must say a restart is needed: {warning}"
         );
     }
 
@@ -300,16 +313,36 @@ mod tests {
 
     #[test]
     fn dotool_warning_states_the_uinput_requirement() {
-        let dotool = warning_for("dotool");
+        let dotool = warning_for("dotool", false, false);
         assert!(dotool.contains("install dotool"));
         assert!(
             dotool.contains("/dev/uinput"),
             "the dotool warning must state its device requirement: {dotool}"
         );
-        let wtype = warning_for("wtype");
+        let wtype = warning_for("wtype", false, false);
         assert!(wtype.contains("install wtype"));
         assert!(!wtype.contains("dotool"));
         assert!(!dotool.contains("wtype"));
+    }
+
+    #[test]
+    fn dotool_warning_names_the_permission_remedy_when_installed() {
+        // `dotool` present but `/dev/uinput` unreadable is the state the
+        // packaged install creates when it grants no `input` group or udev
+        // access: the warning must not tell the user to install it again.
+        let warning = warning_for("dotool", true, false);
+        assert!(
+            !warning.contains("install dotool"),
+            "an installed dotool must not be reported missing: {warning}"
+        );
+        assert!(
+            warning.contains("/dev/uinput") && warning.contains("input"),
+            "the permission warning must name /dev/uinput and the input group: {warning}"
+        );
+        assert!(
+            warning.contains("udev") || warning.contains("rule"),
+            "the permission warning must name the udev-rule alternative: {warning}"
+        );
     }
 
     #[test]
