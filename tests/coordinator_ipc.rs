@@ -754,8 +754,7 @@ async fn concurrent_shutdown_waiters_both_complete() {
 
     let first_coordinator = coordinator.clone();
     let second_coordinator = coordinator.clone();
-    let first =
-        tokio::spawn(async move { dispatch(&first_coordinator, Request::Shutdown).await });
+    let first = tokio::spawn(async move { dispatch(&first_coordinator, Request::Shutdown).await });
     let second =
         tokio::spawn(async move { dispatch(&second_coordinator, Request::Shutdown).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -781,7 +780,9 @@ async fn concurrent_shutdown_waiters_both_complete() {
 async fn shutdown_completes_promptly_when_cancellation_reaches_transcription() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.block_transcription.store(true, Ordering::SeqCst);
-    runtime.cancel_stops_transcription.store(true, Ordering::SeqCst);
+    runtime
+        .cancel_stops_transcription
+        .store(true, Ordering::SeqCst);
     let coordinator = coordinator(runtime.clone(), 2);
     let owner_count = Arc::strong_count(&runtime);
 

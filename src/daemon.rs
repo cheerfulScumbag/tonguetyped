@@ -259,8 +259,8 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
             // engine (see `run_daemon`), so the delay never exceeds this bound
             // plus the bounded engine release, both well under `stop_daemon`'s
             // socket poll deadline.
-            let _ = tokio::time::timeout(SHUTDOWN_WORKER_TIMEOUT, coordinator.wait_for_worker())
-                .await;
+            let _ =
+                tokio::time::timeout(SHUTDOWN_WORKER_TIMEOUT, coordinator.wait_for_worker()).await;
             return Response::Ok;
         }
         Request::GetLastResult => {
