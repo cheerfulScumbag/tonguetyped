@@ -189,9 +189,16 @@ Running bare `tonguetyped` (no subcommand) opens the dashboard (`src/tui/`,
 `CLI`'s `command` field is `Option<Commands>` - see `data/tt-tui-dashboard-1/report.md`
 for the original SuperDesign process and `data/tt-add-dashboard-settings-menu-77/report.md`
 for the settings-menu redesign). The home screen is two stacked panels sharing one
-selection cursor: a fixed ten-row Settings panel (Model, Microphone, Activation,
-Shortcut, Transcript output, Typing backend, Transcript folder, History retention,
-Startup, Overlay) showing each area's current value, above a Commands panel. `src/cli.rs` holds the clap
+selection cursor: a fixed eleven-row Settings panel (Model, Inference backend,
+Microphone, Activation, Shortcut, Transcript output, Typing backend, Transcript
+folder, History retention, Startup, Overlay) showing each area's current value,
+above a Commands panel. The "Inference backend" row shows
+`config.model.preferred_backend` raw (`auto` or the pinned name) and opens a
+dedicated settings screen (`screens::BackendScreen`) that is the same
+`inference::backend_choices()` list the Model screen's backend panel shows
+(shared verbatim through `screens::backend_panel_lines`), but persists through
+the shared `save_settings_config` path instead of the Model screen's
+activate-and-confirm flow. `src/cli.rs` holds the clap
 `Cli`/`Commands` definitions as a library module specifically so `src/tui/mod.rs`'s
 `home_items()` can read the Commands panel straight off clap's own metadata
 (`Cli::command().get_subcommands()`) instead of a second, driftable copy - it can

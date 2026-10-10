@@ -9,10 +9,10 @@
 //! doc comment).
 //!
 //! The home screen is two stacked panels with one selection cursor: a
-//! fixed Settings panel listing the ten configuration areas (Model,
-//! Microphone, Activation, Shortcut, Transcript output, Typing backend,
-//! Transcript folder, History retention, Startup, Overlay) with their current
-//! values, and a Commands panel derived
+//! fixed Settings panel listing the eleven configuration areas (Model,
+//! Inference backend, Microphone, Activation, Shortcut, Transcript output,
+//! Typing backend, Transcript folder, History retention, Startup, Overlay)
+//! with their current values, and a Commands panel derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
 //! Toggle. `model` and `autostart` are CLI commands but live in the Settings
@@ -153,11 +153,12 @@ struct HomeItem {
     about: String,
 }
 
-/// The ten configuration areas the home screen's Settings panel lists, in
+/// The eleven configuration areas the home screen's Settings panel lists, in
 /// display order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingId {
     Model,
+    InferenceBackend,
     Microphone,
     Activation,
     Shortcut,
@@ -170,8 +171,9 @@ enum SettingId {
 }
 
 impl SettingId {
-    const ALL: [SettingId; 10] = [
+    const ALL: [SettingId; 11] = [
         SettingId::Model,
+        SettingId::InferenceBackend,
         SettingId::Microphone,
         SettingId::Activation,
         SettingId::Shortcut,
@@ -186,6 +188,7 @@ impl SettingId {
     fn label(self) -> &'static str {
         match self {
             SettingId::Model => "Model",
+            SettingId::InferenceBackend => "Inference backend",
             SettingId::Microphone => "Microphone",
             SettingId::Activation => "Activation",
             SettingId::Shortcut => "Shortcut",
@@ -199,8 +202,8 @@ impl SettingId {
     }
 }
 
-/// Ten settings rows plus the panel's two border rows.
-const SETTINGS_PANEL_HEIGHT: u16 = 12;
+/// Eleven settings rows plus the panel's two border rows.
+const SETTINGS_PANEL_HEIGHT: u16 = 13;
 
 /// The dashboard's Commands panel, derived from the exact same clap metadata
 /// `--help` renders - see this module's doc comment. The implicit `help`
@@ -237,6 +240,7 @@ enum Screen {
         lines: Vec<OutputLine>,
     },
     Model(screens::ModelScreen),
+    InferenceBackend(screens::BackendScreen),
     Autostart(screens::AutostartScreen),
     Daemon(screens::DaemonScreen),
     Microphone(screens::MicrophoneScreen),
@@ -483,6 +487,7 @@ impl App {
             Screen::Home => self.handle_home_key(key, terminal)?,
             Screen::Info { .. } => self.handle_info_key(key),
             Screen::Model(_) => self.handle_model_key(key),
+            Screen::InferenceBackend(_) => self.handle_inference_backend_key(key),
             Screen::Autostart(_) => self.handle_autostart_key(key),
             Screen::Daemon(_) => self.handle_daemon_key(key),
             Screen::Microphone(_) => self.handle_microphone_key(key),
@@ -544,6 +549,10 @@ impl App {
                 &self.config,
                 crate::inference::backend_choices(),
             )),
+            SettingId::InferenceBackend => Screen::InferenceBackend(screens::BackendScreen::new(
+                &self.config,
+                crate::inference::backend_choices(),
+            )),
             SettingId::Microphone => {
                 let mut screen = screens::MicrophoneScreen::new(&self.capabilities, &self.config);
                 screen.start_preview();
@@ -578,6 +587,7 @@ impl App {
     fn save_settings_config(&mut self) {
         let result = self.config.save().map_err(|error| error.to_string());
         match &mut self.screen {
+            Screen::InferenceBackend(screen) => screen.result = Some(result),
             Screen::Microphone(screen) => screen.result = Some(result),
             Screen::Activation(screen) => screen.result = Some(result),
             Screen::TranscriptOutput(screen) => screen.result = Some(result),
@@ -875,6 +885,33 @@ impl App {
         }
     }
 
+    /// The dedicated "Inference backend" settings screen: the same
+    /// up/down/Enter/Esc shape as the other settings screens, persisting
+    /// through the shared `save_settings_config` path.
+    fn handle_inference_backend_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::InferenceBackend(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::InferenceBackend(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::InferenceBackend(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
     fn handle_autostart_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -1029,6 +1066,7 @@ impl App {
                 render_info(frame, area, title, lines, &self.info_scroll)
             }
             Screen::Model(screen) => self.render_model(frame, area, screen),
+            Screen::InferenceBackend(screen) => self.render_inference_backend(frame, area, screen),
             Screen::Autostart(screen) => self.render_autostart(frame, area, screen),
             Screen::Daemon(screen) => self.render_daemon(frame, area, screen),
             Screen::Microphone(screen) => self.render_microphone(frame, area, screen),
@@ -1106,6 +1144,7 @@ impl App {
     fn setting_value(&self, setting: SettingId) -> String {
         match setting {
             SettingId::Model => self.config.model.active_model.clone(),
+            SettingId::InferenceBackend => self.config.model.preferred_backend.clone(),
             SettingId::Microphone => self
                 .capabilities
                 .microphone_label(&self.config.audio.microphone),
@@ -1242,6 +1281,28 @@ impl App {
 
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Tab switch list  Enter activate  Esc back  q quit"),
+            chunks[2],
+        );
+    }
+
+    fn render_inference_backend(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        screen: &screens::BackendScreen,
+    ) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(&self.config), chunks[0]);
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
             chunks[2],
         );
     }
@@ -1746,6 +1807,7 @@ mod tests {
             labels,
             vec![
                 "Model",
+                "Inference backend",
                 "Microphone",
                 "Activation",
                 "Shortcut",
