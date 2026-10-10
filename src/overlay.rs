@@ -67,15 +67,18 @@ const BORDER_PREVIEW: (u32, u32) = (1920, 1080);
 /// `paint_border` geometry, all as fractions of the surface's shorter side so
 /// the frame looks the same on any output: the thin bright line's thickness,
 /// the reach of the soft glow it dissolves into inward, and how far along the
-/// edges a corner's hotspot reaches.
-const BORDER_LINE_FRACTION: f32 = 0.004;
-const BORDER_GLOW_FRACTION: f32 = 0.07;
+/// edges a corner's hotspot reaches. The captain iterated this look through a
+/// faithful preview: the line is now a thin ~2-pixel edge at 1080p (a quarter
+/// of what it was) with a *tight*, light glow that tucks in close (~23px) and
+/// dies out quickly, rather than a thick band with a long tail.
+const BORDER_LINE_FRACTION: f32 = 0.002;
+const BORDER_GLOW_FRACTION: f32 = 0.023;
 const BORDER_CORNER_REACH_FRACTION: f32 = 0.30;
-/// Peak opacity of the thin edge line and of the broad glow it fades into. The
-/// line reads as a crisp hairline hugging the edge; the weaker halo is the
+/// Peak opacity of the thin edge line and of the tight glow it fades into. The
+/// line reads as a crisp edge hugging the screen; the weaker halo is the light,
 /// smooth inward fade around it.
 const BORDER_LINE_STRENGTH: f32 = 0.85;
-const BORDER_HALO_STRENGTH: f32 = 0.34;
+const BORDER_HALO_STRENGTH: f32 = 0.20;
 /// How much extra brightness a corner hotspot adds over the straight edges.
 const BORDER_CORNER_BOOST: f32 = 1.6;
 const MARGIN: i32 = 20;
@@ -1543,9 +1546,9 @@ fn border_glow(x: f32, y: f32, width: f32, height: f32, pulse: f32) -> f32 {
     // Two smoothstep ramps, both starting flat at the screen edge (`d = 0`) and
     // reaching exactly zero, with zero slope, by their own reach. Their sum is a
     // smooth, monotonic fade with no hard band edge: the narrow `line` term is
-    // the crisp hairline, and the wide `halo` term is the soft glow it dissolves
-    // into. Because both reaches are fixed, the falloff is uniform along an edge
-    // rather than stepping at a core/glow boundary.
+    // the crisp edge line, and the tight `halo` term is the light glow it
+    // dissolves into. Because both reaches are fixed, the falloff is uniform
+    // along an edge rather than stepping at a core/glow boundary.
     let profile = BORDER_LINE_STRENGTH * smoothstep(1.0 - d / line)
         + BORDER_HALO_STRENGTH * smoothstep(1.0 - d / halo);
     let boost = 1.0 + BORDER_CORNER_BOOST * near_corner * near_corner;
@@ -2057,10 +2060,10 @@ mod tests {
 
     #[test]
     fn border_line_is_thin_and_the_glow_fades_smoothly_inward() {
-        // The captain's ask: a thin line hugging the edge that dissolves into a
-        // smooth inward fade, not the thick hard-edged band the style used to
-        // paint. Walk a column in from the top edge at the horizontal middle, so
-        // no corner hotspot colours the profile.
+        // The captain's ask: a real thin border - about a quarter of the old
+        // thickness - with a light glow that tucks in tight. Walk a column in
+        // from the top edge at the horizontal middle, so no corner hotspot
+        // colours the profile.
         let (width, height) = surface_size_for(Style::Border);
         let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Border);
         let x = width / 2;
@@ -2068,22 +2071,32 @@ mod tests {
             .map(|y| alpha_at(&pixels, width, x, y))
             .collect();
 
-        // The bright line is a hairline: opacity drops below half within a small
-        // fraction of the shorter side, where the old solid band stayed bright
-        // for ~1.8% of it.
+        // The line is a thin ~2-pixel edge (BORDER_LINE_FRACTION of the shorter
+        // side) - about a quarter of the original 0.4%-of-short-side band.
         let short = width.min(height) as f32;
-        let bright = alphas.iter().take_while(|&&a| a >= 128).count() as f32;
+        let line = alphas.iter().take_while(|&&a| a >= 64).count() as f32;
         assert!(
-            bright >= 1.0,
-            "the border should still paint a visible bright line at the edge"
+            line >= 1.0,
+            "the border should still paint a visible line at the edge"
         );
         assert!(
-            bright <= short * 0.006,
-            "the border's bright line should be a hairline, but stayed >= half opacity for {bright}px of a {short}px side"
+            line <= short * 0.004,
+            "the border line should be a thin ~2px edge, but stayed >= quarter opacity for {line}px of a {short}px side"
         );
 
-        // Past the hairline the glow only ever weakens (a monotonic fade with no
-        // band or ripple), and it reaches fully transparent before the centre.
+        // The glow is tight: past the line it dies out within a small fraction
+        // of the shorter side (BORDER_GLOW_FRACTION), and only ever weakens - a
+        // monotonic fade with no band or ripple. It reaches fully transparent
+        // long before the centre.
+        let nonzero = alphas.iter().take_while(|&&a| a > 0).count() as f32;
+        assert!(
+            nonzero > line,
+            "the border should fade inward past the line, not stop at it"
+        );
+        assert!(
+            nonzero <= short * 0.04,
+            "the border's glow should tuck in tight, but reached {nonzero}px of a {short}px side"
+        );
         for pair in alphas.windows(2) {
             assert!(
                 pair[1] <= pair[0],
