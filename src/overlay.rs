@@ -1,11 +1,11 @@
 //! Passive wlr-layer-shell HUD overlay for dictation feedback.
 //!
 //! Renders directly into a persistent, click-through `zwlr_layer_shell_v1`
-//! surface so recording/transcribing/success/cancellation/failure state is
-//! glanceable without stealing keyboard or pointer focus. The surface is
-//! created lazily, on the first event; between events it holds a fully
-//! transparent buffer rather than being mapped and unmapped, and it is only
-//! recreated when the config-derived geometry or placement changes (an
+//! surface so recording/transcribing/success/no-speech/cancellation/failure
+//! state is glanceable without stealing keyboard or pointer focus. The
+//! surface is created lazily, on the first event; between events it holds a
+//! fully transparent buffer rather than being mapped and unmapped, and it is
+//! only recreated when the config-derived geometry or placement changes (an
 //! `overlay.style`/`position`/`monitor` change applied via `tonguetyped
 //! reload`), never per dictation, so there is no per-dictation
 //! surface-creation round trip on the latency-sensitive stop path (see
@@ -78,12 +78,17 @@ const RECORDING_PULSE_PERIOD: Duration = Duration::from_millis(1600);
 const BLOB_PULSE_PERIOD: Duration = Duration::from_millis(2800);
 const SPIN_PERIOD: Duration = Duration::from_millis(900);
 const SUCCESS_DWELL: Duration = Duration::from_millis(900);
+// A touch longer than `Success`: a "no speech" cue is information the user
+// needs to notice, but it is not an error and must not feel alarming.
+const NO_SPEECH_DWELL: Duration = Duration::from_millis(1400);
 const CANCELLED_DWELL: Duration = Duration::from_millis(900);
 const ERROR_DWELL: Duration = Duration::from_millis(1800);
 
 const RECORDING_COLOR: (u8, u8, u8) = (0xE0, 0x31, 0x31);
 const TRANSCRIBING_COLOR: (u8, u8, u8) = (0x19, 0x71, 0xC2);
 const SUCCESS_COLOR: (u8, u8, u8) = (0x2F, 0x9E, 0x44);
+// Amber: caution, not failure - distinct from every other phase hue.
+const NO_SPEECH_COLOR: (u8, u8, u8) = (0xE8, 0x9A, 0x2B);
 const CANCELLED_COLOR: (u8, u8, u8) = (0x86, 0x8E, 0x96);
 const ERROR_COLOR: (u8, u8, u8) = (0xC9, 0x2A, 0x2A);
 const GLYPH_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
@@ -236,6 +241,7 @@ enum Phase {
     Recording,
     Transcribing,
     Success,
+    NoSpeech,
     Cancelled,
     Error,
 }
@@ -246,6 +252,7 @@ impl Phase {
             FeedbackEvent::Recording => Phase::Recording,
             FeedbackEvent::Processing => Phase::Transcribing,
             FeedbackEvent::Success => Phase::Success,
+            FeedbackEvent::NoSpeech => Phase::NoSpeech,
             FeedbackEvent::Cancelled => Phase::Cancelled,
             FeedbackEvent::Error => Phase::Error,
         }
@@ -255,6 +262,7 @@ impl Phase {
         match self {
             Phase::Recording | Phase::Transcribing => None,
             Phase::Success => Some(SUCCESS_DWELL),
+            Phase::NoSpeech => Some(NO_SPEECH_DWELL),
             Phase::Cancelled => Some(CANCELLED_DWELL),
             Phase::Error => Some(ERROR_DWELL),
         }
@@ -750,12 +758,13 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, rgb: (u8, u8,
     }
 }
 
-/// Fills a capsule ("stadium") shape - a rectangle of `2*half_width` by
-/// `2*half_height` with semicircular ends of radius `half_height` - the
-/// `Style::Pill` badge shape. Degenerates to a circle when
-/// `half_width == half_height`, via the same "distance from the nearest
-/// point on a line segment" trick `stroke_line` uses, but filled solid
-/// within `half_height` of that segment rather than stroked.
+/// Fills a capsule ("stadium") shape spanning `2*half_width` by
+/// `2*half_height`, with semicircular ends of radius `min(half_width,
+/// half_height)` on the longer axis - the horizontal `Style::Pill` badge and
+/// the upright muted-mic body. Degenerates to a circle when the two are equal,
+/// via the same "distance from the nearest point on a line segment" trick
+/// `stroke_line` uses, but filled solid within that radius of the segment
+/// rather than stroked.
 fn fill_capsule(
     canvas: &mut Canvas,
     cx: f32,
@@ -764,20 +773,22 @@ fn fill_capsule(
     half_height: f32,
     rgb: (u8, u8, u8),
 ) {
-    let radius = half_height;
-    let half_segment = (half_width - half_height).max(0.0);
-    let (x0, x1) = (cx - half_segment, cx + half_segment);
-    let span = radius + 1.0;
+    let radius = half_width.min(half_height);
+    let half_segment_x = (half_width - radius).max(0.0);
+    let half_segment_y = (half_height - radius).max(0.0);
+    let (x0, x1) = (cx - half_segment_x, cx + half_segment_x);
+    let (y0, y1) = (cy - half_segment_y, cy + half_segment_y);
     let min_x = (cx - half_width - 1.0).floor().max(0.0) as i32;
     let max_x = (cx + half_width + 1.0).ceil().min(canvas.width as f32) as i32;
-    let min_y = (cy - span).floor().max(0.0) as i32;
-    let max_y = (cy + span).ceil().min(canvas.height as f32) as i32;
+    let min_y = (cy - half_height - 1.0).floor().max(0.0) as i32;
+    let max_y = (cy + half_height + 1.0).ceil().min(canvas.height as f32) as i32;
     for y in min_y..max_y {
         for x in min_x..max_x {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
             let proj_x = px.clamp(x0, x1);
-            let dist = ((px - proj_x).powi(2) + (py - cy).powi(2)).sqrt();
+            let proj_y = py.clamp(y0, y1);
+            let dist = ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt();
             let coverage = (radius + 0.5 - dist).clamp(0.0, 1.0);
             canvas.blend(x, y, rgb, coverage);
         }
@@ -1054,11 +1065,51 @@ fn glyph_cross(canvas: &mut Canvas, cx: f32, cy: f32, s: f32, thickness: f32, rg
     stroke_line(canvas, cx - s, cy + s, cx + s, cy - s, thickness, rgb);
 }
 
+/// A microphone with a slash through it - the `NoSpeech` glyph, so a silent or
+/// muted capture reads as "no speech detected" rather than as a generic error
+/// cross or a plain success checkmark. `s` is the glyph's half-height, matching
+/// the scale convention of `glyph_checkmark`/`glyph_cross`.
+fn glyph_muted_mic(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    thickness: f32,
+    rgb: (u8, u8, u8),
+) {
+    // Mic body: an upright capsule, sitting slightly above center to leave room
+    // for its cradle and stem.
+    fill_capsule(canvas, cx, cy - s * 0.35, s * 0.34, s * 0.5, rgb);
+    // Cradle: an upward-opening arc (a U) hugging the lower half of the body.
+    stroke_arc(
+        canvas,
+        cx,
+        cy - s * 0.25,
+        s * 0.62,
+        thickness,
+        (0.0, std::f32::consts::PI),
+        rgb,
+    );
+    // Stem below the cradle.
+    stroke_line(canvas, cx, cy + s * 0.37, cx, cy + s * 0.78, thickness, rgb);
+    // The slash: the "muted" signal, drawn last so it sits on top.
+    stroke_line(
+        canvas,
+        cx - s * 0.95,
+        cy + s * 0.95,
+        cx + s * 0.95,
+        cy - s * 0.95,
+        thickness * 1.1,
+        rgb,
+    );
+}
+
 fn phase_color(phase: Phase) -> (u8, u8, u8) {
     match phase {
         Phase::Recording => RECORDING_COLOR,
         Phase::Transcribing => TRANSCRIBING_COLOR,
         Phase::Success => SUCCESS_COLOR,
+        Phase::NoSpeech => NO_SPEECH_COLOR,
         Phase::Cancelled => CANCELLED_COLOR,
         Phase::Error => ERROR_COLOR,
     }
@@ -1143,6 +1194,17 @@ fn paint_badge(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: b
                 GLYPH_COLOR,
             );
         }
+        Phase::NoSpeech => {
+            fill_circle(canvas, cx, cy, disc_radius, color);
+            glyph_muted_mic(
+                canvas,
+                cx,
+                cy,
+                disc_radius * 0.42,
+                disc_radius * 0.15,
+                GLYPH_COLOR,
+            );
+        }
         Phase::Cancelled => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             fill_square(canvas, cx, cy, disc_radius * 0.38, GLYPH_COLOR);
@@ -1218,6 +1280,16 @@ fn paint_minimal(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator:
                 color,
             );
         }
+        Phase::NoSpeech => {
+            glyph_muted_mic(
+                canvas,
+                cx,
+                cy,
+                ring_radius * 0.36,
+                ring_radius * 0.13,
+                color,
+            );
+        }
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, ring_radius * 0.3, color);
         }
@@ -1285,6 +1357,16 @@ fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bo
                 cy,
                 half_height * 0.55,
                 half_height * 0.2,
+                GLYPH_COLOR,
+            );
+        }
+        Phase::NoSpeech => {
+            glyph_muted_mic(
+                canvas,
+                cx,
+                cy,
+                half_height * 0.46,
+                half_height * 0.17,
                 GLYPH_COLOR,
             );
         }
@@ -1405,6 +1487,9 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
         Phase::Success => {
             glyph_checkmark(canvas, cx, cy, radius * 0.42, radius * 0.16, GLYPH_COLOR);
         }
+        Phase::NoSpeech => {
+            glyph_muted_mic(canvas, cx, cy, radius * 0.36, radius * 0.13, GLYPH_COLOR);
+        }
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, radius * 0.3, GLYPH_COLOR);
         }
@@ -1501,7 +1586,8 @@ fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: 
 /// (`examples/overlay_style_png.rs`, which reorders it to PNG's RGBA). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`; `recording`/`transcribing`/
-/// `success`/`cancelled`/`error`), and `None` clears to fully transparent.
+/// `success`/`no-speech`/`cancelled`/`error`), and `None` clears to fully
+/// transparent.
 /// Returns `(width, height, pixels)` with `width * height * 4` bytes. For the
 /// full-screen `border` style this is the representative `BORDER_PREVIEW` size,
 /// not a compositor-provided output size.
@@ -1516,6 +1602,7 @@ pub fn render_frame_pixels(
     let phase = phase.map(|name| match name {
         "transcribing" => Phase::Transcribing,
         "success" => Phase::Success,
+        "no-speech" => Phase::NoSpeech,
         "cancelled" => Phase::Cancelled,
         "error" => Phase::Error,
         _ => Phase::Recording,
@@ -1678,6 +1765,13 @@ mod tests {
     }
 
     #[test]
+    fn no_speech_event_maps_to_a_dwelling_static_phase() {
+        assert_eq!(Phase::from_event(FeedbackEvent::NoSpeech), Phase::NoSpeech);
+        assert_eq!(Phase::NoSpeech.dwell(), Some(NO_SPEECH_DWELL));
+        assert!(!Phase::NoSpeech.is_animated());
+    }
+
+    #[test]
     fn every_phase_paints_distinguishable_pixels_in_every_style() {
         for style in ALL_STYLES {
             let mut seen = Vec::new();
@@ -1685,6 +1779,7 @@ mod tests {
                 Phase::Recording,
                 Phase::Transcribing,
                 Phase::Success,
+                Phase::NoSpeech,
                 Phase::Cancelled,
                 Phase::Error,
             ] {
@@ -1787,6 +1882,7 @@ mod tests {
             Phase::Recording,
             Phase::Transcribing,
             Phase::Success,
+            Phase::NoSpeech,
             Phase::Cancelled,
             Phase::Error,
         ] {
@@ -1978,6 +2074,7 @@ mod tests {
             Phase::Recording,
             Phase::Transcribing,
             Phase::Success,
+            Phase::NoSpeech,
             Phase::Error,
         ] {
             let base = phase_color(phase);
