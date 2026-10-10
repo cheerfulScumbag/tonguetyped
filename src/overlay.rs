@@ -62,14 +62,19 @@ const BLOB_SURFACE: u32 = BADGE * 3 / 2;
 /// screen since `paint_border` scales its geometry to the shorter side.
 const BORDER_PREVIEW: (u32, u32) = (640, 360);
 /// `paint_border` geometry, all as fractions of the surface's shorter side so
-/// the frame looks the same on any output: the solid edge band's thickness, the
-/// distance the glow fades inward from the band, and how far along the edges a
-/// corner's hotspot reaches.
-const BORDER_CORE_FRACTION: f32 = 0.018;
-const BORDER_GLOW_FRACTION: f32 = 0.09;
-const BORDER_CORNER_REACH_FRACTION: f32 = 0.28;
+/// the frame looks the same on any output: the thin bright line's thickness,
+/// the reach of the soft glow it dissolves into inward, and how far along the
+/// edges a corner's hotspot reaches.
+const BORDER_LINE_FRACTION: f32 = 0.004;
+const BORDER_GLOW_FRACTION: f32 = 0.07;
+const BORDER_CORNER_REACH_FRACTION: f32 = 0.30;
+/// Peak opacity of the thin edge line and of the broad glow it fades into. The
+/// line reads as a crisp hairline hugging the edge; the weaker halo is the
+/// smooth inward fade around it.
+const BORDER_LINE_STRENGTH: f32 = 0.85;
+const BORDER_HALO_STRENGTH: f32 = 0.34;
 /// How much extra brightness a corner hotspot adds over the straight edges.
-const BORDER_CORNER_BOOST: f32 = 1.0;
+const BORDER_CORNER_BOOST: f32 = 1.6;
 const MARGIN: i32 = 20;
 const TICK: Duration = Duration::from_millis(33);
 const RECORDING_PULSE_PERIOD: Duration = Duration::from_millis(1600);
@@ -830,6 +835,14 @@ fn bolden(color: (u8, u8, u8)) -> (u8, u8, u8) {
     (f(r), f(g), f(b))
 }
 
+/// Hermite smoothstep: 0 at `x <= 0`, 1 at `x >= 1`, with zero slope at both
+/// ends - the C1 ramp the `border` glow fades along, so its falloff has no hard
+/// band edge.
+fn smoothstep(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
 /// Linear blend of two colors, `t = 0` giving `a` and `t = 1` giving `b`.
 fn mix_color(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
     let t = t.clamp(0.0, 1.0);
@@ -974,8 +987,9 @@ fn stroke_arc(
 /// solid-disc-and-glyph treatment, `Minimal` strips it to a thin outline ring
 /// with a small glyph, `Pill` reshapes the badge into a capsule with room for
 /// a wider waveform, `Blob` is a bright, slowly-breathing glowing blob with
-/// a soft liquid-metal sheen, and `Border` is a phase-coloured glowing frame
-/// hugging the whole screen edge, brightest in the corners. Every style reskins
+/// a soft liquid-metal sheen, and `Border` is a thin phase-coloured glowing
+/// line hugging the whole screen edge that fades smoothly inward, brightest in
+/// the corners. Every style reskins
 /// all five phases consistently, per the design review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
@@ -1415,39 +1429,37 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
 }
 
 /// The `Border` style's per-pixel glow intensity in `0.0..=1.0` at pixel center
-/// `(x, y)` of a `width` x `height` frame. The value is a bright band hugging
-/// whichever edge is nearest, fading inward, and it is pushed higher and reaches
-/// further inward near a corner, so the four corners glow more strongly than the
-/// straight edge midpoints. `pulse` (0..1) breathes the whole frame.
+/// `(x, y)` of a `width` x `height` frame. It is a thin bright line hugging
+/// whichever edge is nearest, dissolving smoothly into a softer glow that fades
+/// inward with no visible band edge, and it is pushed higher near a corner, so
+/// the four corners glow more strongly than the straight edge midpoints. `pulse`
+/// (0..1) breathes the whole frame.
 fn border_glow(x: f32, y: f32, width: f32, height: f32, pulse: f32) -> f32 {
     let dx_edge = x.min(width - x);
     let dy_edge = y.min(height - y);
     let d = dx_edge.min(dy_edge);
     let short = width.min(height);
 
-    let core = (short * BORDER_CORE_FRACTION).max(2.0);
-    let glow = (short * BORDER_GLOW_FRACTION).max(core + 2.0);
-    if d >= glow * 1.8 {
+    let line = (short * BORDER_LINE_FRACTION).max(1.0);
+    let halo = (short * BORDER_GLOW_FRACTION).max(line * 3.0);
+    if d >= halo {
         return 0.0;
     }
-    let corner_reach = (short * BORDER_CORNER_REACH_FRACTION).max(core + 2.0);
+    let corner_reach = (short * BORDER_CORNER_REACH_FRACTION).max(halo);
 
     // Corner proximity: 1 exactly at a corner, falling to 0 beyond
     // `corner_reach` along either edge.
     let corner_dist = (dx_edge * dx_edge + dy_edge * dy_edge).sqrt();
     let near_corner = (1.0 - corner_dist / corner_reach).clamp(0.0, 1.0);
 
-    // A corner's glow spills further inward than a straight edge's, so its halo
-    // is visibly larger as well as brighter.
-    let reach = glow * (1.0 + 0.8 * near_corner);
-    let profile = if d < core {
-        1.0 - 0.35 * (d / core)
-    } else if d < reach {
-        let into = (d - core) / (reach - core);
-        (1.0 - into).powi(2) * 0.75
-    } else {
-        return 0.0;
-    };
+    // Two smoothstep ramps, both starting flat at the screen edge (`d = 0`) and
+    // reaching exactly zero, with zero slope, by their own reach. Their sum is a
+    // smooth, monotonic fade with no hard band edge: the narrow `line` term is
+    // the crisp hairline, and the wide `halo` term is the soft glow it dissolves
+    // into. Because both reaches are fixed, the falloff is uniform along an edge
+    // rather than stepping at a core/glow boundary.
+    let profile = BORDER_LINE_STRENGTH * smoothstep(1.0 - d / line)
+        + BORDER_HALO_STRENGTH * smoothstep(1.0 - d / halo);
     let boost = 1.0 + BORDER_CORNER_BOOST * near_corner * near_corner;
     (profile * boost * pulse).min(1.0)
 }
@@ -1945,6 +1957,49 @@ mod tests {
     }
 
     #[test]
+    fn border_line_is_thin_and_the_glow_fades_smoothly_inward() {
+        // The captain's ask: a thin line hugging the edge that dissolves into a
+        // smooth inward fade, not the thick hard-edged band the style used to
+        // paint. Walk a column in from the top edge at an x clear of any corner
+        // hotspot, so the corner boost does not colour the profile.
+        let (width, height) = surface_size_for(Style::Border);
+        let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Border);
+        let x = width / 8;
+        let alphas: Vec<u8> = (0..height / 2)
+            .map(|y| alpha_at(&pixels, width, x, y))
+            .collect();
+
+        // The bright line is a hairline: opacity drops below half within a few
+        // pixels of the edge, where the old solid band stayed bright for ~1.8%
+        // of the shorter side (~6px here).
+        let bright = alphas.iter().take_while(|&&a| a >= 128).count() as u32;
+        assert!(
+            bright >= 1,
+            "the border should still paint a visible bright line at the edge"
+        );
+        assert!(
+            bright <= 4,
+            "the border's bright line should be a hairline, but stayed >= half opacity for {bright}px"
+        );
+
+        // Past the hairline the glow only ever weakens (a monotonic fade with no
+        // band or ripple), and it reaches fully transparent before the centre.
+        for pair in alphas.windows(2) {
+            assert!(
+                pair[1] <= pair[0],
+                "border glow should fade monotonically inward, got {} then {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_eq!(
+            *alphas.last().unwrap(),
+            0,
+            "the fade should reach fully transparent before the frame centre"
+        );
+    }
+
+    #[test]
     fn border_uses_the_phase_colour() {
         // Buffer is BGRA, so channel 2 is red and channel 0 is blue.
         let (width, _) = surface_size_for(Style::Border);
@@ -2062,11 +2117,10 @@ mod tests {
                 (x - cx).powi(2) + (y - cy).powi(2) <= outer * outer
             }
             Style::Border => {
-                // Every painted pixel lies within the glow band of the nearest
-                // edge; the band reaches at most 1.8x `BORDER_GLOW_FRACTION`
-                // inward at a corner (see `border_glow`). Add a pixel of slack
-                // for the anti-aliased boundary.
-                let reach = width.min(height) as f32 * BORDER_GLOW_FRACTION * 1.8 + 1.0;
+                // Every painted pixel lies within the soft glow's reach of the
+                // nearest edge (see `border_glow`). Add a pixel of slack for the
+                // anti-aliased boundary.
+                let reach = width.min(height) as f32 * BORDER_GLOW_FRACTION + 1.0;
                 x.min(width as f32 - x).min(y.min(height as f32 - y)) < reach
             }
         }
