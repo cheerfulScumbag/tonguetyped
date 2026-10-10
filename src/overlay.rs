@@ -58,9 +58,12 @@ const BLOB_SURFACE: u32 = BADGE * 3 / 2;
 /// full-screen all-edge-anchored layer (the compositor stretches a zero-sized
 /// surface to the whole output and reports the real dimensions in `configure`),
 /// so this is only the representative size the offline preview and the pixel
-/// tests render into - a common 16:9 frame whose proportions match any real
-/// screen since `paint_border` scales its geometry to the shorter side.
-const BORDER_PREVIEW: (u32, u32) = (640, 360);
+/// tests render into. It is a common 16:9 frame at native 1080p rather than a
+/// thumbnail: `paint_border` scales its geometry to the shorter side, but the
+/// hairline and its inward fade only look right - thin line, smooth gradient -
+/// when rendered at a resolution a real screen actually uses, so a scaled-down
+/// preview does not misrepresent them.
+const BORDER_PREVIEW: (u32, u32) = (1920, 1080);
 /// `paint_border` geometry, all as fractions of the surface's shorter side so
 /// the frame looks the same on any output: the thin bright line's thickness,
 /// the reach of the soft glow it dissolves into inward, and how far along the
@@ -1960,26 +1963,27 @@ mod tests {
     fn border_line_is_thin_and_the_glow_fades_smoothly_inward() {
         // The captain's ask: a thin line hugging the edge that dissolves into a
         // smooth inward fade, not the thick hard-edged band the style used to
-        // paint. Walk a column in from the top edge at an x clear of any corner
-        // hotspot, so the corner boost does not colour the profile.
+        // paint. Walk a column in from the top edge at the horizontal middle, so
+        // no corner hotspot colours the profile.
         let (width, height) = surface_size_for(Style::Border);
         let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Border);
-        let x = width / 8;
+        let x = width / 2;
         let alphas: Vec<u8> = (0..height / 2)
             .map(|y| alpha_at(&pixels, width, x, y))
             .collect();
 
-        // The bright line is a hairline: opacity drops below half within a few
-        // pixels of the edge, where the old solid band stayed bright for ~1.8%
-        // of the shorter side (~6px here).
-        let bright = alphas.iter().take_while(|&&a| a >= 128).count() as u32;
+        // The bright line is a hairline: opacity drops below half within a small
+        // fraction of the shorter side, where the old solid band stayed bright
+        // for ~1.8% of it.
+        let short = width.min(height) as f32;
+        let bright = alphas.iter().take_while(|&&a| a >= 128).count() as f32;
         assert!(
-            bright >= 1,
+            bright >= 1.0,
             "the border should still paint a visible bright line at the edge"
         );
         assert!(
-            bright <= 4,
-            "the border's bright line should be a hairline, but stayed >= half opacity for {bright}px"
+            bright <= short * 0.006,
+            "the border's bright line should be a hairline, but stayed >= half opacity for {bright}px of a {short}px side"
         );
 
         // Past the hairline the glow only ever weakens (a monotonic fade with no

@@ -2,7 +2,20 @@
 
 ## Sign-off outcome
 
-PENDING - awaiting captain sign-off on the refreshed preview.
+Approved by the captain on the refreshed preview (revision 2).
+
+- First review of revision 1: "this looks good the please Make sure that the
+  gradient fade looks really nice and smooth and not jagged."
+- Addressed by rendering the preview natively at 1080p instead of a 640x360
+  thumbnail. At the thumbnail size the hairline and its fade collapse into a
+  handful of pixels, which misrepresents them; the 1:1 crops of the 1080p frame
+  show the real falloff (smooth, monotonic, no banding or hard edge).
+- Final: the captain approved.
+
+The same review raised a separate ask - show the overlay on every connected
+screen, not one. That is outside this task (it affects all overlay styles and the
+actor's output handling); it was escalated and firstmate ruled it out of scope
+for a separate task.
 
 ## The captain's ask
 
@@ -25,6 +38,9 @@ Only the `border` overlay style's geometry in `src/overlay.rs`
 - **Corner emphasis kept.** Corners are still brighter than the straight edges
   (a squared proximity boost), now the only corner effect since the reach is
   uniform. Phase colours are unchanged (the shared boldened palette).
+- **Faithful preview.** `BORDER_PREVIEW` (the offline preview and pixel-test
+  surface size) moved from 640x360 to native 1920x1080, so the hairline and its
+  gradient are shown at the resolution a real screen paints them.
 
 ## Why the old one looked bad
 
