@@ -1546,9 +1546,9 @@ fn border_glow(x: f32, y: f32, width: f32, height: f32, pulse: f32) -> f32 {
     // Two smoothstep ramps, both starting flat at the screen edge (`d = 0`) and
     // reaching exactly zero, with zero slope, by their own reach. Their sum is a
     // smooth, monotonic fade with no hard band edge: the narrow `line` term is
-    // the crisp hairline, and the wide `halo` term is the soft glow it dissolves
-    // into. Because both reaches are fixed, the falloff is uniform along an edge
-    // rather than stepping at a core/glow boundary.
+    // the crisp edge line, and the tight `halo` term is the light glow it
+    // dissolves into. Because both reaches are fixed, the falloff is uniform
+    // along an edge rather than stepping at a core/glow boundary.
     let profile = BORDER_LINE_STRENGTH * smoothstep(1.0 - d / line)
         + BORDER_HALO_STRENGTH * smoothstep(1.0 - d / halo);
     let boost = 1.0 + BORDER_CORNER_BOOST * near_corner * near_corner;
