@@ -283,8 +283,9 @@ const KEY_TAB: &[u8] = b"\t";
 const KEY_BACKSPACE: &[u8] = b"\x7f";
 const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 
-const SETTING_LABELS: [&str; 10] = [
+const SETTING_LABELS: [&str; 11] = [
     "Model",
+    "Inference backend",
     "Microphone",
     "Activation",
     "Shortcut",
@@ -308,21 +309,21 @@ const COMMAND_NAMES: [&str; 9] = [
     "shortcut-test",
 ];
 
-/// Home index of the first command row (after the ten Settings rows), for
+/// Home index of the first command row (after the eleven Settings rows), for
 /// tests that need to arrow down to a specific command.
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
 
 #[test]
 fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
-    // Tall enough for the ten Settings rows plus every Commands row with no
+    // Tall enough for the eleven Settings rows plus every Commands row with no
     // scrolling of either panel.
     let session = Session::spawn(&sandbox, 100, 34);
 
     // The pre-change baseline (see .superdesign/replica_html_template and the
     // dashboard task's report) listed 11 CLI commands with model/autostart
     // among them. The signed-off settings-menu redesign turns the home screen
-    // into two stacked panels with one selection cursor: ten Settings rows
+    // into two stacked panels with one selection cursor: eleven Settings rows
     // with current values (model and autostart included) above the remaining
     // Commands. All of it must fit one normal terminal, no pagination.
     let screen = session.wait_for("Settings", Duration::from_secs(5));
@@ -352,6 +353,10 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
         "the Model row should show the active catalog model:\n{screen}"
     );
     assert!(
+        screen.contains("Inference backend  auto"),
+        "the Inference backend row should show the configured preference:\n{screen}"
+    );
+    assert!(
         screen.contains("Overlay            enabled, top-right, badge, simple pulse"),
         "the Overlay row should summarize the real config:\n{screen}"
     );
@@ -376,7 +381,7 @@ fn pty_home_selection_crosses_from_the_settings_panel_into_the_commands_panel() 
         "expected Model selected:\n{initial}"
     );
 
-    // Walking down past all ten settings rows lands on "setup", the first
+    // Walking down past all eleven settings rows lands on "setup", the first
     // command row - one cursor spans both panels.
     for _ in 0..FIRST_COMMAND_ROW {
         session.send(KEY_DOWN);
@@ -426,9 +431,12 @@ fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_ho
 
     session.send(KEY_DOWN);
     session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
     let after_down = session.wait_for("> Activation", Duration::from_secs(3));
     assert!(
-        !after_down.contains("> Model") && !after_down.contains("> Microphone"),
+        !after_down.contains("> Model")
+            && !after_down.contains("> Inference backend")
+            && !after_down.contains("> Microphone"),
         "only one row should carry the selection marker:\n{after_down}"
     );
 
@@ -611,7 +619,9 @@ fn pty_activation_setting_changes_mode_and_persists_it() {
     let mut session = Session::spawn(&sandbox, 100, 32);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Activation is the third Settings row (Model, Microphone, Activation).
+    // Activation is the fourth Settings row (Model, Inference backend,
+    // Microphone, Activation).
+    session.send(KEY_DOWN);
     session.send(KEY_DOWN);
     session.send(KEY_DOWN);
     session.wait_for("> Activation", Duration::from_secs(3));
@@ -646,7 +656,7 @@ fn pty_overlay_setting_cycles_position_and_persists_it() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Overlay is the tenth and last Settings row.
+    // Overlay is the eleventh and last Settings row.
     for _ in 0..SETTING_LABELS.len() - 1 {
         session.send(KEY_DOWN);
     }
@@ -735,8 +745,8 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Transcript folder is the seventh Settings row.
-    for _ in 0..6 {
+    // Transcript folder is the eighth Settings row.
+    for _ in 0..7 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Transcript folder", Duration::from_secs(3));
@@ -780,8 +790,8 @@ fn pty_history_retention_setting_persists_both_limits() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // History retention is the eighth Settings row.
-    for _ in 0..7 {
+    // History retention is the ninth Settings row.
+    for _ in 0..8 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> History retention", Duration::from_secs(3));
@@ -830,8 +840,8 @@ fn pty_shortcut_screen_offers_the_system_dialog_and_reports_portal_failures_inli
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Shortcut is the fourth Settings row.
-    for _ in 0..3 {
+    // Shortcut is the fifth Settings row.
+    for _ in 0..4 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Shortcut", Duration::from_secs(3));
@@ -867,7 +877,8 @@ fn pty_microphone_screen_lists_devices_with_a_level_panel() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Microphone is the second Settings row.
+    // Microphone is the third Settings row.
+    session.send(KEY_DOWN);
     session.send(KEY_DOWN);
     session.wait_for("> Microphone", Duration::from_secs(3));
     session.send(KEY_ENTER);
@@ -897,8 +908,8 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Transcript output is the fifth Settings row.
-    for _ in 0..4 {
+    // Transcript output is the sixth Settings row.
+    for _ in 0..5 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Transcript output", Duration::from_secs(3));
@@ -952,8 +963,8 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Transcript output is the fifth Settings row.
-    for _ in 0..4 {
+    // Transcript output is the sixth Settings row.
+    for _ in 0..5 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Transcript output", Duration::from_secs(3));
@@ -1017,8 +1028,8 @@ fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Startup is the ninth Settings row.
-    for _ in 0..8 {
+    // Startup is the tenth Settings row.
+    for _ in 0..9 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Startup", Duration::from_secs(3));
@@ -1038,6 +1049,66 @@ fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
 }
 
 #[test]
+fn pty_inference_backend_setting_saves_and_reloads_like_the_model_screen() {
+    // The dedicated "Inference backend" Settings row reuses the Model screen's
+    // backend list and its activate-and-confirm flow: choosing a backend saves
+    // it, reloads a running daemon if there is one, and reports the outcome.
+    let sandbox = Sandbox::new("inference-backend-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    let home = session.wait_for("Settings", Duration::from_secs(5));
+    assert!(
+        home.contains("Inference backend  auto"),
+        "the row should show the configured preference:\n{home}"
+    );
+
+    // "Inference backend" is the second Settings row, right after Model.
+    session.send(KEY_DOWN);
+    session.wait_for("> Inference backend", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    let opened = session.wait_for("Auto (tries CUDA", Duration::from_secs(5));
+    assert!(
+        opened.contains("> Auto (tries CUDA"),
+        "the current preference should be selected:\n{opened}"
+    );
+    assert!(
+        opened.contains("CPU"),
+        "the always-available CPU backend must be listed:\n{opened}"
+    );
+
+    // Move from "auto" onto the always-available "cpu" and apply: the same
+    // activate-and-confirm flow as the Model screen's backend panel saves it
+    // and reports the outcome (no daemon running here, so it applies on next
+    // start rather than reloading).
+    session.send(KEY_DOWN);
+    session.wait_for("> CPU", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    let outcome = session.wait_for("daemon: not running", Duration::from_secs(20));
+    assert!(
+        outcome.contains("Backend change"),
+        "expected the backend change result title:\n{outcome}"
+    );
+    assert!(
+        outcome.contains("backend pref:   cpu"),
+        "diagnostics should report the pinned backend:\n{outcome}"
+    );
+    assert!(sandbox
+        .config_contents()
+        .contains("preferred_backend = \"cpu\""));
+
+    // Returning home shows the new value and keeps the row selected.
+    session.send(KEY_ESC);
+    let home = session.wait_for("> Inference backend", Duration::from_secs(3));
+    assert!(
+        home.contains("Inference backend  cpu"),
+        "the Home row should show the saved preference:\n{home}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_model_screen_saves_a_pinned_inference_backend_and_reports_it() {
     // Same stub-model trick as the activation test above: pinning the
     // always-available CPU backend must save the setting, then report that
@@ -1050,7 +1121,10 @@ fn pty_model_screen_saves_a_pinned_inference_backend_and_reports_it() {
     session.wait_for("> Model", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
-    let screen = session.wait_for("Inference backend", Duration::from_secs(5));
+    // Wait on the catalog title, not "Inference backend": that string is now
+    // also the home Settings row's label, so waiting on it would race the
+    // screen opening.
+    let screen = session.wait_for("Model catalog", Duration::from_secs(5));
     assert!(
         screen.contains("Auto (tries CUDA"),
         "backend panel should list the auto choice:\n{screen}"

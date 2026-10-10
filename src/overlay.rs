@@ -1613,7 +1613,7 @@ mod tests {
         // moves but the silhouette's alpha boundary is identical. Change the
         // breath with the spinner held fixed: the silhouette boundary moves.
         let alpha =
-            |pixels: &[u8]| -> Vec<u8> { pixels.chunks_exact(4).map(|pixel| pixel[3]).collect() };
+            |pixels: &[u8]| -> Vec<u8> { pixels.iter().skip(3).step_by(4).copied().collect() };
 
         let spinner_a =
             paint_to_pixels_with_breath(Some(Phase::Transcribing), 0.0, 0.3, false, Style::Blob);
