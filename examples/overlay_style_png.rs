@@ -7,17 +7,17 @@
 //!
 //! Run with `cargo run --example overlay_style_png -- <output-dir>` (defaults
 //! to `overlay-preview` in the current directory). Every style is written once
-//! per phase; the `blob` and `border` styles additionally get frames across one
-//! animation cycle, for both the default and streaming treatments. The
-//! full-screen `border` frames are written at their representative preview size
-//! rather than a compositor-provided output size.
+//! per phase; the `blob`, `border`, and `half-circle` styles additionally get
+//! frames across one animation cycle, for both the default and streaming
+//! treatments. The full-screen `border` frames are written at their
+//! representative preview size rather than a compositor-provided output size.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use tonguetyped::overlay::render_frame_pixels;
 
-const STYLES: [&str; 5] = ["badge", "minimal", "pill", "blob", "border"];
+const STYLES: [&str; 6] = ["badge", "minimal", "pill", "blob", "border", "half-circle"];
 const PHASES: [&str; 6] = [
     "recording",
     "transcribing",
@@ -47,7 +47,7 @@ fn main() -> std::io::Result<()> {
     }
 
     for (index, t) in [0.0_f32, 0.25, 0.5, 0.75].iter().enumerate() {
-        for style in ["blob", "border"] {
+        for style in ["blob", "border", "half-circle"] {
             for (label, streaming) in [("pulse", false), ("streaming", true)] {
                 let (width, height, pixels) =
                     render_frame_pixels(style, Some("recording"), *t, streaming);

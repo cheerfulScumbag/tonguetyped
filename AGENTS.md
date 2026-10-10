@@ -323,7 +323,7 @@ setup`, see `tests/setup_cli.rs`) has never prompted for overlay settings at all
 it leaves whatever `Config::reload()` loaded untouched - so it needed no changes
 when overlay got its console step.
 
-`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`/`border`) and `streaming_indicator`
+`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`) and `streaming_indicator`
 (bool) follow `position`/`monitor`'s existing convention of plain, unvalidated
 strings/bools with a tolerant-fallback parser in `src/overlay.rs` (`style_for`,
 `anchor_for`) rather than a strict `serde` enum - an unrecognized `style` value
@@ -333,8 +333,9 @@ period (`BLOB_PULSE_PERIOD`, via the dedicated `blob_breath_fraction`, which kee
 the silhouette's slow breath independent of `animation_fraction`'s faster spinner
 fraction while transcribing), and
 the captain reviewed it through `examples/overlay_style_png.rs` - an offline
-renderer (no compositor needed) that dumps every style/phase plus blob/border
-animation frames to PNGs by calling the public `overlay::render_frame_pixels`.
+renderer (no compositor needed) that dumps every style/phase plus blob/border/
+half-circle animation frames to PNGs by calling the public
+`overlay::render_frame_pixels`.
 Use it for any future overlay look, and note the canvas is wl_shm Argb8888
 (little-endian BGRA), so the example swaps channels when writing PNG.
 `streaming_indicator` is a *synthetic* busier waveform animation (driven by the same
@@ -352,7 +353,7 @@ config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
 `monitor`) and recreates the surface when it changes: an `overlay.style`,
 `position`, or `monitor` change applied via `tonguetyped reload` takes effect on
 the next event, with no daemon restart.
-`border` (the fifth style, captain-requested) is the one exception to the
+`border` (the fifth style, captain-requested) is an exception to the
 small-anchored-badge model: it is a full-screen surface anchored to every edge
 with no margin and a zero requested size (the compositor stretches it to the
 output and reports the real dimensions via `configure`), so
@@ -373,6 +374,21 @@ alpha-blended falloff function in `border_glow`, not a language limitation).
 Its full-screen shm buffer grows the pool on demand
 (smithay's `SlotPool` auto-resizes), so the small startup `BADGE*BADGE*4` pool
 is still correct.
+
+`half-circle` (the sixth style, captain-requested) is a glowing, pulsing
+phase-coloured semicircle resting flat on the top edge at top-centre: the flat
+side is the screen's top edge and the dome bulges downward, with a
+`half_circle_profile` radial fill-plus-glow that fades monotonically to zero
+(no band edge) and is mirror-symmetric about the vertical centre line. Like
+`border` it ignores `overlay.position`; where `border` is full-screen,
+`half-circle` is top-docked - `overlay::is_top_docked_style` makes `create_layer`
+anchor it to `Anchor::TOP` (compositor-centres horizontally) with no margin, and
+`surface_size_for(HalfCircle)` is `BADGE*2` wide by `BADGE` tall (the size is a
+real requested size, unlike `border`'s representative-only `BORDER_PREVIEW`).
+`streaming_indicator` adds a recording-only bright bead travelling along the arc.
+Its per-phase pixel checks live in `src/overlay.rs` tests; `half-circle` is in
+`ALL_STYLES` and `inside_style_shape`, and the design/sign-off record is
+`data/tt-add-a-glowing-pulsing-half-circle-overla-6f/design-brief.md`.
 
 `tonguetyped daemon` (`src/cli.rs`'s `Commands::Daemon { command: Option<DaemonCommand> }`)
 keeps bare invocation meaning exactly what it always has (foreground start, used

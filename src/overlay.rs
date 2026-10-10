@@ -54,6 +54,11 @@ const BADGE: u32 = 56;
 /// The `Blob` style's square surface, larger than `BADGE` so its glow has room
 /// to fall off to nothing before the surface edge (see `paint_blob`).
 const BLOB_SURFACE: u32 = BADGE * 3 / 2;
+/// The `HalfCircle` style's surface: twice the badge width by the badge height,
+/// so a dome resting on the top edge and the soft glow around it both fade to
+/// nothing before the surface edge (see `paint_half_circle`). It is anchored to
+/// the top edge only, so it is horizontally centred by the compositor.
+const HALF_CIRCLE_SURFACE: (u32, u32) = (BADGE * 2, BADGE);
 /// The `Border` style's stand-in surface size. On a live compositor it is a
 /// full-screen all-edge-anchored layer (the compositor stretches a zero-sized
 /// surface to the whole output and reports the real dimensions in `configure`),
@@ -81,6 +86,19 @@ const BORDER_LINE_STRENGTH: f32 = 0.85;
 const BORDER_HALO_STRENGTH: f32 = 0.20;
 /// How much extra brightness a corner hotspot adds over the straight edges.
 const BORDER_CORNER_BOOST: f32 = 1.6;
+/// `paint_half_circle` geometry, all as fractions of the surface height: the
+/// dome's radius and the reach of the soft glow that dissolves outward from its
+/// curved edge. Their sum (`0.5 + 0.30 = 0.80`) is under the surface half-width
+/// and under the height, leaving an equal transparent margin to the sides and
+/// below the flat edge, so the glow never clips.
+const HALF_CIRCLE_RADIUS_FRACTION: f32 = 0.5;
+const HALF_CIRCLE_GLOW_FRACTION: f32 = 0.30;
+/// How far the dome's solid fill dims from its core to its curved edge - small
+/// enough that the dome still reads solid, not as a ring.
+const HALF_CIRCLE_FILL_FALLOFF: f32 = 0.12;
+/// Angular half-width of the recording-only streaming highlight sweeping along
+/// the arc (radians).
+const HALF_CIRCLE_SWEEP: f32 = 0.9;
 const MARGIN: i32 = 20;
 const TICK: Duration = Duration::from_millis(33);
 const RECORDING_PULSE_PERIOD: Duration = Duration::from_millis(1600);
@@ -345,15 +363,20 @@ impl State {
         );
         let (width, height) = surface_size_for(self.style);
         let fullscreen = is_fullscreen_style(self.style);
+        let top_docked = is_top_docked_style(self.style);
         // A full-screen style spans every edge with no margin and a zero
         // requested size, letting the compositor stretch it to the output; a
-        // badge style sits at the configured corner/edge with a fixed size.
+        // top-docked style (the semicircle) sits flush against the top edge at
+        // top-centre; a badge style sits at the configured corner/edge with a
+        // fixed size.
         layer.set_anchor(if fullscreen {
             Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT
+        } else if top_docked {
+            Anchor::TOP
         } else {
             anchor_for(&config.position)
         });
-        let margin = if fullscreen { 0 } else { MARGIN };
+        let margin = if fullscreen || top_docked { 0 } else { MARGIN };
         layer.set_margin(margin, margin, margin, margin);
         if fullscreen {
             layer.set_size(0, 0);
@@ -499,13 +522,16 @@ pub(crate) const POSITION_VALUES: [&str; 7] = [
 /// The `OverlayConfig::style` values both configuration UIs offer, matching
 /// `style_for`'s accepted values 1:1. These were reviewed as Superdesign
 /// mockups and approved by the captain; `Blob` was added later as a captain-
-/// requested "pulsating glowy blob, plasma-like" look, and `Border` as a
+/// requested "pulsating glowy blob, plasma-like" look, `Border` as a
 /// captain-requested phase-coloured screen-edge glow that is strongest in the
-/// corners.
-pub(crate) const STYLE_VALUES: [&str; 5] = ["badge", "minimal", "pill", "blob", "border"];
+/// corners, and `HalfCircle` as a captain-requested glowing, pulsing
+/// semicircle resting on the top edge.
+pub(crate) const STYLE_VALUES: [&str; 6] =
+    ["badge", "minimal", "pill", "blob", "border", "half-circle"];
 
 /// Display labels matching `STYLE_VALUES` position for position.
-pub(crate) const STYLE_LABELS: [&str; 5] = ["Badge", "Minimal", "Pill", "Blob", "Border"];
+pub(crate) const STYLE_LABELS: [&str; 6] =
+    ["Badge", "Minimal", "Pill", "Blob", "Border", "Half Circle"];
 
 /// Display labels for `OverlayConfig::streaming_indicator`: the plain pulsing
 /// dot first, the busier live-capture treatment second. Mirrors Handy's
@@ -1004,9 +1030,11 @@ fn stroke_arc(
 /// solid-disc-and-glyph treatment, `Minimal` strips it to a thin outline ring
 /// with a small glyph, `Pill` reshapes the badge into a capsule with room for
 /// a wider waveform, `Blob` is a bright, slowly-breathing glowing blob with
-/// a soft liquid-metal sheen, and `Border` is a thin phase-coloured glowing
+/// a soft liquid-metal sheen, `Border` is a thin phase-coloured glowing
 /// line hugging the whole screen edge that fades smoothly inward, brightest in
-/// the corners. Every style reskins
+/// the corners, and `HalfCircle` is a glowing, pulsing phase-coloured
+/// semicircle resting flat on the top edge of the screen at top-centre, its
+/// soft glow fading smoothly outward. Every style reskins
 /// all five phases consistently, per the design review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
@@ -1015,6 +1043,7 @@ pub(crate) enum Style {
     Pill,
     Blob,
     Border,
+    HalfCircle,
 }
 
 /// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
@@ -1025,6 +1054,7 @@ fn style_for(name: &str) -> Style {
         "pill" => Style::Pill,
         "blob" => Style::Blob,
         "border" => Style::Border,
+        "half-circle" => Style::HalfCircle,
         _ => Style::Badge,
     }
 }
@@ -1038,9 +1068,19 @@ fn is_fullscreen_style(style: Style) -> bool {
     matches!(style, Style::Border)
 }
 
+/// Whether a style is docked to a single screen edge rather than placed at the
+/// configured `overlay.position`. Only `HalfCircle` is: a semicircle resting on
+/// the top edge only reads correctly at top-centre, so `create_layer` anchors it
+/// to the top edge (which centres it horizontally) with no margin, and it
+/// ignores `overlay.position` the same way `Border` does.
+fn is_top_docked_style(style: Style) -> bool {
+    matches!(style, Style::HalfCircle)
+}
+
 /// The layer-shell surface size to request for a style - `Pill` widens to hold
-/// its capsule shape and waveform, and `Blob` enlarges to give its glow room
-/// to fade out before the surface edge. For the full-screen `Border` style this
+/// its capsule shape and waveform, `Blob` enlarges to give its glow room to
+/// fade out before the surface edge, and `HalfCircle` is wider than tall so its
+/// dome and glow have room to fade. For the full-screen `Border` style this
 /// is only the representative size used by the offline preview and the tests;
 /// `create_layer` requests a stretched zero-sized surface instead.
 fn surface_size_for(style: Style) -> (u32, u32) {
@@ -1049,6 +1089,7 @@ fn surface_size_for(style: Style) -> (u32, u32) {
         Style::Pill => (BADGE * 5 / 4, BADGE * 5 / 8),
         Style::Blob => (BLOB_SURFACE, BLOB_SURFACE),
         Style::Border => BORDER_PREVIEW,
+        Style::HalfCircle => HALF_CIRCLE_SURFACE,
     }
 }
 
@@ -1151,6 +1192,7 @@ fn paint(
         Style::Pill => paint_pill(canvas, phase, t, streaming_indicator),
         Style::Blob => paint_blob(canvas, phase, t, breath, streaming_indicator),
         Style::Border => paint_border(canvas, phase, t, streaming_indicator),
+        Style::HalfCircle => paint_half_circle(canvas, phase, t, streaming_indicator),
     }
 }
 
@@ -1599,13 +1641,81 @@ fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: 
     }
 }
 
+/// The `HalfCircle` style's per-pixel glow intensity in `0.0..=1.0` at radial
+/// distance `r` from the dome's centre (the flat edge's midpoint, on the top
+/// edge). Inside `radius` it is a soft solid fill, brightest at the core and
+/// dimming toward the curved edge; outside, it dissolves smoothly to zero by
+/// `radius + glow` with a `smoothstep` that starts flat, so the falloff has no
+/// hard band edge. Because it depends only on `r`, the shape and its glow are
+/// mirror-symmetric about the vertical centre line.
+fn half_circle_profile(r: f32, radius: f32, glow: f32) -> f32 {
+    if r <= radius {
+        1.0 - HALF_CIRCLE_FILL_FALLOFF * (r / radius).powi(2)
+    } else {
+        let into = ((r - radius) / glow).clamp(0.0, 1.0);
+        (1.0 - HALF_CIRCLE_FILL_FALLOFF) * (1.0 - smoothstep(into))
+    }
+}
+
+/// A glowing, pulsing phase-coloured semicircle resting flat on the top edge of
+/// the screen at top-centre - the `HalfCircle` style. The dome's flat side is
+/// the screen's top edge and its centre is that edge's midpoint, so it reads as
+/// a half-sun rising from the top bezel. It is drawn through the same per-pixel
+/// alpha-blending path every other style uses: a soft solid fill over the
+/// shared phase colour dissolving into a smooth radial glow. The whole dome
+/// breathes on the elapsed-time fraction; with `streaming_indicator` a bright
+/// highlight additionally sweeps along the arc, standing in for the "actively
+/// capturing" signal the badge styles show as a waveform (see
+/// `OverlayConfig::streaming_indicator`).
+fn paint_half_circle(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+    use std::f32::consts::{PI, TAU};
+    let width = canvas.width as f32;
+    let height = canvas.height as f32;
+    let cx = width / 2.0;
+    let radius = height * HALF_CIRCLE_RADIUS_FRACTION;
+    let glow = height * HALF_CIRCLE_GLOW_FRACTION;
+    let color = phase_color(phase);
+    let hot = lighten(color, 0.22);
+    let pulse = 0.8 + 0.2 * (0.5 + 0.5 * (t * TAU).sin());
+    // The sweep is a recording-only "actively capturing" cue, matching every
+    // other style's `Phase::Recording if streaming_indicator` branch.
+    let sweeping = streaming_indicator && matches!(phase, Phase::Recording);
+    // The visible semicircle spans the polar angles `0..PI` (screen-space `y`
+    // grows downward), so the highlight sweeps that full range across a cycle.
+    let head = t * PI;
+
+    for y in 0..canvas.height {
+        for x in 0..canvas.width {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let dx = px - cx;
+            let r = (dx * dx + py * py).sqrt();
+            let mut intensity = half_circle_profile(r, radius, glow) * pulse;
+            if intensity <= 0.0 {
+                continue;
+            }
+            if sweeping {
+                let delta = (py.atan2(dx) - head).abs();
+                let angular = smoothstep((1.0 - delta / HALF_CIRCLE_SWEEP).clamp(0.0, 1.0));
+                // Weight the highlight toward the curved edge, so it reads as a
+                // bright bead travelling along the arc rather than a hard pie
+                // wedge from the dome's centre.
+                let radial = (r / radius).clamp(0.0, 1.0).powi(2);
+                intensity = (intensity + angular * radial * 0.7).min(1.0);
+            }
+            let rgb = mix_color(color, hot, intensity);
+            canvas.blend(x as i32, y as i32, rgb, intensity);
+        }
+    }
+}
+
 /// Renders one overlay frame into a straight-alpha BGRA8 buffer (wl_shm
 /// `Argb8888`, little-endian), for the offline design-preview example
 /// (`examples/overlay_style_png.rs`, which reorders it to PNG's RGBA). `style`
 /// and `phase` use the same string values the config and feedback events use
-/// (`badge`/`minimal`/`pill`/`blob`/`border`; `recording`/`transcribing`/
-/// `success`/`no-speech`/`cancelled`/`error`), and `None` clears to fully
-/// transparent.
+/// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`; `recording`/
+/// `transcribing`/`success`/`no-speech`/`cancelled`/`error`), and `None` clears
+/// to fully transparent.
 /// Returns `(width, height, pixels)` with `width * height * 4` bytes. For the
 /// full-screen `border` style this is the representative `BORDER_PREVIEW` size,
 /// not a compositor-provided output size.
@@ -1745,12 +1855,13 @@ mod tests {
         );
     }
 
-    const ALL_STYLES: [Style; 5] = [
+    const ALL_STYLES: [Style; 6] = [
         Style::Badge,
         Style::Minimal,
         Style::Pill,
         Style::Blob,
         Style::Border,
+        Style::HalfCircle,
     ];
 
     fn paint_to_pixels(
@@ -2197,11 +2308,147 @@ mod tests {
         );
     }
 
+    #[test]
+    fn half_circle_paints_a_dome_resting_on_the_top_edge_with_a_transparent_margin() {
+        let (width, height) = surface_size_for(Style::HalfCircle);
+        let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::HalfCircle);
+
+        // The flat side rests on the top edge: the top-centre of the surface is
+        // painted (the dome's apex region), so the shape touches the very top.
+        assert!(
+            alpha_at(&pixels, width, width / 2, 0) > 0,
+            "the dome should be painted at the top edge"
+        );
+
+        // Away from the dome the surface is transparent: the four corners and a
+        // band along the bottom all stay clear, so the glow has faded out
+        // before the surface edge rather than clipping.
+        assert_eq!(alpha_at(&pixels, width, 0, 0), 0, "top-left corner");
+        assert_eq!(
+            alpha_at(&pixels, width, width - 1, 0),
+            0,
+            "top-right corner"
+        );
+        assert_eq!(
+            alpha_at(&pixels, width, 0, height - 1),
+            0,
+            "bottom-left corner"
+        );
+        assert_eq!(
+            alpha_at(&pixels, width, width - 1, height - 1),
+            0,
+            "bottom-right corner"
+        );
+        for y in height - 6..height {
+            for x in 0..width {
+                assert_eq!(
+                    alpha_at(&pixels, width, x, y),
+                    0,
+                    "bottom pixel ({x},{y}) should be transparent (glow faded before the edge)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn half_circle_glow_fades_smoothly_and_symmetrically() {
+        // The radial profile is the whole falloff, so check it directly: it
+        // only ever weakens as the distance from the dome's centre grows, and
+        // it reaches exactly zero at the dome's radius plus its glow reach.
+        let radius = HALF_CIRCLE_SURFACE.1 as f32 * HALF_CIRCLE_RADIUS_FRACTION;
+        let glow = HALF_CIRCLE_SURFACE.1 as f32 * HALF_CIRCLE_GLOW_FRACTION;
+        let mut previous = half_circle_profile(0.0, radius, glow);
+        let mut r = 0.0;
+        while r <= radius + glow + 2.0 {
+            let current = half_circle_profile(r, radius, glow);
+            assert!(
+                current <= previous + 1e-6,
+                "glow should fade monotonically outward: {previous} then {current} at r={r}"
+            );
+            previous = current;
+            r += 0.25;
+        }
+        assert_eq!(
+            half_circle_profile(radius + glow, radius, glow),
+            0.0,
+            "the glow should reach zero exactly at radius + glow"
+        );
+
+        // The dome's centre is the top-edge midpoint, and the profile depends
+        // only on distance from it, so the painted frame is mirror-symmetric
+        // about the vertical centre line.
+        let (width, _) = surface_size_for(Style::HalfCircle);
+        let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::HalfCircle);
+        for y in 0..2 {
+            for x in 0..width {
+                assert_eq!(
+                    alpha_at(&pixels, width, x, y),
+                    alpha_at(&pixels, width, width - 1 - x, y),
+                    "column {x} and its mirror should match at row {y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn half_circle_uses_the_phase_colour() {
+        // Buffer is BGRA, so channel 2 is red and channel 0 is blue. Sample a
+        // pixel well inside the dome so the fill dominates.
+        let (width, _) = surface_size_for(Style::HalfCircle);
+        let index = ((width / 2) * 4) as usize;
+        let recording = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::HalfCircle);
+        let transcribing =
+            paint_to_pixels(Some(Phase::Transcribing), 0.0, false, Style::HalfCircle);
+        assert!(
+            recording[index + 2] > recording[index],
+            "recording dome should be red-dominant"
+        );
+        assert!(
+            transcribing[index] > transcribing[index + 2],
+            "transcribing dome should be blue-dominant"
+        );
+    }
+
+    #[test]
+    fn half_circle_pulses_across_its_animation_cycle() {
+        let frames: Vec<Vec<u8>> = [0.0, 0.25, 0.5, 0.75]
+            .iter()
+            .map(|&t| paint_to_pixels(Some(Phase::Recording), t, false, Style::HalfCircle))
+            .collect();
+        for pair in frames.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "consecutive half-circle frames should differ (pulsing glow)"
+            );
+        }
+    }
+
+    #[test]
+    fn half_circle_streaming_indicator_sweeps_a_travelling_highlight() {
+        let sum =
+            |pixels: &[u8]| -> u64 { pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum() };
+        let default = paint_to_pixels(Some(Phase::Recording), 0.15, false, Style::HalfCircle);
+        let streaming = paint_to_pixels(Some(Phase::Recording), 0.15, true, Style::HalfCircle);
+        assert!(
+            sum(&streaming) > sum(&default),
+            "the streaming sweep should add extra glow over the default dome"
+        );
+        // The highlight advances along the arc across the cycle, so two
+        // instants with the same base pulse (sin 0 and sin pi) still differ.
+        let a = paint_to_pixels(Some(Phase::Recording), 0.0, true, Style::HalfCircle);
+        let b = paint_to_pixels(Some(Phase::Recording), 0.5, true, Style::HalfCircle);
+        assert_ne!(
+            a, b,
+            "the streaming highlight should travel along the arc, not sit still"
+        );
+    }
+
     /// Is `(x, y)` (a pixel center in surface coordinates) inside the filled
     /// shape a style paints its streaming waveform into? `Badge` is the disc,
     /// `Minimal` the ring's inner edge (no filled background, just the
     /// outline), `Pill` the capsule, `Blob` the blob's glow extent, `Border`
-    /// the glow band hugging the screen edge.
+    /// the glow band hugging the screen edge, `HalfCircle` the dome plus its
+    /// radial glow.
     fn inside_style_shape(style: Style, x: f32, y: f32) -> bool {
         let (width, height) = surface_size_for(style);
         let cx = width as f32 / 2.0;
@@ -2236,6 +2483,16 @@ mod tests {
                 // anti-aliased boundary.
                 let reach = width.min(height) as f32 * BORDER_GLOW_FRACTION + 1.0;
                 x.min(width as f32 - x).min(y.min(height as f32 - y)) < reach
+            }
+            Style::HalfCircle => {
+                // The dome's flat edge sits on the top edge (`y = 0`), so its
+                // centre is the top-edge midpoint; every painted pixel lies
+                // within the dome's radius plus its glow reach (see
+                // `half_circle_profile`), with slack for the boundary.
+                let radius = height as f32 * HALF_CIRCLE_RADIUS_FRACTION;
+                let glow = height as f32 * HALF_CIRCLE_GLOW_FRACTION;
+                let reach = radius + glow + 1.0;
+                (x - cx).powi(2) + y.powi(2) <= reach * reach
             }
         }
     }
@@ -2292,6 +2549,7 @@ mod tests {
         assert_eq!(style_for("pill"), Style::Pill);
         assert_eq!(style_for("blob"), Style::Blob);
         assert_eq!(style_for("border"), Style::Border);
+        assert_eq!(style_for("half-circle"), Style::HalfCircle);
         assert_eq!(style_for("nonsense"), Style::Badge);
     }
 }

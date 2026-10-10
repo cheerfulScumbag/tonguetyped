@@ -10,10 +10,12 @@
 //! recording`. "streaming" holds the Recording phase with
 //! `overlay.streaming_indicator` enabled, to preview the live-capture
 //! waveform look instead of the default pulse. Pass a style name
-//! (badge/minimal/pill/blob/border) as a third argument to preview one of the
-//! other `overlay.style` looks, e.g. `cargo run --example overlay_preview --
-//! top-right recording blob`. The `border` style ignores `position`: it is a
-//! full-screen frame that hugs every screen edge.
+//! (badge/minimal/pill/blob/border/half-circle) as a third argument to preview
+//! one of the other `overlay.style` looks, e.g. `cargo run --example
+//! overlay_preview -- top-right recording blob`. The `border` style ignores
+//! `position`: it is a full-screen frame that hugs every screen edge. The
+//! `half-circle` style also ignores `position`: it is a semicircle resting on
+//! the top edge, always at top-centre.
 
 use std::thread::sleep;
 use std::time::Duration;
