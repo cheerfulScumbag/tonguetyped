@@ -316,10 +316,10 @@ period (`BLOB_PULSE_PERIOD`, via the dedicated `blob_breath_fraction`, which kee
 the silhouette's slow breath independent of `animation_fraction`'s faster spinner
 fraction while transcribing), and
 the captain reviewed it through `examples/overlay_style_png.rs` - an offline
-renderer (no compositor needed) that dumps every style/phase plus blob animation
-frames to PNGs by calling the public `overlay::render_frame_pixels`. Use it for
-any future overlay look, and note the canvas is wl_shm Argb8888 (little-endian
-BGRA), so the example swaps channels when writing PNG.
+renderer (no compositor needed) that dumps every style/phase plus blob/border
+animation frames to PNGs by calling the public `overlay::render_frame_pixels`.
+Use it for any future overlay look, and note the canvas is wl_shm Argb8888
+(little-endian BGRA), so the example swaps channels when writing PNG.
 `streaming_indicator` is a *synthetic* busier waveform animation (driven by the same
 elapsed-time fraction every other phase already animates from), not a real
 microphone-reactive one: there is no live audio-level feed wired from the
