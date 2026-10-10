@@ -226,8 +226,9 @@ fn pty_enabling_overlay_walks_through_position_style_and_streaming_and_persists_
     assert!(
         style_screen.contains("Badge")
             && style_screen.contains("Minimal")
-            && style_screen.contains("Pill"),
-        "style step should list Badge/Minimal/Pill:\n{style_screen}"
+            && style_screen.contains("Pill")
+            && style_screen.contains("Blob"),
+        "style step should list Badge/Minimal/Pill/Blob:\n{style_screen}"
     );
 
     // Move down to "Pill" (index 2) and confirm.

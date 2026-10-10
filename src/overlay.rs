@@ -49,9 +49,15 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
 
 const BADGE: u32 = 56;
+/// The `Blob` style's square surface, larger than `BADGE` so its glow has room
+/// to fall off to nothing before the surface edge (see `paint_blob`).
+const BLOB_SURFACE: u32 = BADGE * 3 / 2;
 const MARGIN: i32 = 20;
 const TICK: Duration = Duration::from_millis(33);
 const RECORDING_PULSE_PERIOD: Duration = Duration::from_millis(1600);
+/// The `Blob` style breathes more slowly than the other styles' plain pulse -
+/// a calm, slow breath rather than a quick heartbeat.
+const BLOB_PULSE_PERIOD: Duration = Duration::from_millis(2800);
 const SPIN_PERIOD: Duration = Duration::from_millis(900);
 const SUCCESS_DWELL: Duration = Duration::from_millis(900);
 const CANCELLED_DWELL: Duration = Duration::from_millis(900);
@@ -370,7 +376,7 @@ impl State {
             width,
             height,
         };
-        let t = animation_fraction(self.phase, self.anim_start);
+        let t = animation_fraction(self.phase, self.style, self.anim_start);
         paint(
             &mut canvas,
             self.phase,
@@ -414,12 +420,13 @@ pub(crate) const POSITION_VALUES: [&str; 7] = [
 ];
 
 /// The `OverlayConfig::style` values both configuration UIs offer, matching
-/// `style_for`'s accepted values 1:1. These three were reviewed as Superdesign
-/// mockups and approved by the captain.
-pub(crate) const STYLE_VALUES: [&str; 3] = ["badge", "minimal", "pill"];
+/// `style_for`'s accepted values 1:1. These were reviewed as Superdesign
+/// mockups and approved by the captain; `Blob` was added later as a captain-
+/// requested "pulsating glowy blob, plasma-like" look.
+pub(crate) const STYLE_VALUES: [&str; 4] = ["badge", "minimal", "pill", "blob"];
 
 /// Display labels matching `STYLE_VALUES` position for position.
-pub(crate) const STYLE_LABELS: [&str; 3] = ["Badge", "Minimal", "Pill"];
+pub(crate) const STYLE_LABELS: [&str; 4] = ["Badge", "Minimal", "Pill", "Blob"];
 
 /// Display labels for `OverlayConfig::streaming_indicator`: the plain pulsing
 /// dot first, the busier live-capture treatment second. Mirrors Handy's
@@ -480,9 +487,12 @@ fn paint_waveform_bars(
     }
 }
 
-fn animation_fraction(phase: Option<Phase>, start: Instant) -> f32 {
+fn animation_fraction(phase: Option<Phase>, style: Style, start: Instant) -> f32 {
     let period = match phase {
-        Some(Phase::Recording) => RECORDING_PULSE_PERIOD,
+        Some(Phase::Recording) => match style {
+            Style::Blob => BLOB_PULSE_PERIOD,
+            _ => RECORDING_PULSE_PERIOD,
+        },
         Some(Phase::Transcribing) => SPIN_PERIOD,
         _ => return 0.0,
     };
@@ -692,6 +702,74 @@ fn fill_capsule(
     }
 }
 
+/// The outline of the `Style::Blob` silhouette at `angle`, time `t`: a slow,
+/// calm breathing scale with only a faint low-frequency sway, so it reads as a
+/// gently living blob rather than a churning one. The amplitudes sum to 0.12,
+/// bounding the outline at `radius * 1.12` - what `paint_blob` and
+/// `surface_size_for` account for.
+fn blob_edge(radius: f32, angle: f32, t: f32) -> f32 {
+    use std::f32::consts::TAU;
+    let breathe = 0.07 * (t * TAU).sin();
+    let sway = 0.03 * (2.0 * angle - t * TAU).sin() + 0.02 * (3.0 * angle + t * TAU * 0.5).sin();
+    radius * (1.0 + breathe + sway)
+}
+
+/// Blends `color` toward white by `amount` (0..1) - used for the blob's bright
+/// inner glow and near-white sheen.
+fn lighten(color: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
+    let f = |channel: u8| -> u8 {
+        (channel as f32 + (255.0 - channel as f32) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (f(color.0), f(color.1), f(color.2))
+}
+
+/// Multiplies `color` by `factor` - used to keep a slightly darker base under
+/// the blob's bright inner glow.
+fn scale_color(color: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
+    let f = |channel: u8| -> u8 { (channel as f32 * factor).round().clamp(0.0, 255.0) as u8 };
+    (f(color.0), f(color.1), f(color.2))
+}
+
+/// Linear blend of two colors, `t = 0` giving `a` and `t = 1` giving `b`.
+fn mix_color(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    let f = |x: u8, y: u8| -> u8 {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
+}
+
+fn normalize3(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    let len = (x * x + y * y + z * z).sqrt();
+    (x / len, y / len, z / len)
+}
+
+/// Applies a soft metallic sheen to one blob pixel: an `env` base color lit by
+/// `lit`, plus a white specular `spec` highlight and a bright fresnel `rim`
+/// tinted by `sheen`. All math is in 0..255 channel space.
+fn metallic_shade(
+    env: (u8, u8, u8),
+    lit: f32,
+    spec: f32,
+    rim: f32,
+    sheen: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    let channel = |env_channel: u8, sheen_channel: u8| -> u8 {
+        (env_channel as f32 * lit + 235.0 * spec + sheen_channel as f32 * 0.5 * rim)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (
+        channel(env.0, sheen.0),
+        channel(env.1, sheen.1),
+        channel(env.2, sheen.2),
+    )
+}
+
 fn fill_square(canvas: &mut Canvas, cx: f32, cy: f32, half: f32, rgb: (u8, u8, u8)) {
     let min_x = (cx - half).round().max(0.0) as i32;
     let max_x = (cx + half).round().min(canvas.width as f32) as i32;
@@ -794,17 +872,18 @@ fn stroke_arc(
     }
 }
 
-/// Three selectable looks (captain-approved from the superdesign mockups -
-/// see `OverlayConfig::style`): `Badge` is the original solid-disc-and-glyph
-/// treatment, `Minimal` strips it to a thin outline ring with a small glyph,
-/// and `Pill` reshapes the badge into a capsule with room for a wider
-/// waveform. Every style reskins all five phases consistently, per the
-/// design review.
+/// The selectable looks (see `OverlayConfig::style`): `Badge` is the original
+/// solid-disc-and-glyph treatment, `Minimal` strips it to a thin outline ring
+/// with a small glyph, `Pill` reshapes the badge into a capsule with room for
+/// a wider waveform, and `Blob` is a bright, slowly-breathing glowing blob with
+/// a soft liquid-metal sheen. Every style reskins all five phases consistently,
+/// per the design review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
     Badge,
     Minimal,
     Pill,
+    Blob,
 }
 
 /// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
@@ -813,16 +892,19 @@ fn style_for(name: &str) -> Style {
     match name {
         "minimal" => Style::Minimal,
         "pill" => Style::Pill,
+        "blob" => Style::Blob,
         _ => Style::Badge,
     }
 }
 
-/// The layer-shell surface size to request for a style - only `Pill` departs
-/// from the square badge, widening to hold its capsule shape and waveform.
+/// The layer-shell surface size to request for a style - `Pill` widens to hold
+/// its capsule shape and waveform, and `Blob` enlarges to give its glow room
+/// to fade out before the surface edge.
 fn surface_size_for(style: Style) -> (u32, u32) {
     match style {
         Style::Badge | Style::Minimal => (BADGE, BADGE),
         Style::Pill => (BADGE * 5 / 4, BADGE * 5 / 8),
+        Style::Blob => (BLOB_SURFACE, BLOB_SURFACE),
     }
 }
 
@@ -882,6 +964,7 @@ fn paint(
         Style::Badge => paint_badge(canvas, phase, t, streaming_indicator),
         Style::Minimal => paint_minimal(canvas, phase, t, streaming_indicator),
         Style::Pill => paint_pill(canvas, phase, t, streaming_indicator),
+        Style::Blob => paint_blob(canvas, phase, t, streaming_indicator),
     }
 }
 
@@ -1106,6 +1189,148 @@ fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bo
     }
 }
 
+/// A bright, glowing blob in the phase color that slowly breathes - the `Blob`
+/// style. The silhouette gently inhales and exhales on its own slower cycle
+/// (see `BLOB_PULSE_PERIOD`) with only a faint organic sway, while a soft
+/// metallic sheen (a gentle dome highlight and a bright rim) keeps it feeling
+/// like liquid metal rather than a flat disc. A white glyph carries the state
+/// for the terminal phases and the streaming waveform, exactly as every other
+/// style does; those phases are simply static (t is 0 once the animation
+/// stops), which is why the blob sits still for them.
+fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+    let cx = canvas.width as f32 / 2.0;
+    let cy = canvas.height as f32 / 2.0;
+    let radius = canvas.width.min(canvas.height) as f32 * 0.30;
+    let color = phase_color(phase);
+    // A bright body with an even brighter inner glow and a near-white sheen,
+    // so the blob stays luminous rather than turning dark and silvered.
+    let body = scale_color(lighten(color, 0.1), 0.88);
+    let core = lighten(color, 0.62);
+    let sheen = lighten(color, 0.98);
+
+    // Light and its half-vector (view direction is +z), for the specular dot.
+    let (lx, ly, lz) = normalize3(-0.45, -0.68, 0.58);
+    let (hx, hy, hz) = normalize3(lx, ly, lz + 1.0);
+    let halo_width = radius * 0.22;
+
+    let outer = radius * 1.2 + halo_width + 2.0;
+    let min_x = (cx - outer).floor().max(0.0) as i32;
+    let max_x = (cx + outer).ceil().min(canvas.width as f32) as i32;
+    let min_y = (cy - outer).floor().max(0.0) as i32;
+    let max_y = (cy + outer).ceil().min(canvas.height as f32) as i32;
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let angle = dy.atan2(dx);
+            let edge = blob_edge(radius, angle, t);
+
+            if dist >= edge {
+                // A soft glowing halo hugging the silhouette, so the blob
+                // still reads as a luminous plasma on a dark desktop.
+                let into_halo = dist - edge;
+                if into_halo < halo_width {
+                    let strength = 1.0 - into_halo / halo_width;
+                    canvas.blend(x, y, sheen, 0.22 * strength * strength);
+                }
+                continue;
+            }
+
+            // Treat the blob as a dome: the sphere-like normal of the
+            // normalized radius rolls a gentle metal sheen across the surface.
+            let r = dist / edge;
+            let nz = (1.0 - r * r).max(0.0).sqrt();
+            let nx = dx / edge;
+            let ny = dy / edge;
+            let diffuse = (nx * lx + ny * ly + nz * lz).max(0.0);
+            let specular = (nx * hx + ny * hy + nz * hz).max(0.0).powi(18);
+            let rim = (1.0 - nz).powi(2);
+            // Bright inner glow in the middle, the brighter "sky" reflection
+            // up top, and the base body color near the lower edge.
+            let sky = (0.5 - ny * 1.1).clamp(0.0, 1.0);
+            let glow = 0.55 * (1.0 - r).powi(2) + 0.25 * sky;
+            let env = mix_color(body, core, glow);
+            let rgb = metallic_shade(env, 0.85 + 0.25 * diffuse, 0.9 * specular, rim, sheen);
+
+            // Feathered edge for anti-aliasing.
+            let coverage = ((edge - dist) / 1.5).clamp(0.0, 1.0);
+            canvas.blend(x, y, rgb, coverage);
+        }
+    }
+
+    match phase {
+        Phase::Recording if streaming_indicator => {
+            paint_waveform_bars(
+                canvas,
+                cx,
+                cy + radius * 0.55,
+                radius * 1.4,
+                radius * 1.1,
+                GLYPH_COLOR,
+                t,
+            );
+        }
+        Phase::Recording => {}
+        Phase::Transcribing => {
+            let angle = t * std::f32::consts::TAU;
+            stroke_arc(
+                canvas,
+                cx,
+                cy,
+                radius * 0.5,
+                radius * 0.18,
+                (angle, std::f32::consts::PI * 1.2),
+                GLYPH_COLOR,
+            );
+        }
+        Phase::Success => {
+            glyph_checkmark(canvas, cx, cy, radius * 0.42, radius * 0.16, GLYPH_COLOR);
+        }
+        Phase::Cancelled => {
+            fill_square(canvas, cx, cy, radius * 0.3, GLYPH_COLOR);
+        }
+        Phase::Error => {
+            glyph_cross(canvas, cx, cy, radius * 0.42, radius * 0.16, GLYPH_COLOR);
+        }
+    }
+}
+
+/// Renders one overlay frame into a straight-alpha RGBA8 buffer, for the
+/// offline design-preview example (`examples/overlay_style_png.rs`). `style`
+/// and `phase` use the same string values the config and feedback events use
+/// (`badge`/`minimal`/`pill`/`blob`; `recording`/`transcribing`/`success`/
+/// `cancelled`/`error`), and `None` clears to fully transparent. Returns
+/// `(width, height, pixels)` with `width * height * 4` bytes.
+#[doc(hidden)]
+pub fn render_frame_pixels(
+    style: &str,
+    phase: Option<&str>,
+    t: f32,
+    streaming_indicator: bool,
+) -> (u32, u32, Vec<u8>) {
+    let style = style_for(style);
+    let phase = phase.map(|name| match name {
+        "transcribing" => Phase::Transcribing,
+        "success" => Phase::Success,
+        "cancelled" => Phase::Cancelled,
+        "error" => Phase::Error,
+        _ => Phase::Recording,
+    });
+    let (width, height) = surface_size_for(style);
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    {
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width,
+            height,
+        };
+        paint(&mut canvas, phase, t, streaming_indicator, style);
+    }
+    (width, height, pixels)
+}
+
 /// Probes whether this session's compositor speaks wlr-layer-shell, without
 /// starting the persistent overlay actor. Used by `doctor` diagnostics.
 pub fn probe_available() -> bool {
@@ -1188,7 +1413,7 @@ mod tests {
         );
     }
 
-    const ALL_STYLES: [Style; 3] = [Style::Badge, Style::Minimal, Style::Pill];
+    const ALL_STYLES: [Style; 4] = [Style::Badge, Style::Minimal, Style::Pill, Style::Blob];
 
     fn paint_to_pixels(
         phase: Option<Phase>,
@@ -1263,10 +1488,16 @@ mod tests {
         let badge = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Badge);
         let minimal = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Minimal);
         let pill = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Pill);
+        let blob = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Blob);
         assert_ne!(
             badge.len(),
             pill.len(),
             "Pill should use a differently-sized surface"
+        );
+        assert_ne!(
+            badge.len(),
+            blob.len(),
+            "Blob should use a differently-sized surface"
         );
         assert_ne!(
             badge, minimal,
@@ -1274,10 +1505,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn blob_paints_inside_its_bounds_with_transparent_margins() {
+        // The blob's glow has to fade to nothing before the surface edge, or
+        // it would clip; check a transparent band on every side across a
+        // full breathing cycle, and that it paints something at all.
+        const SAMPLES: [f32; 5] = [0.0, 0.2, 0.4, 0.6, 0.8];
+        let (width, height) = surface_size_for(Style::Blob);
+        for t in SAMPLES {
+            let pixels = paint_to_pixels(Some(Phase::Recording), t, false, Style::Blob);
+            let mut painted = 0u32;
+            for y in 0..height {
+                for x in 0..width {
+                    if pixels[((y * width + x) * 4 + 3) as usize] == 0 {
+                        continue;
+                    }
+                    painted += 1;
+                    assert!(
+                        x >= 2 && y >= 2 && x + 2 < width && y + 2 < height,
+                        "blob painted edge pixel ({x},{y}) at t={t}; its glow needs a transparent margin"
+                    );
+                }
+            }
+            assert!(painted > 0, "blob painted nothing at t={t}");
+        }
+    }
+
+    #[test]
+    fn blob_style_paints_a_distinct_pixel_treatment_per_phase() {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for phase in [
+            Phase::Recording,
+            Phase::Transcribing,
+            Phase::Success,
+            Phase::Cancelled,
+            Phase::Error,
+        ] {
+            let pixels = paint_to_pixels(Some(phase), 0.0, false, Style::Blob);
+            assert!(
+                pixels.iter().any(|&byte| byte != 0),
+                "blob/{phase:?} painted nothing"
+            );
+            assert!(
+                !seen.contains(&pixels),
+                "blob/{phase:?} is pixel-identical to an earlier blob phase"
+            );
+            seen.push(pixels);
+        }
+    }
+
+    #[test]
+    fn blob_slowly_breathes_across_its_animation_cycle() {
+        // The recording blob is animated: successive frames of the cycle must
+        // differ, or the "slowly breathing" look has regressed to a static
+        // shape.
+        let frames: Vec<Vec<u8>> = [0.0, 0.25, 0.5, 0.75]
+            .iter()
+            .map(|&t| paint_to_pixels(Some(Phase::Recording), t, false, Style::Blob))
+            .collect();
+        for pair in frames.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "consecutive blob frames should differ (slow breathing)"
+            );
+        }
+    }
+
     /// Is `(x, y)` (a pixel center in surface coordinates) inside the filled
     /// shape a style paints its streaming waveform into? `Badge` is the disc,
     /// `Minimal` the ring's inner edge (no filled background, just the
-    /// outline), `Pill` the capsule.
+    /// outline), `Pill` the capsule, `Blob` the blob's glow extent.
     fn inside_style_shape(style: Style, x: f32, y: f32) -> bool {
         let (width, height) = surface_size_for(style);
         let cx = width as f32 / 2.0;
@@ -1298,6 +1595,13 @@ mod tests {
                 let half_segment = (half_width - half_height).max(0.0);
                 let proj_x = x.clamp(cx - half_segment, cx + half_segment);
                 (x - proj_x).powi(2) + (y - cy).powi(2) <= half_height * half_height
+            }
+            Style::Blob => {
+                // The blob's breath and sway can push its edge out to 1.12x the
+                // nominal radius, and the glow halo adds a further 0.22x, so
+                // treat ~1.45x as the shape's outer bound.
+                let outer = width.min(height) as f32 * 0.30 * 1.45;
+                (x - cx).powi(2) + (y - cy).powi(2) <= outer * outer
             }
         }
     }
@@ -1352,6 +1656,7 @@ mod tests {
         assert_eq!(style_for("badge"), Style::Badge);
         assert_eq!(style_for("minimal"), Style::Minimal);
         assert_eq!(style_for("pill"), Style::Pill);
+        assert_eq!(style_for("blob"), Style::Blob);
         assert_eq!(style_for("nonsense"), Style::Badge);
     }
 }

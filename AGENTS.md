@@ -298,10 +298,18 @@ setup`, see `tests/setup_cli.rs`) has never prompted for overlay settings at all
 it leaves whatever `Config::reload()` loaded untouched - so it needed no changes
 when overlay got its console step.
 
-`OverlayConfig::style` (`badge`/`minimal`/`pill`) and `streaming_indicator` (bool)
-follow `position`/`monitor`'s existing convention of plain, unvalidated strings/bools
-with a tolerant-fallback parser in `src/overlay.rs` (`style_for`, `anchor_for`) rather
-than a strict `serde` enum - an unrecognized `style` value falls back to `Badge`.
+`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`) and `streaming_indicator`
+(bool) follow `position`/`monitor`'s existing convention of plain, unvalidated
+strings/bools with a tolerant-fallback parser in `src/overlay.rs` (`style_for`,
+`anchor_for`) rather than a strict `serde` enum - an unrecognized `style` value
+falls back to `Badge`. `blob` is a bright, glowing phase-colored orb that slowly
+breathes (`paint_blob`/`blob_edge`); it is the only style with its own animation
+period (`BLOB_PULSE_PERIOD`, via the now style-aware `animation_fraction`), and
+the captain reviewed it through `examples/overlay_style_png.rs` - an offline
+renderer (no compositor needed) that dumps every style/phase plus blob animation
+frames to PNGs by calling the public `overlay::render_frame_pixels`. Use it for
+any future overlay look, and note the canvas is wl_shm Argb8888 (little-endian
+BGRA), so the example swaps channels when writing PNG.
 `streaming_indicator` is a *synthetic* busier waveform animation (driven by the same
 elapsed-time fraction every other phase already animates from), not a real
 microphone-reactive one: there is no live audio-level feed wired from the
@@ -311,7 +319,7 @@ this is (the Handy dictation app's real streaming-transcription overlay inspired
 this - reviewed as Superdesign mockups and approved by the captain - and why a
 literal equivalent isn't buildable without a streaming inference backend this project
 doesn't have). Each `Style` can request a different Wayland surface size
-(`overlay::surface_size_for`; only `Pill` departs from the square badge) - like
+(`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges) - like
 `position`/`monitor`, that size is fixed at first-ever overlay creation for the
 daemon's lifetime, so a style change that affects surface shape needs a daemon
 restart to take visual effect, exactly like a position/monitor change already does.

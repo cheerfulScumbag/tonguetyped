@@ -388,10 +388,11 @@ pub struct OverlayConfig {
     // exist here.
     #[serde(default = "default_false")]
     pub streaming_indicator: bool,
-    // Three looks reviewed as Superdesign mockups and approved by the captain
-    // (`badge`, `minimal`, `pill`); `src/overlay.rs::style_for` parses this,
-    // falling back to `badge` for an unrecognized value exactly like
-    // `anchor_for` falls back on `position`.
+    // The overlay looks reviewed as Superdesign mockups and approved by the
+    // captain (originally `badge`, `minimal`, `pill`; `blob` was added later
+    // as a captain-requested pulsating plasma look); `src/overlay.rs::style_for`
+    // parses this, falling back to `badge` for an unrecognized value exactly
+    // like `anchor_for` falls back on `position`.
     #[serde(default = "default_overlay_style")]
     pub style: String,
 }
