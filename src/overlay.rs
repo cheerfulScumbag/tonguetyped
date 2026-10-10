@@ -377,10 +377,12 @@ impl State {
             height,
         };
         let t = animation_fraction(self.phase, self.style, self.anim_start);
+        let breath = blob_breath_fraction(self.phase, self.anim_start);
         paint(
             &mut canvas,
             self.phase,
             t,
+            breath,
             self.streaming_indicator,
             self.style,
         );
@@ -487,6 +489,11 @@ fn paint_waveform_bars(
     }
 }
 
+fn cycle_fraction(period: Duration, start: Instant) -> f32 {
+    let period_secs = period.as_secs_f32();
+    (start.elapsed().as_secs_f32() % period_secs) / period_secs
+}
+
 fn animation_fraction(phase: Option<Phase>, style: Style, start: Instant) -> f32 {
     let period = match phase {
         Some(Phase::Recording) => match style {
@@ -496,8 +503,21 @@ fn animation_fraction(phase: Option<Phase>, style: Style, start: Instant) -> f32
         Some(Phase::Transcribing) => SPIN_PERIOD,
         _ => return 0.0,
     };
-    let period_secs = period.as_secs_f32();
-    (start.elapsed().as_secs_f32() % period_secs) / period_secs
+    cycle_fraction(period, start)
+}
+
+/// The `Blob` silhouette's breathing fraction: always the slow
+/// `BLOB_PULSE_PERIOD` in every animated phase (`Recording` and
+/// `Transcribing`), independent of the faster `SPIN_PERIOD` fraction
+/// `animation_fraction` returns while transcribing. Keeps the blob's calm
+/// breath the same whether recording or processing.
+fn blob_breath_fraction(phase: Option<Phase>, start: Instant) -> f32 {
+    match phase {
+        Some(Phase::Recording) | Some(Phase::Transcribing) => {
+            cycle_fraction(BLOB_PULSE_PERIOD, start)
+        }
+        _ => 0.0,
+    }
 }
 
 impl CompositorHandler for State {
@@ -955,6 +975,7 @@ fn paint(
     canvas: &mut Canvas,
     phase: Option<Phase>,
     t: f32,
+    breath: f32,
     streaming_indicator: bool,
     style: Style,
 ) {
@@ -964,7 +985,7 @@ fn paint(
         Style::Badge => paint_badge(canvas, phase, t, streaming_indicator),
         Style::Minimal => paint_minimal(canvas, phase, t, streaming_indicator),
         Style::Pill => paint_pill(canvas, phase, t, streaming_indicator),
-        Style::Blob => paint_blob(canvas, phase, t, streaming_indicator),
+        Style::Blob => paint_blob(canvas, phase, t, breath, streaming_indicator),
     }
 }
 
@@ -1191,13 +1212,15 @@ fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bo
 
 /// A bright, glowing blob in the phase color that slowly breathes - the `Blob`
 /// style. The silhouette gently inhales and exhales on its own slower cycle
-/// (see `BLOB_PULSE_PERIOD`) with only a faint organic sway, while a soft
-/// metallic sheen (a gentle dome highlight and a bright rim) keeps it feeling
-/// like liquid metal rather than a flat disc. A white glyph carries the state
-/// for the terminal phases and the streaming waveform, exactly as every other
-/// style does; those phases are simply static (t is 0 once the animation
-/// stops), which is why the blob sits still for them.
-fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+/// (`breath`, derived from `BLOB_PULSE_PERIOD`) with only a faint organic sway,
+/// while a soft metallic sheen (a gentle dome highlight and a bright rim) keeps
+/// it feeling like liquid metal rather than a flat disc. The `Transcribing`
+/// spinner glyph advances on the faster fraction `t` independently, so the
+/// silhouette keeps breathing slowly while the spinner turns. A white glyph
+/// carries the state for the terminal phases and the streaming waveform,
+/// exactly as every other style does; those phases are simply static (`breath`
+/// is 0 once the animation stops), which is why the blob sits still for them.
+fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_indicator: bool) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let radius = canvas.width.min(canvas.height) as f32 * 0.30;
@@ -1225,7 +1248,7 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bo
             let dy = y as f32 + 0.5 - cy;
             let dist = (dx * dx + dy * dy).sqrt();
             let angle = dy.atan2(dx);
-            let edge = blob_edge(radius, angle, t);
+            let edge = blob_edge(radius, angle, breath);
 
             if dist >= edge {
                 // A soft glowing halo hugging the silhouette, so the blob
@@ -1326,7 +1349,7 @@ pub fn render_frame_pixels(
             width,
             height,
         };
-        paint(&mut canvas, phase, t, streaming_indicator, style);
+        paint(&mut canvas, phase, t, t, streaming_indicator, style);
     }
     (width, height, pixels)
 }
@@ -1421,6 +1444,16 @@ mod tests {
         streaming_indicator: bool,
         style: Style,
     ) -> Vec<u8> {
+        paint_to_pixels_with_breath(phase, t, t, streaming_indicator, style)
+    }
+
+    fn paint_to_pixels_with_breath(
+        phase: Option<Phase>,
+        t: f32,
+        breath: f32,
+        streaming_indicator: bool,
+        style: Style,
+    ) -> Vec<u8> {
         let (width, height) = surface_size_for(style);
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         {
@@ -1429,7 +1462,7 @@ mod tests {
                 width,
                 height,
             };
-            paint(&mut canvas, phase, t, streaming_indicator, style);
+            paint(&mut canvas, phase, t, breath, streaming_indicator, style);
         }
         pixels
     }
@@ -1569,6 +1602,40 @@ mod tests {
                 "consecutive blob frames should differ (slow breathing)"
             );
         }
+    }
+
+    #[test]
+    fn blob_silhouette_breathes_on_the_slow_breath_fraction_not_the_spinner() {
+        // While transcribing, the spinner advances on its own faster fraction
+        // while the silhouette must keep breathing on the slow BLOB_PULSE_PERIOD
+        // fraction. Change the spinner with the breath held fixed: the glyph
+        // moves but the silhouette's alpha boundary is identical. Change the
+        // breath with the spinner held fixed: the silhouette boundary moves.
+        let alpha = |pixels: &[u8]| -> Vec<u8> {
+            pixels.chunks_exact(4).map(|pixel| pixel[3]).collect()
+        };
+
+        let spinner_a =
+            paint_to_pixels_with_breath(Some(Phase::Transcribing), 0.0, 0.3, false, Style::Blob);
+        let spinner_b =
+            paint_to_pixels_with_breath(Some(Phase::Transcribing), 0.6, 0.3, false, Style::Blob);
+        assert_ne!(
+            spinner_a, spinner_b,
+            "the transcribing spinner should still move on its own fraction"
+        );
+        assert_eq!(
+            alpha(&spinner_a),
+            alpha(&spinner_b),
+            "the blob silhouette must not follow the spinner fraction"
+        );
+
+        let breath_b =
+            paint_to_pixels_with_breath(Some(Phase::Transcribing), 0.0, 0.8, false, Style::Blob);
+        assert_ne!(
+            alpha(&spinner_a),
+            alpha(&breath_b),
+            "the blob silhouette must breathe on the breath fraction"
+        );
     }
 
     /// Is `(x, y)` (a pixel center in surface coordinates) inside the filled
