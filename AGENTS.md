@@ -304,7 +304,9 @@ strings/bools with a tolerant-fallback parser in `src/overlay.rs` (`style_for`,
 `anchor_for`) rather than a strict `serde` enum - an unrecognized `style` value
 falls back to `Badge`. `blob` is a bright, glowing phase-colored orb that slowly
 breathes (`paint_blob`/`blob_edge`); it is the only style with its own animation
-period (`BLOB_PULSE_PERIOD`, via the now style-aware `animation_fraction`), and
+period (`BLOB_PULSE_PERIOD`, via the dedicated `blob_breath_fraction`, which keeps
+the silhouette's slow breath independent of `animation_fraction`'s faster spinner
+fraction while transcribing), and
 the captain reviewed it through `examples/overlay_style_png.rs` - an offline
 renderer (no compositor needed) that dumps every style/phase plus blob animation
 frames to PNGs by calling the public `overlay::render_frame_pixels`. Use it for

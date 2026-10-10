@@ -1320,8 +1320,9 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
     }
 }
 
-/// Renders one overlay frame into a straight-alpha RGBA8 buffer, for the
-/// offline design-preview example (`examples/overlay_style_png.rs`). `style`
+/// Renders one overlay frame into a straight-alpha BGRA8 buffer (wl_shm
+/// `Argb8888`, little-endian), for the offline design-preview example
+/// (`examples/overlay_style_png.rs`, which reorders it to PNG's RGBA). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`; `recording`/`transcribing`/`success`/
 /// `cancelled`/`error`), and `None` clears to fully transparent. Returns
@@ -1611,9 +1612,8 @@ mod tests {
         // fraction. Change the spinner with the breath held fixed: the glyph
         // moves but the silhouette's alpha boundary is identical. Change the
         // breath with the spinner held fixed: the silhouette boundary moves.
-        let alpha = |pixels: &[u8]| -> Vec<u8> {
-            pixels.chunks_exact(4).map(|pixel| pixel[3]).collect()
-        };
+        let alpha =
+            |pixels: &[u8]| -> Vec<u8> { pixels.chunks_exact(4).map(|pixel| pixel[3]).collect() };
 
         let spinner_a =
             paint_to_pixels_with_breath(Some(Phase::Transcribing), 0.0, 0.3, false, Style::Blob);
