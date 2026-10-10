@@ -262,8 +262,10 @@ transcript_folder = ""     # e.g. "/home/you/Documents/tonguetyped"
 ```
 
 Setting `transcript_folder` to a path also writes each finished transcript into
-that folder as a plain-text file stamped with the date and time (one file per
-dictation, written `0600`, a leading `~/` expands to your home directory).
+that folder as a plain-text file, independently of `history.enabled` - it keeps
+exporting even when the database is off. Each file is stamped with the date and
+time (one file per dictation, written `0600`, a leading `~/` expands to your
+home directory).
 These files are write-once: TongueTyped never reads, monitors, or prunes them,
 so they persist indefinitely regardless of the database retention above. Both
 settings are editable from the dashboard's Settings panel and the setup
