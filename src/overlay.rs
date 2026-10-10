@@ -730,7 +730,7 @@ fn fill_capsule(
 fn blob_edge(radius: f32, angle: f32, t: f32) -> f32 {
     use std::f32::consts::TAU;
     let breathe = 0.07 * (t * TAU).sin();
-    let sway = 0.03 * (2.0 * angle - t * TAU).sin() + 0.02 * (3.0 * angle + t * TAU * 0.5).sin();
+    let sway = 0.03 * (2.0 * angle - t * TAU).sin() + 0.02 * (3.0 * angle + t * TAU).sin();
     radius * (1.0 + breathe + sway)
 }
 
@@ -1636,6 +1636,23 @@ mod tests {
             alpha(&breath_b),
             "the blob silhouette must breathe on the breath fraction"
         );
+    }
+
+    #[test]
+    fn blob_edge_is_continuous_across_the_breath_cycle_wrap() {
+        // The breath fraction is a period-1 sawtooth, so the silhouette edge
+        // at the end of a cycle (t = 1) must match the start (t = 0); a term
+        // that is not periodic in t would flip sign there and pop the edge.
+        let radius = 30.0;
+        for i in 0..64 {
+            let angle = i as f32 / 64.0 * std::f32::consts::TAU - std::f32::consts::PI;
+            let start = blob_edge(radius, angle, 0.0);
+            let wrap = blob_edge(radius, angle, 1.0);
+            assert!(
+                (start - wrap).abs() < 0.01,
+                "blob_edge jumps at the breath wrap for angle {angle}: {start} vs {wrap}"
+            );
+        }
     }
 
     /// Is `(x, y)` (a pixel center in surface coordinates) inside the filled
