@@ -309,7 +309,7 @@ const COMMAND_NAMES: [&str; 9] = [
     "shortcut-test",
 ];
 
-/// Home index of the first command row (after the ten Settings rows), for
+/// Home index of the first command row (after the eleven Settings rows), for
 /// tests that need to arrow down to a specific command.
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
 
@@ -381,7 +381,7 @@ fn pty_home_selection_crosses_from_the_settings_panel_into_the_commands_panel() 
         "expected Model selected:\n{initial}"
     );
 
-    // Walking down past all ten settings rows lands on "setup", the first
+    // Walking down past all eleven settings rows lands on "setup", the first
     // command row - one cursor spans both panels.
     for _ in 0..FIRST_COMMAND_ROW {
         session.send(KEY_DOWN);

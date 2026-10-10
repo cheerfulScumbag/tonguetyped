@@ -204,14 +204,16 @@ not inject text or move focus when it reports state.
 ## Dashboard
 
 Running `tonguetyped` with no subcommand opens an interactive terminal dashboard.
-Its home screen is a settings overview - one row each for Model, Microphone,
-Activation, Shortcut, Transcript output, Typing backend, Transcript folder,
-History retention, Startup, and Overlay, showing the current value - above a
-list of the remaining commands below.
+Its home screen is a settings overview - one row each for Model, Inference
+backend, Microphone, Activation, Shortcut, Transcript output, Typing backend,
+Transcript folder, History retention, Startup, and Overlay, showing the current
+value - above a list of the remaining commands below.
 Selecting a settings row opens a screen that edits just that area, with the same
-live microphone preview and shortcut test/native dialog as `tonguetyped setup`,
-and the Model screen also selects the inference backend (`Tab` switches between
-the model catalog and the backend list). `start` and `stop` are
+live microphone preview and shortcut test/native dialog as `tonguetyped setup`.
+The Model screen also selects the inference backend (`Tab` switches between the
+model catalog and the backend list), and the Inference backend row opens that
+same backend picker on its own, saving the choice and reloading a running daemon
+exactly like the Model screen. `start` and `stop` are
 omitted from the dashboard's list in favor of `toggle` and `cancel` for recording
 control, but every subcommand remains directly invocable on its own, and
 `tonguetyped --help` still lists them all.
@@ -362,8 +364,9 @@ unconditional, always-available explicit CPU request. Set any other value -
 `cpu`, `vulkan`, `cuda`, `rocm`, or `metal` - to pin `load` to that one backend
 instead: if it can't run here (the feature wasn't compiled in, or no usable
 device or driver was found), the load fails with a named error rather than
-quietly running on a different backend. `tonguetyped setup` and the dashboard's
-Model screen both offer this choice, showing any backend this build and host
+quietly running on a different backend. `tonguetyped setup`, the dashboard's
+Inference backend screen, and the Model screen's backend panel all offer this
+choice, showing any backend this build and host
 can't use as unavailable. Every attempt loads the exact same configured
 GGUF file, so a fallback never substitutes a different model or model family.
 The flake's `packages.default` enables `gpu-vulkan`, which gives `nix build` and
