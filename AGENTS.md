@@ -333,6 +333,20 @@ doesn't have). Each `Style` can request a different Wayland surface size
 `position`/`monitor`, that size is fixed at first-ever overlay creation for the
 daemon's lifetime, so a style change that affects surface shape needs a daemon
 restart to take visual effect, exactly like a position/monitor change already does.
+`border` (the fifth style, captain-requested) is the one exception to the
+small-anchored-badge model: it is a full-screen surface anchored to every edge
+with no margin and a zero requested size (the compositor stretches it to the
+output and reports the real dimensions via `configure`), so
+`overlay::is_fullscreen_style` drives `create_layer`'s anchor/size/margin and
+`surface_size_for(Border)` returns only the representative `BORDER_PREVIEW`
+used by the offline preview and the pixel tests. `paint_border`/`border_glow`
+draw a distance-field glow (core band + soft inward falloff) whose corner
+hotspots reach further and brighter than the straight edges, in `bolden`ed
+phase hues (a saturation/value lift that keeps the shared palette rather than
+washing out to white); `streaming_indicator` adds a recording-only highlight
+sweep around the frame. Its full-screen shm buffer grows the pool on demand
+(smithay's `SlotPool` auto-resizes), so the small startup `BADGE*BADGE*4` pool
+is still correct.
 
 `tonguetyped daemon` (`src/cli.rs`'s `Commands::Daemon { command: Option<DaemonCommand> }`)
 keeps bare invocation meaning exactly what it always has (foreground start, used
