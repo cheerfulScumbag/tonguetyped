@@ -193,7 +193,7 @@ fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
     session.send(KEY_CTRL_R);
     let failed_screen = session.wait_for("Reconfigure failed:", Duration::from_secs(10));
     assert!(
-        !failed_screen.contains("Currently bound:"),
+        failed_screen.contains("Shortcut: (none set yet)"),
         "a failed reconfigure must not fabricate a bound trigger:\n{failed_screen}"
     );
 

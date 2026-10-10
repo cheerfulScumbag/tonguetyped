@@ -155,7 +155,7 @@ fn setup_on_a_wlroots_compositor_names_wtype() {
     std::fs::create_dir_all(&bin).unwrap();
 
     // sway is wlroots, so the missing helper to name is wtype, not dotool.
-    let output = run_setup(&root, "\n\n\n\n2\n1\n\n\n", Some(&bin), "sway");
+    let output = run_setup(&root, "\n\n\n2\n1\n\n\n", Some(&bin), "sway");
     assert!(
         output.status.success(),
         "{}",
@@ -212,7 +212,7 @@ fn successful_write_leaves_only_the_complete_destination() {
     )
     .unwrap();
 
-    let output = run_setup(&root, "\n\n\n\n\n\n\n", None, "KDE");
+    let output = run_setup(&root, "\n\n\n\n\n\n", None, "KDE");
     assert!(output.status.success());
     let entries: Vec<_> = std::fs::read_dir(&directory)
         .unwrap()
