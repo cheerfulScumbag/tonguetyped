@@ -117,7 +117,7 @@ probe-then-cache shape as the inference module's `backend_info`/
 `cached_backend_info` split above) and `feedback.rs` falls back to the
 existing Plasma OSD / notification / sound chain whenever it's absent (X11
 sessions, compositors that never added
-it). The layer surface is created once, lazily, on the first event and kept
+it). The layer surface is created lazily, on the first event and kept
 transparent-but-mapped between dictations rather than being torn down, so
 there's no per-dictation Wayland round trip on the stop-to-idle hot path.
 `examples/overlay_preview.rs` cycles or holds each semantic state for manual
@@ -306,7 +306,7 @@ setup`, see `tests/setup_cli.rs`) has never prompted for overlay settings at all
 it leaves whatever `Config::reload()` loaded untouched - so it needed no changes
 when overlay got its console step.
 
-`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`) and `streaming_indicator`
+`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`/`border`) and `streaming_indicator`
 (bool) follow `position`/`monitor`'s existing convention of plain, unvalidated
 strings/bools with a tolerant-fallback parser in `src/overlay.rs` (`style_for`,
 `anchor_for`) rather than a strict `serde` enum - an unrecognized `style` value

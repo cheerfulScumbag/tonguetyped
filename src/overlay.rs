@@ -3,11 +3,13 @@
 //! Renders directly into a persistent, click-through `zwlr_layer_shell_v1`
 //! surface so recording/transcribing/success/cancellation/failure state is
 //! glanceable without stealing keyboard or pointer focus. The surface is
-//! created once, lazily, on the first event and kept for the daemon's
-//! lifetime; between events it holds a fully transparent buffer rather than
-//! being mapped and unmapped, so there is no per-dictation surface-creation
-//! round trip on the latency-sensitive stop path (see AGENTS.md's stop-to-
-//! idle latency note).
+//! created lazily, on the first event; between events it holds a fully
+//! transparent buffer rather than being mapped and unmapped, and it is only
+//! recreated when the config-derived geometry or placement changes (an
+//! `overlay.style`/`position`/`monitor` change applied via `tonguetyped
+//! reload`), never per dictation, so there is no per-dictation
+//! surface-creation round trip on the latency-sensitive stop path (see
+//! AGENTS.md's stop-to-idle latency note).
 //!
 //! `zwlr_layer_shell_v1` originated as a wlroots protocol extension (this
 //! project is code-reviewed, but not live-validated, against Mango, a
