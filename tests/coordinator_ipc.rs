@@ -724,6 +724,43 @@ async fn shutdown_waits_for_in_flight_transcription_then_completes() {
 }
 
 #[tokio::test]
+async fn concurrent_shutdown_waiters_both_complete() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    let _release = TranscriptionReleaseGuard(runtime.clone());
+    let coordinator = coordinator(runtime.clone(), 2);
+
+    dispatch(&coordinator, Request::Start).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    dispatch(&coordinator, Request::Stop).await;
+    wait_for_flag(&runtime.transcription_started).await;
+
+    let first_coordinator = coordinator.clone();
+    let second_coordinator = coordinator.clone();
+    let first =
+        tokio::spawn(async move { dispatch(&first_coordinator, Request::Shutdown).await });
+    let second =
+        tokio::spawn(async move { dispatch(&second_coordinator, Request::Shutdown).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    runtime.release_transcription();
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("first shutdown waiter did not complete")
+            .unwrap(),
+        Response::Ok
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("second shutdown waiter did not complete")
+            .unwrap(),
+        Response::Ok
+    ));
+}
+
+#[tokio::test]
 async fn feedback_distinguishes_cancellation_from_worker_failure() {
     let runtime = Arc::new(TestRuntime::default());
     let feedback = Arc::new(RecordingFeedback::default());

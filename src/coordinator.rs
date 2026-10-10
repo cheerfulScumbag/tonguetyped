@@ -582,7 +582,7 @@ pub struct Coordinator {
     feedback: Arc<dyn Feedback>,
     clock: Arc<dyn Clock>,
     latency_sink: Arc<dyn LatencySink>,
-    worker_finished: Arc<tokio::sync::Notify>,
+    worker_finished: Arc<tokio::sync::watch::Sender<()>>,
 }
 
 impl Coordinator {
@@ -656,7 +656,10 @@ impl Coordinator {
             feedback,
             clock,
             latency_sink,
-            worker_finished: Arc::new(tokio::sync::Notify::new()),
+            worker_finished: {
+                let (worker_finished, _) = tokio::sync::watch::channel(());
+                Arc::new(worker_finished)
+            },
         })
     }
 
@@ -802,10 +805,11 @@ impl Coordinator {
     /// in-flight transcription.
     pub async fn wait_for_worker(&self) {
         loop {
+            let mut finished = self.worker_finished.subscribe();
             if !self.state.lock().unwrap().worker_active {
                 return;
             }
-            self.worker_finished.notified().await;
+            let _ = finished.changed().await;
         }
     }
 
@@ -1195,7 +1199,7 @@ impl Coordinator {
         }
         inner.worker_active = false;
         drop(inner);
-        self.worker_finished.notify_one();
+        let _ = self.worker_finished.send(());
     }
 }
 
