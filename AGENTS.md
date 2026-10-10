@@ -359,11 +359,13 @@ output and reports the real dimensions via `configure`), so
 `overlay::is_fullscreen_style` drives `create_layer`'s anchor/size/margin and
 `surface_size_for(Border)` returns only the representative `BORDER_PREVIEW`
 used by the offline preview and the pixel tests. `paint_border`/`border_glow`
-draw a distance-field glow (core band + soft inward falloff) whose corner
-hotspots reach further and brighter than the straight edges, in `bolden`ed
-phase hues (a saturation/value lift that keeps the shared palette rather than
-washing out to white); `streaming_indicator` adds a recording-only highlight
-sweep around the frame. Its full-screen shm buffer grows the pool on demand
+draw a thin phase-coloured line hugging the nearest edge that dissolves smoothly
+inward (two fixed-reach `smoothstep` ramps, a narrow hairline plus a wide soft
+halo, so the falloff is monotonic and has no core/glow band edge), with corners
+boosted brighter than the straight edges, in `bolden`ed phase hues (a
+saturation/value lift that keeps the shared palette rather than washing out to
+white); `streaming_indicator` adds a recording-only highlight sweep around the
+frame. Its full-screen shm buffer grows the pool on demand
 (smithay's `SlotPool` auto-resizes), so the small startup `BADGE*BADGE*4` pool
 is still correct.
 
