@@ -9,9 +9,10 @@
 //! doc comment).
 //!
 //! The home screen is two stacked panels with one selection cursor: a
-//! fixed Settings panel listing the eight configuration areas (Model,
+//! fixed Settings panel listing the ten configuration areas (Model,
 //! Microphone, Activation, Shortcut, Transcript output, Typing backend,
-//! Startup, Overlay) with their current values, and a Commands panel derived
+//! Transcript folder, History retention, Startup, Overlay) with their current
+//! values, and a Commands panel derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
 //! Toggle. `model` and `autostart` are CLI commands but live in the Settings
@@ -152,7 +153,7 @@ struct HomeItem {
     about: String,
 }
 
-/// The eight configuration areas the home screen's Settings panel lists, in
+/// The ten configuration areas the home screen's Settings panel lists, in
 /// display order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingId {
@@ -162,18 +163,22 @@ enum SettingId {
     Shortcut,
     TranscriptOutput,
     TypingBackend,
+    TranscriptFolder,
+    HistoryRetention,
     Startup,
     Overlay,
 }
 
 impl SettingId {
-    const ALL: [SettingId; 8] = [
+    const ALL: [SettingId; 10] = [
         SettingId::Model,
         SettingId::Microphone,
         SettingId::Activation,
         SettingId::Shortcut,
         SettingId::TranscriptOutput,
         SettingId::TypingBackend,
+        SettingId::TranscriptFolder,
+        SettingId::HistoryRetention,
         SettingId::Startup,
         SettingId::Overlay,
     ];
@@ -186,14 +191,16 @@ impl SettingId {
             SettingId::Shortcut => "Shortcut",
             SettingId::TranscriptOutput => "Transcript output",
             SettingId::TypingBackend => "Typing backend",
+            SettingId::TranscriptFolder => "Transcript folder",
+            SettingId::HistoryRetention => "History retention",
             SettingId::Startup => "Startup",
             SettingId::Overlay => "Overlay",
         }
     }
 }
 
-/// Eight settings rows plus the panel's two border rows.
-const SETTINGS_PANEL_HEIGHT: u16 = 10;
+/// Ten settings rows plus the panel's two border rows.
+const SETTINGS_PANEL_HEIGHT: u16 = 12;
 
 /// The dashboard's Commands panel, derived from the exact same clap metadata
 /// `--help` renders - see this module's doc comment. The implicit `help`
@@ -238,6 +245,7 @@ enum Screen {
     TranscriptOutput(screens::OutputScreen),
     TypingBackend(screens::TypingBackendScreen),
     Overlay(screens::OverlayScreen),
+    TextFields(screens::TextFieldsScreen),
 }
 
 struct PendingAction {
@@ -483,6 +491,7 @@ impl App {
             Screen::TranscriptOutput(_) => self.handle_output_key(key),
             Screen::TypingBackend(_) => self.handle_typing_backend_key(key),
             Screen::Overlay(_) => self.handle_overlay_key(key),
+            Screen::TextFields(_) => self.handle_text_fields_key(key),
         }
         Ok(())
     }
@@ -552,6 +561,12 @@ impl App {
                 &self.capabilities,
                 &self.config,
             )),
+            SettingId::TranscriptFolder => {
+                Screen::TextFields(screens::TextFieldsScreen::transcript_folder(&self.config))
+            }
+            SettingId::HistoryRetention => {
+                Screen::TextFields(screens::TextFieldsScreen::history_retention(&self.config))
+            }
             SettingId::Startup => Screen::Autostart(screens::AutostartScreen::new(&self.config)),
             SettingId::Overlay => Screen::Overlay(screens::OverlayScreen::new(&self.config)),
         };
@@ -568,6 +583,7 @@ impl App {
             Screen::TranscriptOutput(screen) => screen.result = Some(result),
             Screen::TypingBackend(screen) => screen.result = Some(result),
             Screen::Overlay(screen) => screen.result = Some(result),
+            Screen::TextFields(screen) => screen.result = Some(result),
             _ => {}
         }
     }
@@ -693,6 +709,47 @@ impl App {
                 }
                 self.save_settings_config();
             }
+            _ => {}
+        }
+    }
+
+    /// The text-field screens ("Transcript folder", "History retention"):
+    /// Up/Down/Tab move between fields, the editing keys act on the selected
+    /// field, and Enter runs the screen's `apply`. `q` types a literal `q`
+    /// here instead of quitting, since the fields accept free text; Ctrl+C
+    /// still quits from any screen.
+    fn handle_text_fields_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.screen = Screen::Home;
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            let result = match &self.screen {
+                Screen::TextFields(screen) => screen.apply(&mut self.config),
+                _ => return,
+            };
+            let saved = result.is_ok();
+            if let Screen::TextFields(screen) = &mut self.screen {
+                screen.result = Some(result);
+            }
+            if saved {
+                self.save_settings_config();
+            }
+            return;
+        }
+        let Screen::TextFields(screen) = &mut self.screen else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Up | KeyCode::BackTab => screen.move_selection(-1),
+            KeyCode::Down | KeyCode::Tab => screen.move_selection(1),
+            KeyCode::Left => screen.selected_field_mut().move_left(),
+            KeyCode::Right => screen.selected_field_mut().move_right(),
+            KeyCode::Home => screen.selected_field_mut().home(),
+            KeyCode::End => screen.selected_field_mut().end(),
+            KeyCode::Backspace => screen.selected_field_mut().backspace(),
+            KeyCode::Char(c) if !ctrl => screen.selected_field_mut().insert(c),
             _ => {}
         }
     }
@@ -980,6 +1037,7 @@ impl App {
             Screen::TranscriptOutput(screen) => self.render_output(frame, area, screen),
             Screen::TypingBackend(screen) => self.render_typing_backend(frame, area, screen),
             Screen::Overlay(screen) => self.render_overlay(frame, area, screen),
+            Screen::TextFields(screen) => self.render_text_fields(frame, area, screen),
         }
     }
 
@@ -1058,6 +1116,15 @@ impl App {
                 OutputMethod::Type => "type into the focused application".to_string(),
             },
             SettingId::TypingBackend => self.config.output.typing_backend.clone(),
+            SettingId::TranscriptFolder => {
+                let folder = self.config.history.transcript_folder.trim();
+                if folder.is_empty() {
+                    "disabled".to_string()
+                } else {
+                    folder.to_string()
+                }
+            }
+            SettingId::HistoryRetention => self.config.history.retention_summary(),
             SettingId::Startup => {
                 if self.config.startup.autostart {
                     "start when you sign in".to_string()
@@ -1345,6 +1412,33 @@ impl App {
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter change  Esc back  q quit"),
             chunks[2],
+        );
+    }
+
+    fn render_text_fields(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        screen: &screens::TextFieldsScreen,
+    ) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(4),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(Paragraph::new(screen.hint), chunks[1]);
+        frame.render_widget(
+            Paragraph::new(screen.result_line(&format!("{} saved.", screen.title))),
+            chunks[2],
+        );
+        frame.render_widget(
+            Paragraph::new("↑/↓ field  ←/→ cursor  Enter save  Esc back  Ctrl+C quit"),
+            chunks[3],
         );
     }
 }
@@ -1643,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_rows_are_the_captains_eight_areas_in_order() {
+    fn settings_rows_are_the_captains_areas_in_order() {
         let labels: Vec<&str> = SettingId::ALL
             .iter()
             .map(|setting| setting.label())
@@ -1657,6 +1751,8 @@ mod tests {
                 "Shortcut",
                 "Transcript output",
                 "Typing backend",
+                "Transcript folder",
+                "History retention",
                 "Startup",
                 "Overlay",
             ]

@@ -14,6 +14,7 @@ use crate::config::{ActivationMode, Config, OutputMethod};
 use crate::inference::BackendChoice;
 use crate::overlay;
 use crate::setup::Capabilities;
+use crate::text_input::TextField;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
@@ -659,6 +660,158 @@ impl OverlayScreen {
     }
 }
 
+/// A screen of labeled single-line text fields with one selection cursor,
+/// shared by the "History retention" (two numeric fields) and "Transcript
+/// folder" (one path field) screens. Editing keys act on the selected field;
+/// Escape returns home; Enter runs the screen's own `apply`.
+pub(super) struct TextFieldsScreen {
+    pub title: &'static str,
+    pub hint: &'static str,
+    pub fields: Vec<(&'static str, TextField)>,
+    pub selected: usize,
+    pub result: Option<Result<(), String>>,
+    apply: fn(&TextFieldsScreen, &mut Config) -> Result<(), String>,
+}
+
+impl TextFieldsScreen {
+    /// The "History retention" screen: a maximum entry count and a maximum
+    /// age in days, either of which may be `0` for no limit.
+    pub(super) fn history_retention(config: &Config) -> Self {
+        Self {
+            title: "History retention",
+            hint: "0 means no limit for that field.",
+            fields: vec![
+                (
+                    "Maximum entries",
+                    TextField::new(config.history.max_entries.to_string()),
+                ),
+                (
+                    "Maximum age (days)",
+                    TextField::new(config.history.max_age_days.to_string()),
+                ),
+            ],
+            selected: 0,
+            result: None,
+            apply: apply_history_retention,
+        }
+    }
+
+    /// The "Transcript folder" screen: the folder each finished transcript is
+    /// also written into as a plain-text file. Empty disables the export.
+    pub(super) fn transcript_folder(config: &Config) -> Self {
+        Self {
+            title: "Transcript folder",
+            hint: "Leave empty to disable. A leading ~ means your home directory.",
+            fields: vec![(
+                "Folder",
+                TextField::new(config.history.transcript_folder.clone()),
+            )],
+            selected: 0,
+            result: None,
+            apply: apply_transcript_folder,
+        }
+    }
+
+    pub(super) fn move_selection(&mut self, delta: i32) {
+        let len = self.fields.len() as i32;
+        if len == 0 {
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
+    }
+
+    pub(super) fn selected_field_mut(&mut self) -> &mut TextField {
+        &mut self.fields[self.selected].1
+    }
+
+    pub(super) fn apply(&self, config: &mut Config) -> Result<(), String> {
+        (self.apply)(self, config)
+    }
+
+    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+        let label_width = self
+            .fields
+            .iter()
+            .map(|(label, _)| label.chars().count())
+            .max()
+            .unwrap_or(0);
+        let lines: Vec<Line> = self
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, (label, field))| {
+                let selected = index == self.selected;
+                let marker = if selected { "> " } else { "  " };
+                let mut spans = vec![Span::styled(
+                    format!("{marker}{label:<label_width$}  "),
+                    selection_style(selected),
+                )];
+                spans.extend(field_value_spans(field, selected));
+                Line::from(spans)
+            })
+            .collect();
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(self.title))
+    }
+
+    pub(super) fn result_line(&self, success: &str) -> Line<'static> {
+        result_line(&self.result, success)
+    }
+}
+
+/// The value half of one `TextFieldsScreen` row. The selected field draws a
+/// reversed cell at the cursor so the editing position is visible; an
+/// unselected field is plain text.
+fn field_value_spans(field: &TextField, selected: bool) -> Vec<Span<'static>> {
+    if !selected {
+        return vec![Span::raw(field.value().to_string())];
+    }
+    let (before, cursor_char, after) = field.split_at_cursor();
+    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+    vec![
+        Span::raw(before),
+        Span::styled(
+            cursor_char.map(String::from).unwrap_or_else(|| " ".into()),
+            reversed,
+        ),
+        Span::raw(after),
+    ]
+}
+
+fn parse_retention_number(raw: &str) -> Result<u64, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Enter a whole number (0 for no limit).".to_string());
+    }
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| "Enter a whole number (0 for no limit).".to_string())
+}
+
+fn apply_history_retention(screen: &TextFieldsScreen, config: &mut Config) -> Result<(), String> {
+    let entries = parse_retention_number(screen.fields[0].1.value())?;
+    let age = parse_retention_number(screen.fields[1].1.value())?;
+    if age > i64::MAX as u64 / 86_400 {
+        return Err("Maximum age is too large.".to_string());
+    }
+    config.history.max_entries = entries;
+    config.history.max_age_days = age;
+    Ok(())
+}
+
+fn apply_transcript_folder(screen: &TextFieldsScreen, config: &mut Config) -> Result<(), String> {
+    let raw = screen.fields[0].1.value().trim();
+    if raw.is_empty() {
+        config.history.transcript_folder = String::new();
+        return Ok(());
+    }
+    let expanded = crate::history::expand_home(raw);
+    if !expanded.is_absolute() {
+        return Err("Enter an absolute folder path, or one starting with ~/.".to_string());
+    }
+    config.history.transcript_folder = expanded.to_string_lossy().into_owned();
+    Ok(())
+}
+
 fn overlay_style_label(style: &str) -> &'static str {
     overlay::STYLE_VALUES
         .iter()
@@ -895,6 +1048,42 @@ mod tests {
         let screen = TypingBackendScreen::new(&capabilities, &config);
         assert_eq!(screen.values[screen.selected], "enigo");
         assert!(screen.warning.is_none());
+    }
+
+    #[test]
+    fn history_retention_screen_applies_valid_numbers_and_rejects_junk() {
+        let mut config = Config::default();
+        let screen = TextFieldsScreen::history_retention(&config);
+        assert_eq!(screen.fields[0].1.value(), "100");
+        assert_eq!(screen.fields[1].1.value(), "30");
+        screen.apply(&mut config).unwrap();
+        assert_eq!(config.history.max_entries, 100);
+        assert_eq!(config.history.max_age_days, 30);
+
+        let mut bad = TextFieldsScreen::history_retention(&config);
+        bad.fields[0].1 = TextField::new("abc");
+        assert!(bad.apply(&mut config).is_err());
+        assert_eq!(
+            config.history.max_entries, 100,
+            "a rejected edit must not stick"
+        );
+    }
+
+    #[test]
+    fn transcript_folder_screen_requires_an_absolute_path_and_allows_clearing() {
+        let mut config = Config::default();
+        let mut screen = TextFieldsScreen::transcript_folder(&config);
+        screen.fields[0].1 = TextField::new("relative/dir");
+        assert!(screen.apply(&mut config).is_err());
+        assert!(config.history.transcript_folder.is_empty());
+
+        screen.fields[0].1 = TextField::new("/tmp/tt-out");
+        screen.apply(&mut config).unwrap();
+        assert_eq!(config.history.transcript_folder, "/tmp/tt-out");
+
+        screen.fields[0].1 = TextField::new("   ");
+        screen.apply(&mut config).unwrap();
+        assert!(config.history.transcript_folder.is_empty());
     }
 
     #[test]

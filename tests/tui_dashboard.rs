@@ -280,15 +280,18 @@ const KEY_DOWN: &[u8] = b"\x1b[B";
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 const KEY_TAB: &[u8] = b"\t";
+const KEY_BACKSPACE: &[u8] = b"\x7f";
 const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 
-const SETTING_LABELS: [&str; 8] = [
+const SETTING_LABELS: [&str; 10] = [
     "Model",
     "Microphone",
     "Activation",
     "Shortcut",
     "Transcript output",
     "Typing backend",
+    "Transcript folder",
+    "History retention",
     "Startup",
     "Overlay",
 ];
@@ -305,19 +308,21 @@ const COMMAND_NAMES: [&str; 9] = [
     "shortcut-test",
 ];
 
-/// Home index of the first command row (after the eight Settings rows), for
+/// Home index of the first command row (after the ten Settings rows), for
 /// tests that need to arrow down to a specific command.
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
 
 #[test]
 fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
-    let session = Session::spawn(&sandbox, 100, 32);
+    // Tall enough for the ten Settings rows plus every Commands row with no
+    // scrolling of either panel.
+    let session = Session::spawn(&sandbox, 100, 34);
 
     // The pre-change baseline (see .superdesign/replica_html_template and the
     // dashboard task's report) listed 11 CLI commands with model/autostart
     // among them. The signed-off settings-menu redesign turns the home screen
-    // into two stacked panels with one selection cursor: eight Settings rows
+    // into two stacked panels with one selection cursor: ten Settings rows
     // with current values (model and autostart included) above the remaining
     // Commands. All of it must fit one normal terminal, no pagination.
     let screen = session.wait_for("Settings", Duration::from_secs(5));
@@ -371,7 +376,7 @@ fn pty_home_selection_crosses_from_the_settings_panel_into_the_commands_panel() 
         "expected Model selected:\n{initial}"
     );
 
-    // Walking down past all eight settings rows lands on "setup", the first
+    // Walking down past all ten settings rows lands on "setup", the first
     // command row - one cursor spans both panels.
     for _ in 0..FIRST_COMMAND_ROW {
         session.send(KEY_DOWN);
@@ -480,8 +485,8 @@ fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_erro
     let mut session = Session::spawn(&sandbox, 100, 32);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Navigate to "status" (the fifth Commands row, after eight Settings
-    // rows: setup, daemon, toggle, cancel, status) and select it. No daemon
+    // Navigate to "status" (the fifth Commands row, after the Settings rows:
+    // setup, daemon, toggle, cancel, status) and select it. No daemon
     // is running in this sandbox, so the dashboard must show a visible,
     // actionable error - not hang, not crash, not silently do nothing.
     for _ in 0..FIRST_COMMAND_ROW + 4 {
@@ -641,7 +646,7 @@ fn pty_overlay_setting_cycles_position_and_persists_it() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Overlay is the eighth and last Settings row.
+    // Overlay is the tenth and last Settings row.
     for _ in 0..SETTING_LABELS.len() - 1 {
         session.send(KEY_DOWN);
     }
@@ -720,6 +725,101 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
         "enabling should save and keep the row selected:\n{enabled}"
     );
     assert!(sandbox.config_contents().contains("enabled = true"));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_transcript_folder_setting_persists_an_absolute_path() {
+    let sandbox = Sandbox::new("folder-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // Transcript folder is the seventh Settings row.
+    for _ in 0..6 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Transcript folder", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    let opened = session.wait_for("Folder", Duration::from_secs(3));
+    assert!(
+        opened.contains("Leave empty to disable"),
+        "the folder screen should explain that empty disables it:\n{opened}"
+    );
+
+    // A short absolute path, so the home row it later renders is never clipped.
+    let target = "/tmp/tonguetyped-tt-folder";
+    session.send(target.as_bytes());
+    session.wait_for(target, Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    let saved = session.wait_for("Transcript folder saved.", Duration::from_secs(3));
+    assert!(saved.contains(target), "{saved}");
+
+    let config = sandbox.config_contents();
+    assert!(
+        config.contains(&format!("transcript_folder = \"{target}\"")),
+        "{config}"
+    );
+
+    session.send(KEY_ESC);
+    // Wait on the Home-specific selection marker: the target path is also on
+    // the folder screen, so waiting for it alone would race the redraw.
+    let home = session.wait_for("> Transcript folder", Duration::from_secs(3));
+    assert!(
+        home.contains(target),
+        "the Home row should show the saved folder:\n{home}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_history_retention_setting_persists_both_limits() {
+    let sandbox = Sandbox::new("retention-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    // History retention is the eighth Settings row.
+    for _ in 0..7 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> History retention", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+
+    let opened = session.wait_for("Maximum entries", Duration::from_secs(3));
+    assert!(
+        opened.contains("Maximum age (days)") && opened.contains("30"),
+        "the retention screen should start on the current limits:\n{opened}"
+    );
+
+    // Clear the prefilled "100" and enter 42, then move to the age field,
+    // clear "30", and enter 12.
+    for _ in 0..3 {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(b"42");
+    session.wait_for("42", Duration::from_secs(3));
+    session.send(KEY_TAB);
+    for _ in 0..2 {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(b"12");
+    session.wait_for("12", Duration::from_secs(3));
+
+    session.send(KEY_ENTER);
+    session.wait_for("History retention saved.", Duration::from_secs(3));
+
+    let config = sandbox.config_contents();
+    assert!(config.contains("max_entries = 42"), "{config}");
+    assert!(config.contains("max_age_days = 12"), "{config}");
+
+    session.send(KEY_ESC);
+    let home = session.wait_for("42 entries, 12 days", Duration::from_secs(3));
+    assert!(
+        home.contains("> History retention"),
+        "selection should return to the History retention row:\n{home}"
+    );
 
     session.quit_and_wait();
 }
@@ -917,8 +1017,8 @@ fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Startup is the seventh Settings row.
-    for _ in 0..6 {
+    // Startup is the ninth Settings row.
+    for _ in 0..8 {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Startup", Duration::from_secs(3));

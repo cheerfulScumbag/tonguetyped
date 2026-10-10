@@ -162,10 +162,13 @@ impl Session {
 const KEY_UP: &[u8] = b"\x1b[A";
 const KEY_DOWN: &[u8] = b"\x1b[B";
 const KEY_ENTER: &[u8] = b"\r";
+const KEY_TAB: &[u8] = b"\t";
+const KEY_BACKSPACE: &[u8] = b"\x7f";
 
 /// Advances through the setup console's early steps (Model, Inference
-/// backend, Microphone, Activation, Shortcut, Output, Startup) with Enter,
-/// accepting every default, until the Overlay step is reached.
+/// backend, Microphone, Activation, Shortcut, Output, Startup, History
+/// retention, Transcript folder) with Enter, accepting every default, until
+/// the Overlay step is reached.
 fn advance_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
     session.send(KEY_ENTER); // Model -> Inference backend
@@ -184,7 +187,11 @@ fn advance_from_inference_backend_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Transcript output", Duration::from_secs(5));
     session.send(KEY_ENTER); // Output -> Startup
     session.wait_for("Startup", Duration::from_secs(5));
-    session.send(KEY_ENTER); // Startup -> Overlay
+    session.send(KEY_ENTER); // Startup -> History retention
+    session.wait_for("History retention", Duration::from_secs(5));
+    session.send(KEY_ENTER); // History retention -> Transcript folder
+    session.wait_for("Transcript folder", Duration::from_secs(5));
+    session.send(KEY_ENTER); // Transcript folder -> Overlay
     session.wait_for("Step", Duration::from_secs(5));
 }
 
@@ -284,6 +291,69 @@ fn pty_disabling_overlay_skips_the_position_style_and_streaming_steps() {
 
     let config = sandbox.config_contents();
     assert!(config.contains("enabled = false"), "{config}");
+}
+
+#[test]
+fn pty_history_retention_and_transcript_folder_steps_persist_their_inputs() {
+    let sandbox = Sandbox::new("retention");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+
+    session.wait_for("Speech model", Duration::from_secs(10));
+    session.send(KEY_ENTER); // Model -> Inference backend
+    session.wait_for("Inference backend", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Microphone
+    session.wait_for("Microphone", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Activation
+    session.wait_for("Activation", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Shortcut
+    session.wait_for("Shortcut", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Transcript output
+    session.wait_for("Transcript output", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Startup
+    session.wait_for("Startup", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> History retention
+
+    let retention = session.wait_for("History retention", Duration::from_secs(5));
+    assert!(
+        retention.contains("Maximum entries") && retention.contains("Maximum age (days)"),
+        "retention step should show both limits:\n{retention}"
+    );
+    // Clear the prefilled "100" to 5, then Tab and clear "30" to 7.
+    for _ in 0..3 {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(b"5");
+    session.send(KEY_TAB);
+    for _ in 0..2 {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(b"7");
+    session.send(KEY_ENTER); // -> Transcript folder
+
+    let folder = session.wait_for("Transcript folder", Duration::from_secs(5));
+    assert!(folder.contains("Folder"), "{folder}");
+    session.send(b"/tmp/tonguetyped-setup-folder");
+    session.send(KEY_ENTER); // -> Overlay
+
+    session.wait_for("Overlay", Duration::from_secs(5));
+    session.send(KEY_UP); // Enabled -> Disabled (skips the sub-steps)
+    session.send(KEY_ENTER);
+    let confirm = session.wait_for("Write this configuration?", Duration::from_secs(5));
+    assert!(
+        confirm.contains("5 entries, 7 days") && confirm.contains("/tmp/tonguetyped-setup-folder"),
+        "review should summarize retention and the folder:\n{confirm}"
+    );
+
+    session.send(KEY_ENTER); // save
+    session.wait_for_exit(Duration::from_secs(5));
+
+    let config = sandbox.config_contents();
+    assert!(config.contains("max_entries = 5"), "{config}");
+    assert!(config.contains("max_age_days = 7"), "{config}");
+    assert!(
+        config.contains("transcript_folder = \"/tmp/tonguetyped-setup-folder\""),
+        "{config}"
+    );
 }
 
 #[test]

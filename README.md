@@ -205,8 +205,9 @@ not inject text or move focus when it reports state.
 
 Running `tonguetyped` with no subcommand opens an interactive terminal dashboard.
 Its home screen is a settings overview - one row each for Model, Microphone,
-Activation, Shortcut, Transcript output, Typing backend, Startup, and Overlay,
-showing the current value - above a list of the remaining commands below.
+Activation, Shortcut, Transcript output, Typing backend, Transcript folder,
+History retention, Startup, and Overlay, showing the current value - above a
+list of the remaining commands below.
 Selecting a settings row opens a screen that edits just that area, with the same
 live microphone preview and shortcut test/native dialog as `tonguetyped setup`,
 and the Model screen also selects the inference backend (`Tab` switches between
@@ -245,6 +246,28 @@ it does not stop a recording automatically.
 When history is enabled, TongueTyped stores transcript text in
 `$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Disable
 `history.enabled` to keep only the current daemon's latest result in memory.
+
+Two retention limits are always applied whenever a transcript is written, and
+neither depends on the output method. `history.max_entries` caps how many rows
+are kept (default `100`); `history.max_age_days` drops rows older than that
+many days (default `30`). Set either to `0` for no limit on that dimension.
+TongueTyped never stores audio.
+
+```toml
+[history]
+enabled = true
+max_entries = 100
+max_age_days = 30
+transcript_folder = ""     # e.g. "/home/you/Documents/tonguetyped"
+```
+
+Setting `transcript_folder` to a path also writes each finished transcript into
+that folder as a plain-text file stamped with the date and time (one file per
+dictation, written `0600`, a leading `~/` expands to your home directory).
+These files are write-once: TongueTyped never reads, monitors, or prunes them,
+so they persist indefinitely regardless of the database retention above. Both
+settings are editable from the dashboard's Settings panel and the setup
+wizard.
 
 ## Latency diagnostics
 

@@ -18,5 +18,6 @@ pub mod model;
 pub mod output;
 pub mod overlay;
 pub mod setup;
+pub mod text_input;
 pub mod tui;
 pub mod vad;
