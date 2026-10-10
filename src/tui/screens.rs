@@ -5,9 +5,11 @@
 //! backend, microphone, activation, shortcut, transcript output, typing
 //! backend, startup, overlay).
 //!
-//! Every settings screen here only mutates the in-memory `Config` it is
-//! handed (`apply`); the caller (`tui::App`) owns `Config::save` so a failed
-//! write surfaces in the same result line a successful one would.
+//! Most settings screens here only mutate the in-memory `Config` they are
+//! handed (`apply`), and the caller (`tui::App`) owns `Config::save` so a
+//! failed write surfaces in the same result line a successful one would; the
+//! inference backend screen instead runs the Model screen's activate-and-
+//! confirm flow.
 
 use crate::audio::{level_to_ratio, MicMonitor};
 use crate::commands;
@@ -211,14 +213,11 @@ fn backend_panel_lines(
 /// The dedicated "Inference backend" settings screen, reached from its own
 /// home Settings-panel row. It presents the same backend list as the Model
 /// screen's backend panel (`inference::backend_choices`, shared verbatim
-/// through `backend_panel_lines`) but is a plain settings screen: `apply`
-/// mutates `config.model.preferred_backend` and the shared
-/// `App::save_settings_config` path persists it, rather than running the
-/// Model screen's activate-and-confirm flow.
+/// through `backend_panel_lines`) and runs the same activate-and-confirm flow
+/// when a backend is chosen (`App::handle_inference_backend_key`).
 pub(super) struct BackendScreen {
     pub backends: Vec<BackendChoice>,
     pub selected: usize,
-    pub result: Option<Result<(), String>>,
 }
 
 impl BackendScreen {
@@ -229,11 +228,7 @@ impl BackendScreen {
             .filter(|choice| choice.unavailable.is_none())
             .position(|choice| choice.name == configured)
             .unwrap_or(0);
-        Self {
-            backends,
-            selected,
-            result: None,
-        }
+        Self { backends, selected }
     }
 
     fn usable_backends(&self) -> impl Iterator<Item = &'static str> + '_ {
@@ -255,14 +250,6 @@ impl BackendScreen {
         self.usable_backends().nth(self.selected)
     }
 
-    /// Saves the highlighted backend onto the config; the caller's
-    /// `save_settings_config` persists it and reports the outcome.
-    pub(super) fn apply(&mut self, config: &mut Config) {
-        if let Some(name) = self.selected_backend() {
-            config.model.preferred_backend = name.to_string();
-        }
-    }
-
     pub(super) fn list_widget(&self, config: &Config) -> Paragraph<'static> {
         let lines = backend_panel_lines(
             &self.backends,
@@ -274,10 +261,6 @@ impl BackendScreen {
                 .borders(Borders::ALL)
                 .title("Inference backend"),
         )
-    }
-
-    pub(super) fn result_line(&self) -> Line<'static> {
-        result_line(&self.result, "Inference backend saved.")
     }
 }
 
@@ -1345,14 +1328,8 @@ mod tests {
     }
 
     #[test]
-    fn backend_screen_applies_the_highlighted_backend_onto_the_config() {
-        let mut config = Config::default();
-        let mut screen = BackendScreen::new(&config, choices());
-        assert_eq!(screen.selected_backend(), Some("auto"));
-
-        screen.move_selection(1);
-        screen.apply(&mut config);
-        assert_eq!(config.model.preferred_backend, "cpu");
+    fn backend_screen_lists_unavailable_backends_verbatim() {
+        let config = Config::default();
 
         // The dedicated screen lists unavailable backends verbatim, never
         // dropping one silently - same rule as the Model screen's panel.

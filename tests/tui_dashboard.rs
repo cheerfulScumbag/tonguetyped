@@ -1049,10 +1049,10 @@ fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
 }
 
 #[test]
-fn pty_inference_backend_setting_saves_a_pinned_backend_and_returns_home() {
+fn pty_inference_backend_setting_saves_and_reloads_like_the_model_screen() {
     // The dedicated "Inference backend" Settings row reuses the Model screen's
-    // backend list but persists through the shared settings save path, without
-    // the Model screen's activate-and-confirm flow.
+    // backend list and its activate-and-confirm flow: choosing a backend saves
+    // it, reloads a running daemon if there is one, and reports the outcome.
     let sandbox = Sandbox::new("inference-backend-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
     let home = session.wait_for("Settings", Duration::from_secs(5));
@@ -1076,12 +1076,23 @@ fn pty_inference_backend_setting_saves_a_pinned_backend_and_returns_home() {
         "the always-available CPU backend must be listed:\n{opened}"
     );
 
-    // Move from "auto" onto the always-available "cpu" and apply: the shared
-    // save path persists it and reports success, no daemon required.
+    // Move from "auto" onto the always-available "cpu" and apply: the same
+    // activate-and-confirm flow as the Model screen's backend panel saves it
+    // and reports the outcome (no daemon running here, so it applies on next
+    // start rather than reloading).
     session.send(KEY_DOWN);
     session.wait_for("> CPU", Duration::from_secs(3));
     session.send(KEY_ENTER);
-    session.wait_for("Inference backend saved.", Duration::from_secs(3));
+
+    let outcome = session.wait_for("daemon: not running", Duration::from_secs(20));
+    assert!(
+        outcome.contains("Backend change"),
+        "expected the backend change result title:\n{outcome}"
+    );
+    assert!(
+        outcome.contains("backend pref:   cpu"),
+        "diagnostics should report the pinned backend:\n{outcome}"
+    );
     assert!(sandbox
         .config_contents()
         .contains("preferred_backend = \"cpu\""));

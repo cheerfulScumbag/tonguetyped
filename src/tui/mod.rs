@@ -587,7 +587,6 @@ impl App {
     fn save_settings_config(&mut self) {
         let result = self.config.save().map_err(|error| error.to_string());
         match &mut self.screen {
-            Screen::InferenceBackend(screen) => screen.result = Some(result),
             Screen::Microphone(screen) => screen.result = Some(result),
             Screen::Activation(screen) => screen.result = Some(result),
             Screen::TranscriptOutput(screen) => screen.result = Some(result),
@@ -885,9 +884,10 @@ impl App {
         }
     }
 
-    /// The dedicated "Inference backend" settings screen: the same
-    /// up/down/Enter/Esc shape as the other settings screens, persisting
-    /// through the shared `save_settings_config` path.
+    /// The dedicated "Inference backend" settings screen: picks a backend with
+    /// the same up/down/Esc shape as the other settings screens, then runs the
+    /// Model screen backend panel's activate-and-confirm flow (save, reload a
+    /// running daemon, re-run diagnostics) so the change takes effect at once.
     fn handle_inference_backend_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -902,11 +902,12 @@ impl App {
                     screen.move_selection(1);
                 }
             }
-            KeyCode::Enter => {
-                if let Screen::InferenceBackend(screen) = &mut self.screen {
-                    screen.apply(&mut self.config);
+            KeyCode::Enter if self.pending.is_none() => {
+                if let Screen::InferenceBackend(screen) = &self.screen {
+                    if let Some(name) = screen.selected_backend() {
+                        self.spawn_pending("Backend change", backend_activation_task(name), None);
+                    }
                 }
-                self.save_settings_config();
             }
             _ => {}
         }
@@ -1293,17 +1294,12 @@ impl App {
     ) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Min(4), Constraint::Length(1)])
             .split(area);
         frame.render_widget(screen.list_widget(&self.config), chunks[0]);
-        frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
-            chunks[2],
+            chunks[1],
         );
     }
 

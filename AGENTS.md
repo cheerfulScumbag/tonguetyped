@@ -196,9 +196,10 @@ above a Commands panel. The "Inference backend" row shows
 `config.model.preferred_backend` raw (`auto` or the pinned name) and opens a
 dedicated settings screen (`screens::BackendScreen`) that is the same
 `inference::backend_choices()` list the Model screen's backend panel shows
-(shared verbatim through `screens::backend_panel_lines`), but persists through
-the shared `save_settings_config` path instead of the Model screen's
-activate-and-confirm flow. `src/cli.rs` holds the clap
+(shared verbatim through `screens::backend_panel_lines`) and runs the same
+activate-and-confirm flow when a backend is chosen (`backend_activation_task`/
+`commands::activate_backend`), so selecting a backend saves it, reloads a
+running daemon, and reports the outcome exactly like the Model screen. `src/cli.rs` holds the clap
 `Cli`/`Commands` definitions as a library module specifically so `src/tui/mod.rs`'s
 `home_items()` can read the Commands panel straight off clap's own metadata
 (`Cli::command().get_subcommands()`) instead of a second, driftable copy - it can
