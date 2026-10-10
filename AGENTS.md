@@ -117,7 +117,7 @@ probe-then-cache shape as the inference module's `backend_info`/
 `cached_backend_info` split above) and `feedback.rs` falls back to the
 existing Plasma OSD / notification / sound chain whenever it's absent (X11
 sessions, compositors that never added
-it). The layer surface is created once, lazily, on the first event and kept
+it). The layer surface is created lazily, on the first event and kept
 transparent-but-mapped between dictations rather than being torn down, so
 there's no per-dictation Wayland round trip on the stop-to-idle hot path.
 `examples/overlay_preview.rs` cycles or holds each semantic state for manual
@@ -306,7 +306,7 @@ setup`, see `tests/setup_cli.rs`) has never prompted for overlay settings at all
 it leaves whatever `Config::reload()` loaded untouched - so it needed no changes
 when overlay got its console step.
 
-`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`) and `streaming_indicator`
+`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`/`border`) and `streaming_indicator`
 (bool) follow `position`/`monitor`'s existing convention of plain, unvalidated
 strings/bools with a tolerant-fallback parser in `src/overlay.rs` (`style_for`,
 `anchor_for`) rather than a strict `serde` enum - an unrecognized `style` value
@@ -316,10 +316,10 @@ period (`BLOB_PULSE_PERIOD`, via the dedicated `blob_breath_fraction`, which kee
 the silhouette's slow breath independent of `animation_fraction`'s faster spinner
 fraction while transcribing), and
 the captain reviewed it through `examples/overlay_style_png.rs` - an offline
-renderer (no compositor needed) that dumps every style/phase plus blob animation
-frames to PNGs by calling the public `overlay::render_frame_pixels`. Use it for
-any future overlay look, and note the canvas is wl_shm Argb8888 (little-endian
-BGRA), so the example swaps channels when writing PNG.
+renderer (no compositor needed) that dumps every style/phase plus blob/border
+animation frames to PNGs by calling the public `overlay::render_frame_pixels`.
+Use it for any future overlay look, and note the canvas is wl_shm Argb8888
+(little-endian BGRA), so the example swaps channels when writing PNG.
 `streaming_indicator` is a *synthetic* busier waveform animation (driven by the same
 elapsed-time fraction every other phase already animates from), not a real
 microphone-reactive one: there is no live audio-level feed wired from the
@@ -329,10 +329,26 @@ this is (the Handy dictation app's real streaming-transcription overlay inspired
 this - reviewed as Superdesign mockups and approved by the captain - and why a
 literal equivalent isn't buildable without a streaming inference backend this project
 doesn't have). Each `Style` can request a different Wayland surface size
-(`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges) - like
-`position`/`monitor`, that size is fixed at first-ever overlay creation for the
-daemon's lifetime, so a style change that affects surface shape needs a daemon
-restart to take visual effect, exactly like a position/monitor change already does.
+(`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges). A layer
+surface's geometry and placement are fixed at creation, so the actor keeps the
+config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
+`monitor`) and recreates the surface when it changes: an `overlay.style`,
+`position`, or `monitor` change applied via `tonguetyped reload` takes effect on
+the next event, with no daemon restart.
+`border` (the fifth style, captain-requested) is the one exception to the
+small-anchored-badge model: it is a full-screen surface anchored to every edge
+with no margin and a zero requested size (the compositor stretches it to the
+output and reports the real dimensions via `configure`), so
+`overlay::is_fullscreen_style` drives `create_layer`'s anchor/size/margin and
+`surface_size_for(Border)` returns only the representative `BORDER_PREVIEW`
+used by the offline preview and the pixel tests. `paint_border`/`border_glow`
+draw a distance-field glow (core band + soft inward falloff) whose corner
+hotspots reach further and brighter than the straight edges, in `bolden`ed
+phase hues (a saturation/value lift that keeps the shared palette rather than
+washing out to white); `streaming_indicator` adds a recording-only highlight
+sweep around the frame. Its full-screen shm buffer grows the pool on demand
+(smithay's `SlotPool` auto-resizes), so the small startup `BADGE*BADGE*4` pool
+is still correct.
 
 `tonguetyped daemon` (`src/cli.rs`'s `Commands::Daemon { command: Option<DaemonCommand> }`)
 keeps bare invocation meaning exactly what it always has (foreground start, used
