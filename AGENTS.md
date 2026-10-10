@@ -309,12 +309,30 @@ Selecting "Daemon" there instead opens a small `Screen::Daemon` sub-screen
 three operations the CLI exposes, so the dashboard is never missing a way to
 stop or restart a daemon it can start. `Request::Shutdown` (`src/ipc.rs`,
 handled in `daemon::dispatch`) cancels any in-flight recording/processing the same
-way a client `cancel` would (not a hard kill), then `daemon::run_daemon`'s accept
+way a client `cancel` would (not a hard kill): `Coordinator::cancel` reaches an
+in-flight transcription through the engine's `transcribe-cpp` `CancelToken`
+(`InferenceEngine::set_cancel_token`, published per run in
+`ProductionRuntime::transcribe`, never through the inference lock the run holds),
+so the native decoder stops between steps. It then waits
+(`Coordinator::wait_for_worker`) for that worker to finish before replying, but
+*bounded* (`SHUTDOWN_WORKER_TIMEOUT`) so a worker that ignores cancellation cannot
+hang `stop`/`restart`. Then `daemon::run_daemon`'s accept
 loop (`tokio::select!` against a `tokio::sync::Notify`) stops taking new
-connections, releases the instance lock, and only then removes the control
-socket - in that order, since `commands::stop_daemon` treats the socket's
+connections, calls `Coordinator::shutdown()` - which refuses while a
+recording/transcription worker is still active (a worker in its VAD phase holds
+no inference lock, yet would still re-acquire it to run inference, so acquiring
+the lock alone must not be read as "done"), and otherwise stops and JOINS the
+detached `tonguetyped-idle-unload` timer thread, then drops the loaded
+inference engine on the shutdown thread with a bounded lock acquisition - releases the instance lock, and only
+then removes the control socket - in that order, since `commands::stop_daemon` treats the socket's
 disappearance as proof the old process (and its lock) is gone, and
-`restart_daemon` chains straight into `spawn_daemon` right after. `commands::
+`restart_daemon` chains straight into `spawn_daemon` right after. If
+`Coordinator::shutdown()` returns an error - a worker still active after the
+bounded wait, or the bounded engine release failing to acquire the inference
+lock in time - `run_daemon` removes the socket and calls `std::process::exit`
+*without* freeing the engine, so neither the crash below nor an unbounded hang
+can happen.
+`commands::
 stop_daemon` polls for the socket to actually disappear after sending
 `Shutdown` (so it fails fast with a clear error when no daemon is running,
 instead of hanging) and `restart_daemon` chains that into the existing
@@ -334,6 +352,24 @@ connect. `Path::exists()` alone is not enough: `stop_daemon`/`restart_daemon`
 used to treat the leftover file as proof a daemon was running and tried (and
 failed) to send it `Shutdown`, surfacing a raw connection-refused error
 instead of proceeding straight to `spawn_daemon`.
+
+`IdleUnloadTimer` (`src/coordinator.rs`) spawns a detached
+`tonguetyped-idle-unload` thread that holds an `Arc` clone of the loaded-engine
+mutex and drops the engine on idle timeout, freeing Vulkan buffers through the
+NVIDIA driver. Because that thread was never stopped or joined, the daemon could
+`exit()` while it was still freeing, racing the driver's `exit()`-time teardown
+and segfaulting (reproduced 10/10 by restarting a Vulkan-loaded daemon;
+coredump shows the idle thread in `ggml_vk_destroy_buffer` and the main thread
+in `__run_exit_handlers`). `Coordinator::shutdown` now makes this deterministic:
+once no worker is active it sends a `Shutdown` command the timer handles before
+any expiry, joins the thread, then drops the engine on the shutting-down thread
+with a bounded lock acquisition (`ENGINE_RELEASE_TIMEOUT`); if a worker is still
+active or that bound expires because a transcription still owns the lock,
+`run_daemon` exits via `std::process::exit` without freeing the engine, so
+teardown cannot race live GPU work. `IdleUnloadTimer`'s
+`Drop` joins as a fallback, and `apply_idle_unload_policy` refuses to re-arm the
+timer once `shutdown_started` is set (the `reload` race). Any new background
+thread that can drop a loaded engine needs the same join-on-shutdown treatment.
 
 The Cargo version rarely changes, so build identity is the git commit:
 `build.rs` captures it (`-dirty` suffix for uncommitted changes) into

@@ -4,6 +4,7 @@ use crate::latency::{
     Clock, LatencyOperation, LatencySink, MonotonicClock, Phase, TracingLatencySink,
 };
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -44,11 +45,24 @@ pub trait CoordinatorRuntime: Send + Sync {
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
         Ok(())
     }
+    /// Abort an in-flight `transcribe` the same way a client `cancel` tears down
+    /// a recording: a cooperative cancellation the inference backend polls, not
+    /// a hard kill. The default is a no-op for runtimes that never run inference.
+    fn cancel_transcription(&self) {}
     fn apply_idle_unload_policy(
         &self,
         _config: &Config,
         _transcription_attempted: bool,
     ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Stop any background work that can drop the loaded inference engine (the
+    /// idle-unload timer) and release the engine's GPU resources while the
+    /// process is still alive. Called on daemon shutdown, before the process
+    /// reaches exit-time driver teardown, so no background thread can free
+    /// Vulkan buffers concurrently with `exit()`. The default is a no-op for
+    /// runtimes that never load a model.
+    fn shutdown(&self) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -75,15 +89,29 @@ pub struct TranscriptionAttempt {
 struct ProductionRuntime {
     inference: Arc<Mutex<EngineLifecycle<crate::inference::InferenceEngine>>>,
     idle_unload: IdleUnloadTimer,
+    shutdown_started: AtomicBool,
+    /// The cancel token of the run currently holding `inference`, published by
+    /// `transcribe` before inference starts. A `cancel` reaches it here instead
+    /// of taking the inference lock (which the in-flight run holds), so
+    /// cancellation never blocks on the very lock it needs to release.
+    cancel_token: Mutex<Option<crate::inference::CancelToken>>,
 }
+
+/// How long `shutdown` waits to acquire the inference lock before giving up and
+/// letting the daemon exit without freeing the engine. Cancellation makes the
+/// normal case finish long before this; the bound is the safety net against a
+/// transcription that ignores cancellation.
+const ENGINE_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct IdleUnloadTimer {
     command_tx: mpsc::Sender<IdleUnloadCommand>,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 enum IdleUnloadCommand {
     Schedule(u64, Instant),
     Cancel(mpsc::Sender<()>),
+    Shutdown,
     #[cfg(test)]
     Expire(mpsc::Sender<()>),
 }
@@ -91,7 +119,7 @@ enum IdleUnloadCommand {
 impl IdleUnloadTimer {
     fn new<E: Send + 'static>(lifecycle: Arc<Mutex<EngineLifecycle<E>>>) -> anyhow::Result<Self> {
         let (command_tx, command_rx) = mpsc::channel();
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("tonguetyped-idle-unload".to_string())
             .spawn(move || {
                 let mut deadline: Option<(u64, Instant)> = None;
@@ -109,6 +137,7 @@ impl IdleUnloadTimer {
                                 let _ = done.send(());
                                 continue;
                             }
+                            Ok(IdleUnloadCommand::Shutdown) => return,
                             #[cfg(test)]
                             Ok(IdleUnloadCommand::Expire(done)) => {
                                 let _ = done.send(());
@@ -125,6 +154,10 @@ impl IdleUnloadTimer {
                             deadline = None;
                             let _ = done.send(());
                         }
+                        // The shutdown command is handled before any expiry, so
+                        // once `shutdown()` sends it the thread returns without
+                        // unloading.
+                        Ok(IdleUnloadCommand::Shutdown) => return,
                         #[cfg(test)]
                         Ok(IdleUnloadCommand::Expire(done)) => {
                             if let Some((generation, _)) = deadline.take() {
@@ -140,7 +173,10 @@ impl IdleUnloadTimer {
                     }
                 }
             })?;
-        Ok(Self { command_tx })
+        Ok(Self {
+            command_tx,
+            handle: Mutex::new(Some(handle)),
+        })
     }
 
     fn schedule(&self, generation: u64, delay: Duration) -> anyhow::Result<()> {
@@ -162,13 +198,48 @@ impl IdleUnloadTimer {
             .map_err(|_| anyhow::anyhow!("idle unload timer stopped"))
     }
 
+    /// Stop the timer thread and wait for it to exit. Once this returns the
+    /// thread can no longer run `unload_if_idle`, so the caller may release the
+    /// loaded engine on its own thread while the process is still alive. Safe to
+    /// call more than once.
+    fn shutdown(&self) -> anyhow::Result<()> {
+        // If the thread already exited the send fails harmlessly; the join
+        // handle below is the source of truth.
+        let _ = self.command_tx.send(IdleUnloadCommand::Shutdown);
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("idle unload timer thread panicked"))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn is_running(&self) -> bool {
+        self.handle.lock().unwrap().is_some()
+    }
+
     #[cfg(test)]
     fn expire(&self) {
         let (done_tx, done_rx) = mpsc::channel();
-        self.command_tx
+        if self
+            .command_tx
             .send(IdleUnloadCommand::Expire(done_tx))
-            .unwrap();
-        done_rx.recv().unwrap();
+            .is_err()
+        {
+            // The timer is already stopped, so nothing can expire.
+            return;
+        }
+        let _ = done_rx.recv();
+    }
+}
+
+impl Drop for IdleUnloadTimer {
+    fn drop(&mut self) {
+        // Guarantee the detached thread is joined even on drop paths that skip
+        // the explicit `shutdown()` (tests, early returns): a still-loaded
+        // engine must never be freed from this thread during process exit.
+        let _ = self.shutdown();
     }
 }
 
@@ -179,6 +250,8 @@ impl ProductionRuntime {
         Ok(Self {
             inference,
             idle_unload,
+            shutdown_started: AtomicBool::new(false),
+            cancel_token: Mutex::new(None),
         })
     }
 
@@ -268,6 +341,13 @@ impl<E> EngineLifecycle<E> {
         if self.generation == generation {
             self.engine = None;
         }
+    }
+
+    /// Drop the loaded engine immediately, on the calling thread, and invalidate
+    /// any idle-unload still scheduled against the current generation.
+    fn unload(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.engine = None;
     }
 
     #[cfg(test)]
@@ -369,12 +449,18 @@ impl CoordinatorRuntime for ProductionRuntime {
             "{}@{}",
             config.model.active_model, config.model.preferred_backend
         );
+        // Publish a fresh cancellable run before inference (and before a cold
+        // model load) so a cancel from another thread aborts it instead of
+        // blocking shutdown on the inference lock.
+        let cancel_token = crate::inference::CancelToken::new();
+        *self.cancel_token.lock().unwrap() = Some(cancel_token.clone());
         timings.cold_model_load = !lifecycle.has_model(&engine_key);
         let load_started = Instant::now();
         let engine = match lifecycle.ensure(&engine_key, || {
-            let mut engine = crate::inference::InferenceEngine::new(
+            let mut engine = crate::inference::InferenceEngine::new_with_token(
                 crate::catalog::model_path(&config.model.active_model)?,
                 crate::inference::BackendPreference::parse(&config.model.preferred_backend)?,
+                cancel_token.clone(),
             );
             engine.load()?;
             Ok(engine)
@@ -388,6 +474,9 @@ impl CoordinatorRuntime for ProductionRuntime {
                 };
             }
         };
+        // Cover a reused (already-loaded) engine too: a run always starts from a
+        // freshly installed token, so a stale cancel can never abort it.
+        engine.set_cancel_token(&cancel_token);
         if timings.cold_model_load {
             timings.model_load = load_started.elapsed();
         }
@@ -417,7 +506,76 @@ impl CoordinatorRuntime for ProductionRuntime {
         config: &Config,
         transcription_attempted: bool,
     ) -> anyhow::Result<()> {
+        // A reload that races shutdown must not re-arm the idle timer after the
+        // timer thread has been joined: at shutdown the engine is released on
+        // the shutdown thread, and re-scheduling here would let the (now gone)
+        // timer own that release again.
+        if self.shutdown_started.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         self.apply_policy(config, transcription_attempted)
+    }
+
+    fn shutdown(&self) -> anyhow::Result<()> {
+        self.shutdown_started.store(true, Ordering::SeqCst);
+        // Join the timer before touching the engine: the timer thread may be
+        // blocked acquiring the inference lock, so holding that lock across the
+        // join would deadlock. Once joined, no other thread can free the engine.
+        self.idle_unload.shutdown()?;
+        // Release the GPU resources here, on the shutdown thread, while the
+        // process is still alive and before `exit()` begins tearing the NVIDIA
+        // driver down. `Coordinator::shutdown` only reaches this once no worker
+        // is active, so the lock is normally free; the bound is a secondary
+        // safety net against a worker racing in after that check. If it still
+        // holds the lock, do not block - the caller exits without freeing the
+        // engine so process teardown cannot race live GPU work.
+        match lock_with_timeout(&self.inference, ENGINE_RELEASE_TIMEOUT) {
+            Some(mut lifecycle) => {
+                lifecycle.unload();
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!(
+                "an in-flight transcription still holds the inference lock; \
+                 leaving the engine loaded so process teardown cannot race it"
+            )),
+        }
+    }
+
+    fn cancel_transcription(&self) {
+        if let Some(token) = self.cancel_token.lock().unwrap().as_ref() {
+            token.cancel();
+        }
+    }
+}
+
+/// Acquire `mutex`, giving up after `timeout`. Used to bound shutdown's engine
+/// release so a wedged in-flight transcription cannot hang daemon `stop`/`restart`
+/// indefinitely.
+fn lock_with_timeout<T>(
+    mutex: &Mutex<T>,
+    timeout: Duration,
+) -> Option<std::sync::MutexGuard<'_, T>> {
+    let deadline = match Instant::now().checked_add(timeout) {
+        Some(deadline) => deadline,
+        None => return mutex.try_lock().ok(),
+    };
+    loop {
+        if let Ok(guard) = mutex.try_lock() {
+            return Some(guard);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+impl Drop for ProductionRuntime {
+    fn drop(&mut self) {
+        // Fallback for drop paths that skip the explicit daemon shutdown: still
+        // join the timer and release the engine synchronously instead of
+        // leaving the detached thread to free GPU resources during exit.
+        let _ = self.shutdown();
     }
 }
 
@@ -489,6 +647,7 @@ pub struct Coordinator {
     feedback: Arc<dyn Feedback>,
     clock: Arc<dyn Clock>,
     latency_sink: Arc<dyn LatencySink>,
+    worker_finished: Arc<tokio::sync::watch::Sender<()>>,
 }
 
 impl Coordinator {
@@ -562,6 +721,10 @@ impl Coordinator {
             feedback,
             clock,
             latency_sink,
+            worker_finished: {
+                let (worker_finished, _) = tokio::sync::watch::channel(());
+                Arc::new(worker_finished)
+            },
         })
     }
 
@@ -692,6 +855,40 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Deterministically release the loaded inference engine before the daemon
+    /// exits: stop and join the idle-unload timer, then drop the engine on this
+    /// thread. Without this, the detached timer thread can free Vulkan buffers
+    /// through the NVIDIA driver concurrently with exit-time driver teardown,
+    /// which segfaults. See `CoordinatorRuntime::shutdown`.
+    ///
+    /// A worker still active after the daemon's bounded wait is not done: it may
+    /// only be in its VAD phase (which holds no inference lock) and would then
+    /// re-acquire the lock to load the model and run inference. Freeing the
+    /// engine on lock acquisition alone would therefore race that live GPU work,
+    /// so report the error and leave the engine loaded for the caller's
+    /// no-destructor exit.
+    pub fn shutdown(&self) -> anyhow::Result<()> {
+        let worker_active = self.state.lock().unwrap().worker_active;
+        if worker_active {
+            anyhow::bail!("a recording/transcription worker is still active");
+        }
+        self.runtime.shutdown()
+    }
+
+    /// Wait until the active recording/processing worker has fully finished.
+    /// A `Request::Shutdown` uses this before replying so the daemon's later
+    /// engine release cannot block on the inference lock still held by an
+    /// in-flight transcription.
+    pub async fn wait_for_worker(&self) {
+        loop {
+            let mut finished = self.worker_finished.subscribe();
+            if !self.state.lock().unwrap().worker_active {
+                return;
+            }
+            let _ = finished.changed().await;
+        }
+    }
+
     pub fn validate_reload(&self, config: &Config) -> anyhow::Result<()> {
         config.validate()?;
         Ok(())
@@ -799,6 +996,10 @@ impl Coordinator {
                 self.feedback.send(FeedbackEvent::Cancelled, &inner.config);
                 let timing = inner.active_timing.take();
                 drop(inner);
+                // Reach an in-flight transcription through its cancel token
+                // rather than the inference lock it is holding, so a shutdown
+                // join completes promptly instead of waiting out the inference.
+                self.runtime.cancel_transcription();
                 if let Some(timing) = timing {
                     self.emit_timing(&timing, "cancelled");
                 }
@@ -1077,6 +1278,8 @@ impl Coordinator {
             }
         }
         inner.worker_active = false;
+        drop(inner);
+        let _ = self.worker_finished.send(());
     }
 }
 
@@ -1466,6 +1669,83 @@ mod tests {
             .unwrap();
         timer.schedule(rescheduled.0, rescheduled.1).unwrap();
         timer.expire();
+        assert!(!lifecycle.lock().unwrap().is_loaded());
+    }
+
+    #[test]
+    fn shutdown_joins_idle_timer_thread() {
+        let lifecycle = Arc::new(Mutex::new(EngineLifecycle::<()>::default()));
+        let timer = IdleUnloadTimer::new(Arc::clone(&lifecycle)).unwrap();
+        assert!(timer.is_running());
+
+        timer.shutdown().unwrap();
+        // Joined and gone, not merely signalled.
+        assert!(!timer.is_running());
+        // Idempotent: a second shutdown is a no-op rather than a double join.
+        timer.shutdown().unwrap();
+        assert!(!timer.is_running());
+    }
+
+    #[test]
+    fn expiry_after_shutdown_cannot_unload_or_reschedule() {
+        let lifecycle = Arc::new(Mutex::new(EngineLifecycle::default()));
+        let timer = IdleUnloadTimer::new(Arc::clone(&lifecycle)).unwrap();
+        let generation = {
+            let mut lifecycle = lifecycle.lock().unwrap();
+            lifecycle
+                .ensure("model", || Ok::<_, anyhow::Error>(()))
+                .unwrap();
+            lifecycle.generation
+        };
+        timer
+            .schedule(generation, Duration::from_secs(3600))
+            .unwrap();
+
+        timer.shutdown().unwrap();
+
+        // A would-be expiry that arrives after shutdown must be inert: the
+        // thread is gone, so the loaded engine is untouched.
+        timer.expire();
+        assert!(lifecycle.lock().unwrap().is_loaded());
+        // And a reload or worker that tries to re-arm the timer after shutdown
+        // fails cleanly instead of resurrecting the unload path.
+        assert!(timer.schedule(generation, Duration::from_secs(1)).is_err());
+        assert!(lifecycle.lock().unwrap().is_loaded());
+    }
+
+    #[test]
+    fn engine_unload_releases_on_the_calling_thread() {
+        struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Counting {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lifecycle = Arc::new(Mutex::new(EngineLifecycle::default()));
+        let timer = IdleUnloadTimer::new(Arc::clone(&lifecycle)).unwrap();
+        let generation = {
+            let mut lifecycle = lifecycle.lock().unwrap();
+            lifecycle
+                .ensure("model", || {
+                    Ok::<_, anyhow::Error>(Counting(Arc::clone(&drops)))
+                })
+                .unwrap();
+            lifecycle.generation
+        };
+        // Arm a far-future idle unload so a stale timer could have owned the
+        // release.
+        timer
+            .schedule(generation, Duration::from_secs(3600))
+            .unwrap();
+
+        // The daemon's shutdown sequence: join the timer first, then drop the
+        // engine here, on this thread.
+        timer.shutdown().unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        lifecycle.lock().unwrap().unload();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(!lifecycle.lock().unwrap().is_loaded());
     }
 }

@@ -20,6 +20,10 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
+/// Cooperative cancellation handle for an in-flight `transcribe`, re-exported so
+/// the coordinator can reach it without depending on `transcribe_cpp` directly.
+pub use transcribe_cpp::CancelToken;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct BackendInfo {
     pub backend: String,
@@ -324,14 +328,37 @@ pub struct InferenceEngine {
     session: Option<LoadedSession>,
     model_path: PathBuf,
     preference: BackendPreference,
+    cancel: CancelToken,
 }
 
 impl InferenceEngine {
     pub fn new(model_path: PathBuf, preference: BackendPreference) -> Self {
+        Self::new_with_token(model_path, preference, CancelToken::new())
+    }
+
+    /// Build an engine that installs `cancel` on its session, so an in-flight
+    /// `transcribe` can be aborted from another thread. The coordinator creates
+    /// one token per run and calls `set_cancel_token` before inference starts.
+    pub fn new_with_token(
+        model_path: PathBuf,
+        preference: BackendPreference,
+        cancel: CancelToken,
+    ) -> Self {
         InferenceEngine {
             session: None,
             model_path,
             preference,
+            cancel,
+        }
+    }
+
+    /// Install `cancel` on the loaded session (if any) and retain it so it is
+    /// reinstalled if the engine is reused. Cancellation is polled by the native
+    /// library between decode steps and makes `transcribe` return `Error::Aborted`.
+    pub fn set_cancel_token(&mut self, cancel: &CancelToken) {
+        self.cancel = cancel.clone();
+        if let Some(loaded) = self.session.as_mut() {
+            loaded.session.set_cancel_token(cancel);
         }
     }
 
@@ -382,7 +409,8 @@ impl InferenceEngine {
                 }
             };
             match model.session_with(&session_options) {
-                Ok(session) => {
+                Ok(mut session) => {
+                    session.set_cancel_token(&self.cancel);
                     self.session = Some(LoadedSession {
                         backend: describe_loaded_backend(&model),
                         session,

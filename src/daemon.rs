@@ -8,6 +8,12 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+/// How long a `Shutdown` request waits for an in-flight recording/processing
+/// worker to finish before replying. Cancellation makes the normal case finish
+/// long before this; the bound keeps a worker that ignores cancellation from
+/// hanging `stop`/`restart`.
+const SHUTDOWN_WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub fn runtime_dir() -> anyhow::Result<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|value| !value.is_empty())
@@ -91,12 +97,32 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     }
 
     tracing::info!("daemon shutting down");
+    // Release the loaded inference engine (and stop its idle-unload timer)
+    // before removing the socket or exiting. The engine free touches the GPU
+    // driver, so it must happen on this thread while the process is alive;
+    // leaving it to the detached timer thread races exit-time NVIDIA teardown
+    // and segfaults. Doing it before the socket is removed also keeps a
+    // concurrent `restart` from loading a second engine while this one is still
+    // being freed.
+    let release_error = coordinator.shutdown().err();
     // Release the instance lock before removing the socket: `stop_daemon`
     // treats socket-absence as proof the process (and its lock) is gone, so
     // a `restart` racing a `spawn_daemon` against a still-held lock is only
     // ruled out if the lock is actually free by the time the socket is.
     drop(_lock);
     std::fs::remove_file(&sock_path).ok();
+    if let Some(error) = release_error {
+        // The engine is still loaded because a worker is still active after the
+        // bounded wait, or an in-flight transcription held the inference lock
+        // past the bounded release. Freeing it now would race that live GPU work
+        // and exit-time driver teardown, so exit without running destructors: the
+        // socket is already gone, so `stop`/`restart` proceeds.
+        tracing::error!(
+            "failed to release the inference engine on shutdown ({error}); \
+             exiting without freeing it"
+        );
+        std::process::exit(0);
+    }
     Ok(())
 }
 
@@ -224,8 +250,18 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
             // Cancel rather than kill: any in-flight recording/processing is
             // torn down the same way a client-issued `cancel` would, instead
             // of leaving it to die mid-dictation when the process exits.
-            // `cancel()` itself already handles the idle case as a no-op.
+            // `cancel()` itself already handles the idle case as a no-op, and
+            // reaches an in-flight transcription through its cancel token.
             let _ = coordinator.handle_command(CoordinatorCommand::Cancel).await;
+            // Wait for the worker to actually finish before replying, but bound
+            // it: the daemon releases the loaded engine after the accept loop
+            // ends, and a worker that ignores cancellation must not hang
+            // `stop`/`restart`. On expiry the daemon exits without freeing the
+            // engine (see `run_daemon`), so the delay never exceeds this bound
+            // plus the bounded engine release, both well under `stop_daemon`'s
+            // socket poll deadline.
+            let _ =
+                tokio::time::timeout(SHUTDOWN_WORKER_TIMEOUT, coordinator.wait_for_worker()).await;
             return Response::Ok;
         }
         Request::GetLastResult => {
