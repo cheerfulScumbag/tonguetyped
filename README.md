@@ -178,9 +178,11 @@ input. It prefers a small, click-through `wlr-layer-shell` overlay badge
 positioned by `overlay.position` (`top-left`, `top-right`, `bottom-left`,
 `bottom-right`, `top`, `bottom`, or `center`) and `overlay.monitor` (`active`,
 or a specific output name from `tonguetyped doctor`). `overlay.style`
-(`badge`, `minimal`, `pill`, or `blob`) picks the overlay's look, and
-`overlay.streaming_indicator` (`false` by default) swaps the plain pulsing
-dot for a busier multi-bar animation during recording. `tonguetyped setup`
+(`badge`, `minimal`, `pill`, `blob`, or `border`) picks the overlay's look:
+`border` is a full-screen frame that glows along every screen edge, brightest
+in the corners, and ignores `overlay.position`. `overlay.streaming_indicator`
+(`false` by default) swaps the plain pulsing dot for a busier multi-bar
+animation during recording. `tonguetyped setup`
 prompts for all of these. `zwlr_layer_shell_v1` is a wlroots-originated
 protocol; it is available on wlroots-based compositors
 (code-reviewed against Mango, but not live-validated) and on modern KWin

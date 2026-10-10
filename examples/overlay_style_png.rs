@@ -7,15 +7,17 @@
 //!
 //! Run with `cargo run --example overlay_style_png -- <output-dir>` (defaults
 //! to `overlay-preview` in the current directory). Every style is written once
-//! per phase; the `blob` style additionally gets frames across one breathing/
-//! undulation cycle, for both the default and streaming treatments.
+//! per phase; the `blob` and `border` styles additionally get frames across one
+//! animation cycle, for both the default and streaming treatments. The
+//! full-screen `border` frames are written at their representative preview size
+//! rather than a compositor-provided output size.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use tonguetyped::overlay::render_frame_pixels;
 
-const STYLES: [&str; 4] = ["badge", "minimal", "pill", "blob"];
+const STYLES: [&str; 5] = ["badge", "minimal", "pill", "blob", "border"];
 const PHASES: [&str; 5] = ["recording", "transcribing", "success", "cancelled", "error"];
 
 fn main() -> std::io::Result<()> {
@@ -38,15 +40,17 @@ fn main() -> std::io::Result<()> {
     }
 
     for (index, t) in [0.0_f32, 0.25, 0.5, 0.75].iter().enumerate() {
-        for (label, streaming) in [("pulse", false), ("streaming", true)] {
-            let (width, height, pixels) =
-                render_frame_pixels("blob", Some("recording"), *t, streaming);
-            write_png(
-                &out.join(format!("blob-recording-{label}-{index}.png")),
-                width,
-                height,
-                &pixels,
-            )?;
+        for style in ["blob", "border"] {
+            for (label, streaming) in [("pulse", false), ("streaming", true)] {
+                let (width, height, pixels) =
+                    render_frame_pixels(style, Some("recording"), *t, streaming);
+                write_png(
+                    &out.join(format!("{style}-recording-{label}-{index}.png")),
+                    width,
+                    height,
+                    &pixels,
+                )?;
+            }
         }
     }
 

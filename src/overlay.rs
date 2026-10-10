@@ -52,6 +52,22 @@ const BADGE: u32 = 56;
 /// The `Blob` style's square surface, larger than `BADGE` so its glow has room
 /// to fall off to nothing before the surface edge (see `paint_blob`).
 const BLOB_SURFACE: u32 = BADGE * 3 / 2;
+/// The `Border` style's stand-in surface size. On a live compositor it is a
+/// full-screen all-edge-anchored layer (the compositor stretches a zero-sized
+/// surface to the whole output and reports the real dimensions in `configure`),
+/// so this is only the representative size the offline preview and the pixel
+/// tests render into - a common 16:9 frame whose proportions match any real
+/// screen since `paint_border` scales its geometry to the shorter side.
+const BORDER_PREVIEW: (u32, u32) = (640, 360);
+/// `paint_border` geometry, all as fractions of the surface's shorter side so
+/// the frame looks the same on any output: the solid edge band's thickness, the
+/// distance the glow fades inward from the band, and how far along the edges a
+/// corner's hotspot reaches.
+const BORDER_CORE_FRACTION: f32 = 0.018;
+const BORDER_GLOW_FRACTION: f32 = 0.09;
+const BORDER_CORNER_REACH_FRACTION: f32 = 0.28;
+/// How much extra brightness a corner hotspot adds over the straight edges.
+const BORDER_CORNER_BOOST: f32 = 1.0;
 const MARGIN: i32 = 20;
 const TICK: Duration = Duration::from_millis(33);
 const RECORDING_PULSE_PERIOD: Duration = Duration::from_millis(1600);
@@ -282,9 +298,22 @@ impl State {
             output.as_ref(),
         );
         let (width, height) = surface_size_for(self.style);
-        layer.set_anchor(anchor_for(&config.position));
-        layer.set_margin(MARGIN, MARGIN, MARGIN, MARGIN);
-        layer.set_size(width, height);
+        let fullscreen = is_fullscreen_style(self.style);
+        // A full-screen style spans every edge with no margin and a zero
+        // requested size, letting the compositor stretch it to the output; a
+        // badge style sits at the configured corner/edge with a fixed size.
+        layer.set_anchor(if fullscreen {
+            Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT
+        } else {
+            anchor_for(&config.position)
+        });
+        let margin = if fullscreen { 0 } else { MARGIN };
+        layer.set_margin(margin, margin, margin, margin);
+        if fullscreen {
+            layer.set_size(0, 0);
+        } else {
+            layer.set_size(width, height);
+        }
         layer.set_exclusive_zone(0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         if let Ok(region) = Region::new(&self.compositor) {
@@ -424,11 +453,13 @@ pub(crate) const POSITION_VALUES: [&str; 7] = [
 /// The `OverlayConfig::style` values both configuration UIs offer, matching
 /// `style_for`'s accepted values 1:1. These were reviewed as Superdesign
 /// mockups and approved by the captain; `Blob` was added later as a captain-
-/// requested "pulsating glowy blob, plasma-like" look.
-pub(crate) const STYLE_VALUES: [&str; 4] = ["badge", "minimal", "pill", "blob"];
+/// requested "pulsating glowy blob, plasma-like" look, and `Border` as a
+/// captain-requested phase-coloured screen-edge glow that is strongest in the
+/// corners.
+pub(crate) const STYLE_VALUES: [&str; 5] = ["badge", "minimal", "pill", "blob", "border"];
 
 /// Display labels matching `STYLE_VALUES` position for position.
-pub(crate) const STYLE_LABELS: [&str; 4] = ["Badge", "Minimal", "Pill", "Blob"];
+pub(crate) const STYLE_LABELS: [&str; 5] = ["Badge", "Minimal", "Pill", "Blob", "Border"];
 
 /// Display labels for `OverlayConfig::streaming_indicator`: the plain pulsing
 /// dot first, the busier live-capture treatment second. Mirrors Handy's
@@ -612,8 +643,12 @@ impl LayerShellHandler for State {
         _serial: u32,
     ) {
         let (width, height) = configure.new_size;
-        self.width = if width == 0 { BADGE } else { width };
-        self.height = if height == 0 { BADGE } else { height };
+        // A full-screen style's real size arrives here (the compositor fills in
+        // the stretched dimensions); fall back to the style's representative
+        // size only if a compositor reports a zero dimension.
+        let fallback = surface_size_for(self.style);
+        self.width = if width == 0 { fallback.0 } else { width };
+        self.height = if height == 0 { fallback.1 } else { height };
         self.configured = true;
         self.redraw();
     }
@@ -895,15 +930,17 @@ fn stroke_arc(
 /// The selectable looks (see `OverlayConfig::style`): `Badge` is the original
 /// solid-disc-and-glyph treatment, `Minimal` strips it to a thin outline ring
 /// with a small glyph, `Pill` reshapes the badge into a capsule with room for
-/// a wider waveform, and `Blob` is a bright, slowly-breathing glowing blob with
-/// a soft liquid-metal sheen. Every style reskins all five phases consistently,
-/// per the design review.
+/// a wider waveform, `Blob` is a bright, slowly-breathing glowing blob with
+/// a soft liquid-metal sheen, and `Border` is a phase-coloured glowing frame
+/// hugging the whole screen edge, brightest in the corners. Every style reskins
+/// all five phases consistently, per the design review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
     Badge,
     Minimal,
     Pill,
     Blob,
+    Border,
 }
 
 /// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
@@ -913,18 +950,31 @@ fn style_for(name: &str) -> Style {
         "minimal" => Style::Minimal,
         "pill" => Style::Pill,
         "blob" => Style::Blob,
+        "border" => Style::Border,
         _ => Style::Badge,
     }
 }
 
+/// Whether a style owns the whole output rather than a small anchored badge.
+/// Only `Border` does: it is a full-screen `zwlr_layer_shell_v1` surface whose
+/// glow traces the screen edges, so `create_layer` anchors it to every edge
+/// with no margin and a zero requested size (the compositor stretches it to the
+/// output), and `configure` supplies its real dimensions.
+fn is_fullscreen_style(style: Style) -> bool {
+    matches!(style, Style::Border)
+}
+
 /// The layer-shell surface size to request for a style - `Pill` widens to hold
 /// its capsule shape and waveform, and `Blob` enlarges to give its glow room
-/// to fade out before the surface edge.
+/// to fade out before the surface edge. For the full-screen `Border` style this
+/// is only the representative size used by the offline preview and the tests;
+/// `create_layer` requests a stretched zero-sized surface instead.
 fn surface_size_for(style: Style) -> (u32, u32) {
     match style {
         Style::Badge | Style::Minimal => (BADGE, BADGE),
         Style::Pill => (BADGE * 5 / 4, BADGE * 5 / 8),
         Style::Blob => (BLOB_SURFACE, BLOB_SURFACE),
+        Style::Border => BORDER_PREVIEW,
     }
 }
 
@@ -986,6 +1036,7 @@ fn paint(
         Style::Minimal => paint_minimal(canvas, phase, t, streaming_indicator),
         Style::Pill => paint_pill(canvas, phase, t, streaming_indicator),
         Style::Blob => paint_blob(canvas, phase, t, breath, streaming_indicator),
+        Style::Border => paint_border(canvas, phase, t, streaming_indicator),
     }
 }
 
@@ -1320,13 +1371,94 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
     }
 }
 
+/// The `Border` style's per-pixel glow intensity in `0.0..=1.0` at pixel center
+/// `(x, y)` of a `width` x `height` frame. The value is a bright band hugging
+/// whichever edge is nearest, fading inward, and it is pushed higher and reaches
+/// further inward near a corner, so the four corners glow more strongly than the
+/// straight edge midpoints. `pulse` (0..1) breathes the whole frame.
+fn border_glow(x: f32, y: f32, width: f32, height: f32, pulse: f32) -> f32 {
+    let dx_edge = x.min(width - x);
+    let dy_edge = y.min(height - y);
+    let d = dx_edge.min(dy_edge);
+    let short = width.min(height);
+
+    let core = (short * BORDER_CORE_FRACTION).max(2.0);
+    let glow = (short * BORDER_GLOW_FRACTION).max(core + 2.0);
+    let corner_reach = (short * BORDER_CORNER_REACH_FRACTION).max(core + 2.0);
+
+    // Corner proximity: 1 exactly at a corner, falling to 0 beyond
+    // `corner_reach` along either edge.
+    let corner_dist = (dx_edge * dx_edge + dy_edge * dy_edge).sqrt();
+    let near_corner = (1.0 - corner_dist / corner_reach).clamp(0.0, 1.0);
+
+    // A corner's glow spills further inward than a straight edge's, so its halo
+    // is visibly larger as well as brighter.
+    let reach = glow * (1.0 + 0.8 * near_corner);
+    let profile = if d < core {
+        1.0 - 0.35 * (d / core)
+    } else if d < reach {
+        let into = (d - core) / (reach - core);
+        (1.0 - into).powi(2) * 0.75
+    } else {
+        return 0.0;
+    };
+    let boost = 1.0 + BORDER_CORNER_BOOST * near_corner * near_corner;
+    (profile * boost * pulse).min(1.0)
+}
+
+/// A phase-coloured glowing frame around the whole screen edge, brightest in the
+/// corners - the `Border` style. Unlike every other style its surface fills the
+/// output, so it paints a border/glow band rather than a centered shape and
+/// leaves the centre transparent. The whole frame breathes on the elapsed-time
+/// fraction; with `streaming_indicator` a bright highlight also sweeps once
+/// around the frame per cycle, standing in for the "actively capturing" signal
+/// the other styles show as a waveform (see `OverlayConfig::streaming_indicator`).
+fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+    use std::f32::consts::{PI, TAU};
+    let width = canvas.width as f32;
+    let height = canvas.height as f32;
+    let (cx, cy) = (width / 2.0, height / 2.0);
+    let color = phase_color(phase);
+    // The band core is a bright, slightly whitened phase colour; the outward
+    // fringe stays the saturated phase colour, so the edge reads as glowing.
+    let hot = lighten(color, 0.55);
+    let pulse = 0.7 + 0.3 * (0.5 + 0.5 * (t * TAU).sin());
+    let head = t * TAU - PI;
+    // The sweep is a recording-only "actively capturing" cue, matching every
+    // other style's `Phase::Recording if streaming_indicator` branch.
+    let sweeping = streaming_indicator && matches!(phase, Phase::Recording);
+    // Angular half-width of the streaming highlight's bright arc.
+    const SWEEP: f32 = 0.55;
+
+    for y in 0..canvas.height {
+        for x in 0..canvas.width {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let mut intensity = border_glow(px, py, width, height, pulse);
+            if sweeping && intensity > 0.0 {
+                let angle = (py - cy).atan2(px - cx);
+                let delta = (angle - head + PI).rem_euclid(TAU) - PI;
+                let sweep = (1.0 - delta.abs() / SWEEP).clamp(0.0, 1.0);
+                intensity = (intensity + sweep * sweep * 0.85).min(1.0);
+            }
+            if intensity <= 0.0 {
+                continue;
+            }
+            let rgb = mix_color(color, hot, intensity);
+            canvas.blend(x as i32, y as i32, rgb, intensity);
+        }
+    }
+}
+
 /// Renders one overlay frame into a straight-alpha BGRA8 buffer (wl_shm
 /// `Argb8888`, little-endian), for the offline design-preview example
 /// (`examples/overlay_style_png.rs`, which reorders it to PNG's RGBA). `style`
 /// and `phase` use the same string values the config and feedback events use
-/// (`badge`/`minimal`/`pill`/`blob`; `recording`/`transcribing`/`success`/
-/// `cancelled`/`error`), and `None` clears to fully transparent. Returns
-/// `(width, height, pixels)` with `width * height * 4` bytes.
+/// (`badge`/`minimal`/`pill`/`blob`/`border`; `recording`/`transcribing`/
+/// `success`/`cancelled`/`error`), and `None` clears to fully transparent.
+/// Returns `(width, height, pixels)` with `width * height * 4` bytes. For the
+/// full-screen `border` style this is the representative `BORDER_PREVIEW` size,
+/// not a compositor-provided output size.
 #[doc(hidden)]
 pub fn render_frame_pixels(
     style: &str,
@@ -1437,7 +1569,13 @@ mod tests {
         );
     }
 
-    const ALL_STYLES: [Style; 4] = [Style::Badge, Style::Minimal, Style::Pill, Style::Blob];
+    const ALL_STYLES: [Style; 5] = [
+        Style::Badge,
+        Style::Minimal,
+        Style::Pill,
+        Style::Blob,
+        Style::Border,
+    ];
 
     fn paint_to_pixels(
         phase: Option<Phase>,
@@ -1523,6 +1661,7 @@ mod tests {
         let minimal = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Minimal);
         let pill = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Pill);
         let blob = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Blob);
+        let border = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Border);
         assert_ne!(
             badge.len(),
             pill.len(),
@@ -1532,6 +1671,11 @@ mod tests {
             badge.len(),
             blob.len(),
             "Blob should use a differently-sized surface"
+        );
+        assert_ne!(
+            blob.len(),
+            border.len(),
+            "Border should use a differently-sized (full-screen) surface"
         );
         assert_ne!(
             badge, minimal,
@@ -1612,8 +1756,14 @@ mod tests {
         // fraction. Change the spinner with the breath held fixed: the glyph
         // moves but the silhouette's alpha boundary is identical. Change the
         // breath with the spinner held fixed: the silhouette boundary moves.
-        let alpha =
-            |pixels: &[u8]| -> Vec<u8> { pixels.iter().skip(3).step_by(4).copied().collect() };
+        let alpha = |pixels: &[u8]| -> Vec<u8> {
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[3])
+                .collect()
+        };
 
         let spinner_a =
             paint_to_pixels_with_breath(Some(Phase::Transcribing), 0.0, 0.3, false, Style::Blob);
@@ -1655,10 +1805,131 @@ mod tests {
         }
     }
 
+    fn alpha_at(pixels: &[u8], width: u32, x: u32, y: u32) -> u8 {
+        pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    fn alpha_sum(pixels: &[u8], width: u32, x0: u32, y0: u32, side: u32) -> u32 {
+        let mut sum = 0u32;
+        for y in y0..y0 + side {
+            for x in x0..x0 + side {
+                sum += alpha_at(pixels, width, x, y) as u32;
+            }
+        }
+        sum
+    }
+
+    #[test]
+    fn border_paints_a_frame_around_the_edges_with_a_transparent_centre() {
+        let (width, height) = surface_size_for(Style::Border);
+        let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Border);
+        // The middle of the screen must stay clear: this style only paints a
+        // border/glow band, never anything in the centre.
+        for y in height / 2 - 20..height / 2 + 20 {
+            for x in width / 2 - 20..width / 2 + 20 {
+                assert_eq!(
+                    alpha_at(&pixels, width, x, y),
+                    0,
+                    "border centre pixel ({x},{y}) should be transparent"
+                );
+            }
+        }
+        // Every edge and every corner paints.
+        assert!(alpha_at(&pixels, width, width / 2, 0) > 0, "top edge");
+        assert!(
+            alpha_at(&pixels, width, width / 2, height - 1) > 0,
+            "bottom edge"
+        );
+        assert!(alpha_at(&pixels, width, 0, height / 2) > 0, "left edge");
+        assert!(
+            alpha_at(&pixels, width, width - 1, height / 2) > 0,
+            "right edge"
+        );
+        assert!(alpha_at(&pixels, width, 0, 0) > 0, "top-left corner");
+        assert!(
+            alpha_at(&pixels, width, width - 1, height - 1) > 0,
+            "bottom-right corner"
+        );
+    }
+
+    #[test]
+    fn border_corners_glow_brighter_than_edge_midpoints() {
+        // The captain's ask: the glow is strongest in the corners. Compare an
+        // equal-area window at a corner against the same-sized window centred
+        // on an edge, at the same animation instant so the breathing cancels.
+        let (width, height) = surface_size_for(Style::Border);
+        let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Border);
+        let side = 40;
+        let corner = alpha_sum(&pixels, width, 0, 0, side);
+        let top_mid = alpha_sum(&pixels, width, width / 2 - side / 2, 0, side);
+        let left_mid = alpha_sum(&pixels, width, 0, height / 2 - side / 2, side);
+        assert!(
+            corner > top_mid,
+            "corner glow {corner} should exceed top-edge midpoint {top_mid}"
+        );
+        assert!(
+            corner > left_mid,
+            "corner glow {corner} should exceed left-edge midpoint {left_mid}"
+        );
+    }
+
+    #[test]
+    fn border_uses_the_phase_colour() {
+        // Buffer is BGRA, so channel 2 is red and channel 0 is blue.
+        let (width, _) = surface_size_for(Style::Border);
+        let index = ((width / 2) * 4) as usize;
+        let recording = paint_to_pixels(Some(Phase::Recording), 0.0, false, Style::Border);
+        let transcribing = paint_to_pixels(Some(Phase::Transcribing), 0.0, false, Style::Border);
+        assert!(
+            recording[index + 2] > recording[index],
+            "recording border should be red-dominant"
+        );
+        assert!(
+            transcribing[index] > transcribing[index + 2],
+            "transcribing border should be blue-dominant"
+        );
+    }
+
+    #[test]
+    fn border_breathes_across_its_animation_cycle() {
+        let frames: Vec<Vec<u8>> = [0.0, 0.25, 0.5, 0.75]
+            .iter()
+            .map(|&t| paint_to_pixels(Some(Phase::Recording), t, false, Style::Border))
+            .collect();
+        for pair in frames.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "consecutive border frames should differ (breathing glow)"
+            );
+        }
+    }
+
+    #[test]
+    fn border_streaming_indicator_sweeps_a_travelling_highlight() {
+        let sum =
+            |pixels: &[u8]| -> u64 { pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum() };
+        let default = paint_to_pixels(Some(Phase::Recording), 0.15, false, Style::Border);
+        let streaming = paint_to_pixels(Some(Phase::Recording), 0.15, true, Style::Border);
+        assert!(
+            sum(&streaming) > sum(&default),
+            "the streaming sweep should add extra glow over the default border"
+        );
+        // The highlight's position advances with the cycle. At t = 0.0 and
+        // t = 0.5 the base pulse is identical (sin 0 and sin pi are both 0), so
+        // any difference is the highlight having swept to the opposite side.
+        let a = paint_to_pixels(Some(Phase::Recording), 0.0, true, Style::Border);
+        let b = paint_to_pixels(Some(Phase::Recording), 0.5, true, Style::Border);
+        assert_ne!(
+            a, b,
+            "the streaming highlight should travel around the frame, not sit still"
+        );
+    }
+
     /// Is `(x, y)` (a pixel center in surface coordinates) inside the filled
     /// shape a style paints its streaming waveform into? `Badge` is the disc,
     /// `Minimal` the ring's inner edge (no filled background, just the
-    /// outline), `Pill` the capsule, `Blob` the blob's glow extent.
+    /// outline), `Pill` the capsule, `Blob` the blob's glow extent, `Border`
+    /// the glow band hugging the screen edge.
     fn inside_style_shape(style: Style, x: f32, y: f32) -> bool {
         let (width, height) = surface_size_for(style);
         let cx = width as f32 / 2.0;
@@ -1686,6 +1957,14 @@ mod tests {
                 // treat ~1.45x as the shape's outer bound.
                 let outer = width.min(height) as f32 * 0.30 * 1.45;
                 (x - cx).powi(2) + (y - cy).powi(2) <= outer * outer
+            }
+            Style::Border => {
+                // Every painted pixel lies within the glow band of the nearest
+                // edge; the band reaches at most 1.8x `BORDER_GLOW_FRACTION`
+                // inward at a corner (see `border_glow`). Add a pixel of slack
+                // for the anti-aliased boundary.
+                let reach = width.min(height) as f32 * BORDER_GLOW_FRACTION * 1.8 + 1.0;
+                x.min(width as f32 - x).min(y.min(height as f32 - y)) < reach
             }
         }
     }
@@ -1741,6 +2020,7 @@ mod tests {
         assert_eq!(style_for("minimal"), Style::Minimal);
         assert_eq!(style_for("pill"), Style::Pill);
         assert_eq!(style_for("blob"), Style::Blob);
+        assert_eq!(style_for("border"), Style::Border);
         assert_eq!(style_for("nonsense"), Style::Badge);
     }
 }
