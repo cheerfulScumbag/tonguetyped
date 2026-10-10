@@ -1586,7 +1586,8 @@ fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: 
 /// (`examples/overlay_style_png.rs`, which reorders it to PNG's RGBA). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`; `recording`/`transcribing`/
-/// `success`/`cancelled`/`error`), and `None` clears to fully transparent.
+/// `success`/`no-speech`/`cancelled`/`error`), and `None` clears to fully
+/// transparent.
 /// Returns `(width, height, pixels)` with `width * height * 4` bytes. For the
 /// full-screen `border` style this is the representative `BORDER_PREVIEW` size,
 /// not a compositor-provided output size.

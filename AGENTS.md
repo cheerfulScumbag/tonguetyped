@@ -140,7 +140,8 @@ up the new default.
 
 A dictation whose transcript is empty (only silence captured - a muted, unplugged,
 or wrong input device) is reported with its own `FeedbackEvent::NoSpeech` /
-overlay `Phase::NoSpeech` (amber, a slashed-microphone glyph across every style)
+overlay `Phase::NoSpeech` (amber; a slashed-microphone glyph on every anchored
+style, an amber frame on the full-screen `border` style)
 instead of the generic `Success`, via `coordinator::completion_feedback_event`
 (`src/coordinator.rs`); the OSD/notification fallback says "No speech detected".
 Before this the VAD-correct "empty" outcome flashed a normal "Ready" and typed
