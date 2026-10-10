@@ -758,12 +758,13 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, rgb: (u8, u8,
     }
 }
 
-/// Fills a capsule ("stadium") shape - a rectangle of `2*half_width` by
-/// `2*half_height` with semicircular ends of radius `half_height` - the
-/// `Style::Pill` badge shape. Degenerates to a circle when
-/// `half_width == half_height`, via the same "distance from the nearest
-/// point on a line segment" trick `stroke_line` uses, but filled solid
-/// within `half_height` of that segment rather than stroked.
+/// Fills a capsule ("stadium") shape spanning `2*half_width` by
+/// `2*half_height`, with semicircular ends of radius `min(half_width,
+/// half_height)` on the longer axis - the horizontal `Style::Pill` badge and
+/// the upright muted-mic body. Degenerates to a circle when the two are equal,
+/// via the same "distance from the nearest point on a line segment" trick
+/// `stroke_line` uses, but filled solid within that radius of the segment
+/// rather than stroked.
 fn fill_capsule(
     canvas: &mut Canvas,
     cx: f32,
@@ -772,20 +773,22 @@ fn fill_capsule(
     half_height: f32,
     rgb: (u8, u8, u8),
 ) {
-    let radius = half_height;
-    let half_segment = (half_width - half_height).max(0.0);
-    let (x0, x1) = (cx - half_segment, cx + half_segment);
-    let span = radius + 1.0;
+    let radius = half_width.min(half_height);
+    let half_segment_x = (half_width - radius).max(0.0);
+    let half_segment_y = (half_height - radius).max(0.0);
+    let (x0, x1) = (cx - half_segment_x, cx + half_segment_x);
+    let (y0, y1) = (cy - half_segment_y, cy + half_segment_y);
     let min_x = (cx - half_width - 1.0).floor().max(0.0) as i32;
     let max_x = (cx + half_width + 1.0).ceil().min(canvas.width as f32) as i32;
-    let min_y = (cy - span).floor().max(0.0) as i32;
-    let max_y = (cy + span).ceil().min(canvas.height as f32) as i32;
+    let min_y = (cy - half_height - 1.0).floor().max(0.0) as i32;
+    let max_y = (cy + half_height + 1.0).ceil().min(canvas.height as f32) as i32;
     for y in min_y..max_y {
         for x in min_x..max_x {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
             let proj_x = px.clamp(x0, x1);
-            let dist = ((px - proj_x).powi(2) + (py - cy).powi(2)).sqrt();
+            let proj_y = py.clamp(y0, y1);
+            let dist = ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt();
             let coverage = (radius + 0.5 - dist).clamp(0.0, 1.0);
             canvas.blend(x, y, rgb, coverage);
         }
@@ -1077,7 +1080,7 @@ fn glyph_muted_mic(
     // Mic body: an upright capsule, sitting slightly above center to leave room
     // for its cradle and stem.
     fill_capsule(canvas, cx, cy - s * 0.35, s * 0.34, s * 0.5, rgb);
-    // Cradle: a downward-opening arc hugging the lower half of the body.
+    // Cradle: an upward-opening arc (a U) hugging the lower half of the body.
     stroke_arc(
         canvas,
         cx,
