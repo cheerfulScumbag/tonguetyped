@@ -189,9 +189,9 @@ Running bare `tonguetyped` (no subcommand) opens the dashboard (`src/tui/`,
 `CLI`'s `command` field is `Option<Commands>` - see `data/tt-tui-dashboard-1/report.md`
 for the original SuperDesign process and `data/tt-add-dashboard-settings-menu-77/report.md`
 for the settings-menu redesign). The home screen is two stacked panels sharing one
-selection cursor: a fixed eight-row Settings panel (Model, Microphone, Activation,
-Shortcut, Transcript output, Typing backend, Startup, Overlay) showing each area's
-current value, above a Commands panel. `src/cli.rs` holds the clap
+selection cursor: a fixed ten-row Settings panel (Model, Microphone, Activation,
+Shortcut, Transcript output, Typing backend, Transcript folder, History retention,
+Startup, Overlay) showing each area's current value, above a Commands panel. `src/cli.rs` holds the clap
 `Cli`/`Commands` definitions as a library module specifically so `src/tui/mod.rs`'s
 `home_items()` can read the Commands panel straight off clap's own metadata
 (`Cli::command().get_subcommands()`) instead of a second, driftable copy - it can
@@ -209,6 +209,23 @@ in either caller. `setup` is NOT reimplemented in the dashboard - it suspends it
 own alternate screen, runs the pre-existing `setup::run_console()`
 (`src/setup.rs`), then resumes, since a terminal tracks one alternate-screen
 buffer, not a stack.
+
+Transcript persistence has two independent, always-available settings (neither
+branches on the output method). History retention lives in `[history]`:
+`max_entries` and `max_age_days` (either `0` = no limit on that dimension; the
+pair replaced the old fixed 500-entry cap, default 100 entries / 30 days) are
+both applied on every write by `HistoryStore::prune(max_entries, max_age_days)`
+and cover the SQLite DB only. `[history].transcript_folder`, when non-empty,
+writes each finished transcript as a plain-text file via
+`history::export_transcript` (timestamped filename, `-2`/`-3`... on a same-second
+collision, `0600`, leading `~/` expanded) - write-once: TongueTyped never reads,
+monitors, or prunes those files, so they outlive the DB retention. Both settings
+are surfaced as their own dashboard Settings rows (screens in
+`src/tui/screens.rs`'s `TextFieldsScreen`) and as console wizard steps (after
+Startup, before Overlay). Free-text/numeric entry is the one input the two
+configuration UIs otherwise lacked: `crate::text_input::TextField` is the shared
+single-line editor (char-index cursor, insert/backspace/home/end, `split_at_cursor`
+for the reversed-cell rendering), used by both `tui::screens` and `setup::console`.
 
 Misconfiguration-prone preview/choice logic is extracted once and shared by the
 wizard and the dashboard rather than copied: `audio::MicMonitor` owns the

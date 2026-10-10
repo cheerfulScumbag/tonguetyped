@@ -5,6 +5,7 @@ use crate::overlay::{
     POSITION_VALUES as OVERLAY_POSITION_VALUES, STREAMING_LABELS as OVERLAY_STREAMING_LABELS,
     STYLE_LABELS as OVERLAY_STYLE_LABELS, STYLE_VALUES as OVERLAY_STYLE_VALUES,
 };
+use crate::text_input::TextField;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -44,6 +45,8 @@ enum StepKind {
     Output,
     OutputBackend,
     Startup,
+    HistoryRetention,
+    TranscriptFolder,
     OverlayEnabled,
     OverlayPosition,
     OverlayStyle,
@@ -98,6 +101,9 @@ struct ConsoleState {
     backend_values: Vec<String>,
     backend_selection: usize,
     startup_selection: usize,
+    retention_fields: Vec<TextField>,
+    retention_field: usize,
+    folder_field: TextField,
     overlay_enabled_selection: usize,
     overlay_position_selection: usize,
     overlay_style_selection: usize,
@@ -157,6 +163,12 @@ impl ConsoleState {
             .position(|backend| backend == &config.output.typing_backend)
             .unwrap_or(0);
         let startup_selection = usize::from(config.startup.autostart);
+        let retention_fields = vec![
+            TextField::new(config.history.max_entries.to_string()),
+            TextField::new(config.history.max_age_days.to_string()),
+        ];
+        let retention_field = 0;
+        let folder_field = TextField::new(config.history.transcript_folder.clone());
         let overlay_enabled_selection = usize::from(config.overlay.enabled);
         let overlay_position_selection = OVERLAY_POSITION_VALUES
             .iter()
@@ -183,6 +195,9 @@ impl ConsoleState {
             backend_values,
             backend_selection,
             startup_selection,
+            retention_fields,
+            retention_field,
+            folder_field,
             overlay_enabled_selection,
             overlay_position_selection,
             overlay_style_selection,
@@ -242,7 +257,60 @@ impl ConsoleState {
             StepKind::Shortcut => self.handle_shortcut_key(key),
             StepKind::Confirm => self.handle_confirm_key(key),
             StepKind::Downloading => self.handle_downloading_key(key),
+            StepKind::HistoryRetention | StepKind::TranscriptFolder => {
+                self.handle_text_step_key(key)
+            }
             _ => self.handle_list_key(key),
+        }
+    }
+
+    /// The two free-text steps ("History retention", "Transcript folder").
+    /// Unlike the list steps, `h`/`l`/`q` type literal characters here rather
+    /// than retreat/advance/cancel, so Escape is the way back and Enter
+    /// advances (validating the fields first).
+    fn handle_text_step_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => return self.advance(),
+            KeyCode::Esc => return Ok(self.retreat()),
+            KeyCode::Up | KeyCode::BackTab if self.text_field_count() > 1 => {
+                self.move_text_field(-1)
+            }
+            KeyCode::Down | KeyCode::Tab if self.text_field_count() > 1 => self.move_text_field(1),
+            KeyCode::Left => self.selected_text_field_mut().move_left(),
+            KeyCode::Right => self.selected_text_field_mut().move_right(),
+            KeyCode::Home => self.selected_text_field_mut().home(),
+            KeyCode::End => self.selected_text_field_mut().end(),
+            KeyCode::Backspace => self.selected_text_field_mut().backspace(),
+            KeyCode::Char(c) if !ctrl => self.selected_text_field_mut().insert(c),
+            _ => {}
+        }
+        Ok(ControlFlow::Continue)
+    }
+
+    fn text_field_count(&self) -> usize {
+        match self.step {
+            StepKind::HistoryRetention => self.retention_fields.len(),
+            StepKind::TranscriptFolder => 1,
+            _ => 0,
+        }
+    }
+
+    fn move_text_field(&mut self, delta: i32) {
+        let len = self.text_field_count() as i32;
+        if len == 0 {
+            return;
+        }
+        if self.step == StepKind::HistoryRetention {
+            self.retention_field = (self.retention_field as i32 + delta).clamp(0, len - 1) as usize;
+        }
+    }
+
+    fn selected_text_field_mut(&mut self) -> &mut TextField {
+        match self.step {
+            StepKind::HistoryRetention => &mut self.retention_fields[self.retention_field],
+            StepKind::TranscriptFolder => &mut self.folder_field,
+            _ => unreachable!("no text field for this step"),
         }
     }
 
@@ -337,7 +405,11 @@ impl ConsoleState {
             StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
             StepKind::OverlayStyle => OVERLAY_STYLE_VALUES.len(),
             StepKind::OverlayStreaming => OVERLAY_STREAMING_LABELS.len(),
-            StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => 0,
+            StepKind::Shortcut
+            | StepKind::Confirm
+            | StepKind::Downloading
+            | StepKind::HistoryRetention
+            | StepKind::TranscriptFolder => 0,
         }
     }
 
@@ -354,7 +426,11 @@ impl ConsoleState {
             StepKind::OverlayPosition => &mut self.overlay_position_selection,
             StepKind::OverlayStyle => &mut self.overlay_style_selection,
             StepKind::OverlayStreaming => &mut self.overlay_streaming_selection,
-            StepKind::Shortcut | StepKind::Confirm | StepKind::Downloading => {
+            StepKind::Shortcut
+            | StepKind::Confirm
+            | StepKind::Downloading
+            | StepKind::HistoryRetention
+            | StepKind::TranscriptFolder => {
                 unreachable!("no list selection for this step")
             }
         }
@@ -391,6 +467,8 @@ impl ConsoleState {
             steps.push(OutputBackend);
         }
         steps.push(Startup);
+        steps.push(HistoryRetention);
+        steps.push(TranscriptFolder);
         steps.push(OverlayEnabled);
         if self.overlay_options_shown() {
             steps.push(OverlayPosition);
@@ -473,6 +551,41 @@ impl ConsoleState {
             StepKind::Startup => {
                 self.config.startup.autostart = self.startup_selection == 1;
                 self.config.validate()?;
+            }
+            StepKind::HistoryRetention => {
+                let entries = match self.retention_fields[0].value().trim().parse::<u64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        self.error =
+                            Some("Maximum entries must be a whole number (0 = no limit).".into());
+                        return Ok(ControlFlow::Continue);
+                    }
+                };
+                let age = match self.retention_fields[1].value().trim().parse::<u64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        self.error =
+                            Some("Maximum age must be a whole number (0 = no limit).".into());
+                        return Ok(ControlFlow::Continue);
+                    }
+                };
+                self.config.history.max_entries = entries;
+                self.config.history.max_age_days = age;
+                self.config.validate()?;
+            }
+            StepKind::TranscriptFolder => {
+                let raw = self.folder_field.value().trim();
+                if raw.is_empty() {
+                    self.config.history.transcript_folder = String::new();
+                } else {
+                    let expanded = crate::history::expand_home(raw);
+                    if !expanded.is_absolute() {
+                        self.error =
+                            Some("Enter an absolute folder path, or one starting with ~/.".into());
+                        return Ok(ControlFlow::Continue);
+                    }
+                    self.config.history.transcript_folder = expanded.to_string_lossy().into_owned();
+                }
             }
             StepKind::OverlayEnabled => {
                 self.config.overlay.enabled = self.overlay_enabled_selection == 1;
@@ -598,6 +711,8 @@ impl ConsoleState {
             StepKind::Output => "Transcript output",
             StepKind::OutputBackend => "Typing backend",
             StepKind::Startup => "Startup",
+            StepKind::HistoryRetention => "History retention",
+            StepKind::TranscriptFolder => "Transcript folder",
             StepKind::OverlayEnabled => "Overlay",
             StepKind::OverlayPosition => "Overlay position",
             StepKind::OverlayStyle => "Overlay style",
@@ -675,6 +790,8 @@ impl ConsoleState {
             StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
             StepKind::Downloading if !self.downloads_finished() => "Fetching...  Esc back  q quit",
             StepKind::Downloading => "Enter continue  Esc back  q quit",
+            StepKind::HistoryRetention => "↑/↓ field  ←/→ cursor  Enter continue  Esc back",
+            StepKind::TranscriptFolder => "←/→ cursor  Enter continue  Esc back",
             _ => "↑/↓ choose  Enter continue  Esc back  q quit",
         }
     }
@@ -729,6 +846,20 @@ impl ConsoleState {
                     area.height,
                 ),
                 area,
+            ),
+            StepKind::HistoryRetention => self.render_text_fields(
+                frame,
+                area,
+                &["Maximum entries", "Maximum age (days)"],
+                &self.retention_fields,
+                self.retention_field,
+            ),
+            StepKind::TranscriptFolder => self.render_text_fields(
+                frame,
+                area,
+                &["Folder"],
+                std::slice::from_ref(&self.folder_field),
+                0,
             ),
             StepKind::OverlayEnabled => frame.render_widget(
                 list_paragraph(
@@ -982,6 +1113,64 @@ impl ConsoleState {
         );
     }
 
+    /// A labeled set of editable text fields, the selected one highlighted
+    /// with a reversed cursor cell - the console's counterpart to the
+    /// dashboard's `TextFieldsScreen` rendering.
+    fn render_text_fields(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        labels: &[&str],
+        fields: &[TextField],
+        selected: usize,
+    ) {
+        let label_width = labels
+            .iter()
+            .map(|label| label.chars().count())
+            .max()
+            .unwrap_or(0);
+        let lines: Vec<Line> = labels
+            .iter()
+            .zip(fields)
+            .enumerate()
+            .map(|(index, (label, field))| {
+                let highlighted = index == selected;
+                let marker = if highlighted { "> " } else { "  " };
+                let style = if highlighted {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let mut spans = vec![Span::styled(
+                    format!("{marker}{label:<label_width$}  "),
+                    style,
+                )];
+                if highlighted {
+                    let (before, cursor_char, after) = field.split_at_cursor();
+                    spans.push(Span::raw(before));
+                    spans.push(Span::styled(
+                        cursor_char.map(String::from).unwrap_or_else(|| " ".into()),
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ));
+                    spans.push(Span::raw(after));
+                } else {
+                    spans.push(Span::raw(field.value().to_string()));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(self.step_title()),
+            ),
+            area,
+        );
+    }
+
     fn render_confirm(&self, frame: &mut Frame, area: Rect) {
         let lines = vec![
             Line::from(format!("Model:       {}", self.config.model.active_model)),
@@ -996,6 +1185,18 @@ impl ConsoleState {
                 crate::activation::keybind_display(&self.config.activation.keybind)
             )),
             Line::from(format!("Output:      {}", self.config.output.method)),
+            Line::from(format!(
+                "Retention:   {}",
+                self.config.history.retention_summary()
+            )),
+            Line::from(format!(
+                "Folder:      {}",
+                if self.config.history.transcript_folder.trim().is_empty() {
+                    "disabled".to_string()
+                } else {
+                    self.config.history.transcript_folder.clone()
+                }
+            )),
             Line::from(format!(
                 "Autostart:   {}",
                 if self.config.startup.autostart {

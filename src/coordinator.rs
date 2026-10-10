@@ -1151,22 +1151,42 @@ impl Coordinator {
                 tracing::error!("{error}");
             }
             let mut history_failed = false;
-            if config.history.enabled {
+            let export_folder = config.history.transcript_folder.trim().to_string();
+            if config.history.enabled || !export_folder.is_empty() {
                 let history_started = timing.lock().unwrap().phase_started();
-                match crate::history::history_db_path()
-                    .and_then(|path| crate::history::HistoryStore::new(&path))
-                {
-                    Ok(store) => {
-                        if let Err(error) = store
-                            .insert(&trimmed, None, &config.transcription.language)
-                            .and_then(|_| store.prune(config.history.max_entries))
-                        {
-                            tracing::error!("history update failed: {}", error);
+                if config.history.enabled {
+                    match crate::history::history_db_path()
+                        .and_then(|path| crate::history::HistoryStore::new(&path))
+                    {
+                        Ok(store) => {
+                            if let Err(error) = store
+                                .insert(&trimmed, None, &config.transcription.language)
+                                .and_then(|_| {
+                                    store.prune(
+                                        config.history.max_entries,
+                                        config.history.max_age_days,
+                                    )
+                                })
+                            {
+                                tracing::error!("history update failed: {}", error);
+                                history_failed = true;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!("history unavailable: {}", error);
                             history_failed = true;
                         }
                     }
-                    Err(error) => {
-                        tracing::error!("history unavailable: {}", error);
+                }
+                // The transcript-folder export is independent of the history
+                // database: it runs whenever a folder is set, and a failure
+                // only reports through the same persistence outcome rather
+                // than blocking the finished dictation.
+                if !export_folder.is_empty() {
+                    if let Err(error) =
+                        crate::history::export_transcript(&export_folder, &trimmed, timestamp)
+                    {
+                        tracing::error!("transcript export failed: {}", error);
                         history_failed = true;
                     }
                 }

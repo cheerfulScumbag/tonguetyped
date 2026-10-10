@@ -272,8 +272,24 @@ impl Default for TranscriptionConfig {
 pub struct HistoryConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// How many transcript rows the history database keeps. `0` means no
+    /// entry-count limit. Paired with `max_age_days`: pruning on write drops
+    /// rows that either limit cuts, whichever comes first.
     #[serde(default = "default_max_entries")]
     pub max_entries: u64,
+    /// How many days a transcript row may stay in the history database. `0`
+    /// means no age limit. Both this and `max_entries` are always in effect;
+    /// neither depends on the output method.
+    #[serde(default = "default_max_age_days")]
+    pub max_age_days: u64,
+    /// A folder to also write each finished transcript into as a plain-text
+    /// file stamped with the date and time (one file per dictation). Empty
+    /// (the default) disables the export. The files are write-once:
+    /// TongueTyped never reads, monitors, or prunes them again, so they
+    /// persist regardless of the database retention above. No audio is ever
+    /// written.
+    #[serde(default = "default_transcript_folder")]
+    pub transcript_folder: String,
     #[serde(default = "default_false")]
     pub save_recordings: bool,
     #[serde(default)]
@@ -285,9 +301,27 @@ impl Default for HistoryConfig {
         Self {
             enabled: true,
             max_entries: default_max_entries(),
+            max_age_days: default_max_age_days(),
+            transcript_folder: default_transcript_folder(),
             save_recordings: false,
             recording_expiry: RecordingExpiryConfig::default(),
         }
+    }
+}
+
+impl HistoryConfig {
+    /// A one-line summary of the retention limits for the configuration UIs,
+    /// e.g. `100 entries, 30 days`. A zero limit reads as `unlimited`.
+    pub fn retention_summary(&self) -> String {
+        let entries = match self.max_entries {
+            0 => "unlimited entries".to_string(),
+            n => format!("{n} entries"),
+        };
+        let age = match self.max_age_days {
+            0 => "unlimited age".to_string(),
+            n => format!("{n} days"),
+        };
+        format!("{entries}, {age}")
     }
 }
 
@@ -455,7 +489,15 @@ fn default_max_recording_seconds() -> u64 {
 }
 
 fn default_max_entries() -> u64 {
-    500
+    100
+}
+
+fn default_max_age_days() -> u64 {
+    30
+}
+
+fn default_transcript_folder() -> String {
+    String::new()
 }
 
 fn default_recording_expiry_policy() -> RecordingExpiryPolicy {
@@ -664,6 +706,9 @@ impl Config {
         if self.history.save_recordings {
             anyhow::bail!("history.save_recordings is not supported in Stage 1");
         }
+        if self.history.max_age_days > i64::MAX as u64 / 86_400 {
+            anyhow::bail!("history.max_age_days is too large");
+        }
         Ok(())
     }
 }
@@ -726,7 +771,36 @@ mod tests {
         assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
         assert_eq!(config.model.preferred_backend, "auto");
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
-        assert_eq!(config.history.max_entries, 500);
+        assert_eq!(config.history.max_entries, 100);
+        assert_eq!(config.history.max_age_days, 30);
+        assert!(config.history.transcript_folder.is_empty());
+    }
+
+    #[test]
+    fn history_retention_round_trips_and_summarizes() {
+        let config: Config = toml::from_str(
+            "[history]\nmax_entries = 7\nmax_age_days = 3\ntranscript_folder = \"/tmp/tt\"\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.history.max_entries, 7);
+        assert_eq!(config.history.max_age_days, 3);
+        assert_eq!(config.history.transcript_folder, "/tmp/tt");
+        assert_eq!(config.history.retention_summary(), "7 entries, 3 days");
+
+        let unlimited: Config =
+            toml::from_str("[history]\nmax_entries = 0\nmax_age_days = 0\n").unwrap();
+        assert_eq!(
+            unlimited.history.retention_summary(),
+            "unlimited entries, unlimited age"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unrepresentable_history_age() {
+        let mut config = Config::default();
+        config.history.max_age_days = u64::MAX;
+        assert!(config.validate().is_err());
     }
 
     #[test]
