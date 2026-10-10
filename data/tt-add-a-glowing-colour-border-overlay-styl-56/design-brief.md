@@ -38,8 +38,9 @@ size, stretched by the compositor) with a fully transparent centre.
 - Ignores `overlay.position` (there is only one frame); `overlay.monitor` still
   selects the output. Click-through, no keyboard focus, same OSD/notification
   fallback chain on X11 and non-layer-shell compositors.
-- Anchor/size are fixed at first overlay creation, so switching to or from
-  `border` needs a daemon restart, like any other shape-changing style.
+- Anchor/size are fixed at first overlay creation, so the actor recreates the
+  surface when the style's geometry (or `position`/`monitor`) changes; switching
+  to or from `border` applies on the next event, with no daemon restart.
 
 ## Validation
 

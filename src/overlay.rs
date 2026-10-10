@@ -128,6 +128,26 @@ struct Command {
     config: OverlayConfig,
 }
 
+/// The config-derived inputs that fix a layer surface's geometry and placement:
+/// whether it spans the whole output, its requested size, and the anchor
+/// position and output it is bound to.
+#[derive(Debug, PartialEq, Eq)]
+struct LayerSpec {
+    fullscreen: bool,
+    size: (u32, u32),
+    position: String,
+    monitor: String,
+}
+
+fn layer_spec(config: &OverlayConfig, style: Style) -> LayerSpec {
+    LayerSpec {
+        fullscreen: is_fullscreen_style(style),
+        size: surface_size_for(style),
+        position: config.position.clone(),
+        monitor: config.monitor.clone(),
+    }
+}
+
 fn spawn_actor() -> Option<Sender<Command>> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
@@ -194,6 +214,7 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         anim_start: Instant::now(),
         streaming_indicator: false,
         style: Style::Badge,
+        layer_spec: None,
         ticking: false,
         ticking_animated: false,
         timer_generation: 0,
@@ -259,6 +280,7 @@ struct State {
     anim_start: Instant,
     streaming_indicator: bool,
     style: Style,
+    layer_spec: Option<LayerSpec>,
     ticking: bool,
     ticking_animated: bool,
     timer_generation: u64,
@@ -274,8 +296,11 @@ impl State {
         self.streaming_indicator = command.config.streaming_indicator;
         self.style = style_for(&command.config.style);
 
-        if self.layer.is_none() {
+        let spec = layer_spec(&command.config, self.style);
+        if self.layer.is_none() || self.layer_spec.as_ref() != Some(&spec) {
+            self.configured = false;
             self.create_layer(&command.config);
+            self.layer_spec = Some(spec);
         } else {
             // A no-op before the first `configure` arrives: `redraw` guards
             // on `self.configured` itself, and the pending `configure`
@@ -1400,6 +1425,9 @@ fn border_glow(x: f32, y: f32, width: f32, height: f32, pulse: f32) -> f32 {
 
     let core = (short * BORDER_CORE_FRACTION).max(2.0);
     let glow = (short * BORDER_GLOW_FRACTION).max(core + 2.0);
+    if d >= glow * 1.8 {
+        return 0.0;
+    }
     let corner_reach = (short * BORDER_CORNER_REACH_FRACTION).max(core + 2.0);
 
     // Corner proximity: 1 exactly at a corner, falling to 0 beyond
@@ -1560,6 +1588,31 @@ mod tests {
         assert_eq!(anchor_for("bottom-right"), Anchor::BOTTOM | Anchor::RIGHT);
         assert_eq!(anchor_for("center"), Anchor::empty());
         assert_eq!(anchor_for("nonsense"), Anchor::TOP | Anchor::RIGHT);
+    }
+
+    #[test]
+    fn layer_spec_tracks_every_surface_geometry_and_placement_input() {
+        let base = OverlayConfig::default();
+        let base_spec = layer_spec(&base, Style::Badge);
+
+        // A style whose surface geometry differs must yield a different spec,
+        // so a reload recreates the layer instead of painting the new style
+        // into the previous surface's size/anchor.
+        assert_ne!(base_spec, layer_spec(&base, Style::Border));
+        assert_ne!(base_spec, layer_spec(&base, Style::Pill));
+
+        // The anchor (position) and the output (monitor) are baked into the
+        // surface at creation too, so each must move the spec.
+        let mut other_position = base.clone();
+        other_position.position = "bottom-left".into();
+        assert_ne!(base_spec, layer_spec(&other_position, Style::Badge));
+
+        let mut other_monitor = base.clone();
+        other_monitor.monitor = "HDMI-A-1".into();
+        assert_ne!(base_spec, layer_spec(&other_monitor, Style::Badge));
+
+        // An identical config must not force a recreation.
+        assert_eq!(base_spec, layer_spec(&base.clone(), Style::Badge));
     }
 
     #[test]

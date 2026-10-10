@@ -329,10 +329,12 @@ this is (the Handy dictation app's real streaming-transcription overlay inspired
 this - reviewed as Superdesign mockups and approved by the captain - and why a
 literal equivalent isn't buildable without a streaming inference backend this project
 doesn't have). Each `Style` can request a different Wayland surface size
-(`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges) - like
-`position`/`monitor`, that size is fixed at first-ever overlay creation for the
-daemon's lifetime, so a style change that affects surface shape needs a daemon
-restart to take visual effect, exactly like a position/monitor change already does.
+(`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges). A layer
+surface's geometry and placement are fixed at creation, so the actor keeps the
+config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
+`monitor`) and recreates the surface when it changes: an `overlay.style`,
+`position`, or `monitor` change applied via `tonguetyped reload` takes effect on
+the next event, with no daemon restart.
 `border` (the fifth style, captain-requested) is the one exception to the
 small-anchored-badge model: it is a full-screen surface anchored to every edge
 with no margin and a zero requested size (the compositor stretches it to the
