@@ -10,9 +10,9 @@
 //! recording`. "streaming" holds the Recording phase with
 //! `overlay.streaming_indicator` enabled, to preview the live-capture
 //! waveform look instead of the default pulse. Pass a style name
-//! (badge/minimal/pill) as a third argument to preview one of the other two
+//! (badge/minimal/pill/blob) as a third argument to preview one of the other
 //! `overlay.style` looks, e.g. `cargo run --example overlay_preview --
-//! top-right recording pill`.
+//! top-right recording blob`.
 
 use std::thread::sleep;
 use std::time::Duration;

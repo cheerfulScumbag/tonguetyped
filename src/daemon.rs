@@ -223,7 +223,12 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
         Request::Status => CoordinatorCommand::GetStatus,
         Request::ReloadConfig => match Config::reload() {
             Ok(config) => match coordinator.validate_reload(&config).map(|()| config) {
-                Ok(config) => match prepare_dependencies(&config)
+                // Box the reload-only dependency future: it embeds the HTTP
+                // download client's state machine (tens of KiB), and keeping it
+                // inline made `dispatch`'s own future - and every caller that
+                // awaits `dispatch`, including the daemon's per-connection task -
+                // proportionally larger for a branch most requests never take.
+                Ok(config) => match Box::pin(prepare_dependencies(&config))
                     .await
                     .and_then(|()| coordinator.reload_config(config))
                 {
