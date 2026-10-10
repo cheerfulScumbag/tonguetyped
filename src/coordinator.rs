@@ -524,10 +524,11 @@ impl CoordinatorRuntime for ProductionRuntime {
         self.idle_unload.shutdown()?;
         // Release the GPU resources here, on the shutdown thread, while the
         // process is still alive and before `exit()` begins tearing the NVIDIA
-        // driver down. Bounded: if an in-flight transcription still holds the
-        // lock (cancellation never reached it), do not block - the caller exits
-        // without freeing the engine so process teardown cannot race live GPU
-        // work.
+        // driver down. `Coordinator::shutdown` only reaches this once no worker
+        // is active, so the lock is normally free; the bound is a secondary
+        // safety net against a worker racing in after that check. If it still
+        // holds the lock, do not block - the caller exits without freeing the
+        // engine so process teardown cannot race live GPU work.
         match lock_with_timeout(&self.inference, ENGINE_RELEASE_TIMEOUT) {
             Some(mut lifecycle) => {
                 lifecycle.unload();
@@ -859,7 +860,18 @@ impl Coordinator {
     /// thread. Without this, the detached timer thread can free Vulkan buffers
     /// through the NVIDIA driver concurrently with exit-time driver teardown,
     /// which segfaults. See `CoordinatorRuntime::shutdown`.
+    ///
+    /// A worker still active after the daemon's bounded wait is not done: it may
+    /// only be in its VAD phase (which holds no inference lock) and would then
+    /// re-acquire the lock to load the model and run inference. Freeing the
+    /// engine on lock acquisition alone would therefore race that live GPU work,
+    /// so report the error and leave the engine loaded for the caller's
+    /// no-destructor exit.
     pub fn shutdown(&self) -> anyhow::Result<()> {
+        let worker_active = self.state.lock().unwrap().worker_active;
+        if worker_active {
+            anyhow::bail!("a recording/transcription worker is still active");
+        }
         self.runtime.shutdown()
     }
 
