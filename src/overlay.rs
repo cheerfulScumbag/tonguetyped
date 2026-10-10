@@ -787,6 +787,22 @@ fn scale_color(color: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
     (f(color.0), f(color.1), f(color.2))
 }
 
+/// Pushes a phase colour toward the bolder, brighter hue the captain asked the
+/// `Border` style to use: saturation is boosted around the colour's own
+/// luminance and the value is scaled toward full. It only *derives* from the
+/// shared palette (no new hue is introduced), so the border still speaks the
+/// same colour language as the badge styles - a saturated grey just brightens.
+fn bolden(color: (u8, u8, u8)) -> (u8, u8, u8) {
+    let (r, g, b) = (color.0 as f32, color.1 as f32, color.2 as f32);
+    let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    let saturated = |c: f32| (lum + (c - lum) * 1.6).clamp(0.0, 255.0);
+    let (r, g, b) = (saturated(r), saturated(g), saturated(b));
+    let max = r.max(g).max(b).max(1.0);
+    let scale = (255.0 / max).min(1.05);
+    let f = |c: f32| (c * scale).round().clamp(0.0, 255.0) as u8;
+    (f(r), f(g), f(b))
+}
+
 /// Linear blend of two colors, `t = 0` giving `a` and `t = 1` giving `b`.
 fn mix_color(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
     let t = t.clamp(0.0, 1.0);
@@ -1418,10 +1434,10 @@ fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: 
     let width = canvas.width as f32;
     let height = canvas.height as f32;
     let (cx, cy) = (width / 2.0, height / 2.0);
-    let color = phase_color(phase);
-    // The band core is a bright, slightly whitened phase colour; the outward
-    // fringe stays the saturated phase colour, so the edge reads as glowing.
-    let hot = lighten(color, 0.55);
+    // Bolder, brighter hues than the base phase colour (the captain's ask),
+    // with only a light lift on the core so the hue never washes out to white.
+    let color = bolden(phase_color(phase));
+    let hot = lighten(color, 0.28);
     let pulse = 0.7 + 0.3 * (0.5 + 0.5 * (t * TAU).sin());
     let head = t * TAU - PI;
     // The sweep is a recording-only "actively capturing" cue, matching every
@@ -1888,6 +1904,38 @@ mod tests {
             transcribing[index] > transcribing[index + 2],
             "transcribing border should be blue-dominant"
         );
+    }
+
+    #[test]
+    fn border_colours_are_bolder_and_brighter_than_the_base_phase_colour() {
+        // The captain's follow-up: the border should use bolder, brighter hues
+        // than the base phase colour, without dropping the shared hue.
+        let saturation = |c: (u8, u8, u8)| -> f32 {
+            let max = c.0.max(c.1).max(c.2) as f32;
+            let min = c.0.min(c.1).min(c.2) as f32;
+            if max <= 0.0 {
+                0.0
+            } else {
+                (max - min) / max
+            }
+        };
+        for phase in [
+            Phase::Recording,
+            Phase::Transcribing,
+            Phase::Success,
+            Phase::Error,
+        ] {
+            let base = phase_color(phase);
+            let bold = bolden(base);
+            assert!(
+                bold.0.max(bold.1).max(bold.2) >= base.0.max(base.1).max(base.2),
+                "{phase:?}: boldened colour should not get darker ({bold:?} vs {base:?})"
+            );
+            assert!(
+                saturation(bold) >= saturation(base),
+                "{phase:?}: boldened colour should be at least as saturated ({bold:?} vs {base:?})"
+            );
+        }
     }
 
     #[test]
