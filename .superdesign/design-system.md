@@ -91,7 +91,7 @@ redesign must close).
 ## Layout primitives
 
 - **Bordered panel**: `Block::default().borders(Borders::ALL).title(<step
-  name>)` around every content area - the list, the shortcut input, the
+  name>)` around every content area - the list, the shortcut panel, the
   confirmation summary, the download log, the microphone panel.
 - **Selectable list**: one line per option, `"> "` prefix + cyan bold when
   selected, two-space indent + default style otherwise; scrolls via
@@ -113,9 +113,7 @@ redesign must close).
 - **Confirm / advance**: `Enter`, `Right`, or `l`.
 - **Back / cancel current step**: `Esc`, `Left`, or `h` - steps backward
   through a linear wizard; from the first step it exits.
-- **Quit**: `q` - available on every step except while raw text is being typed
-  (the shortcut-capture step treats `q` as a literal character, not a quit key,
-  since the user is typing a keybinding string).
+- **Quit**: `q` - available on every step; no step captures raw text input.
 - **Global cancel**: `Ctrl+C` is caught explicitly and treated as "finish
   cancelled" from any step, bypassing the normal step state machine.
 - **Async work surfaces synchronously in the render loop**: background threads

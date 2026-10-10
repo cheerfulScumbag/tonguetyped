@@ -369,12 +369,12 @@ impl ActivationScreen {
     }
 }
 
-/// The Shortcut screen: an editable keybinding string plus the two actions
-/// that actually talk to the desktop's global-shortcuts portal (test-press
-/// and the native reconfigure dialog). A successful test or dialog saves the
-/// typed binding; merely typing and leaving does not.
+/// The Shortcut screen: the binding the desktop reports and the two actions
+/// that talk to the desktop's global-shortcuts portal. TongueTyped never
+/// picks a key, so setting one always goes through the portal's native
+/// "press your new shortcut" dialog; the test action only confirms that the
+/// already-bound trigger reaches the app.
 pub(super) struct ShortcutScreen {
-    pub input: String,
     pub selected_action: usize,
     pub status: ShortcutStatus,
 }
@@ -387,14 +387,13 @@ pub(super) enum ShortcutStatus {
 }
 
 pub(super) const SHORTCUT_ACTIONS: [&str; 2] = [
-    "Test shortcut - press it now",
-    "Set via system dialog (Ctrl+R)",
+    "Set shortcut via system dialog",
+    "Test current shortcut - press it now",
 ];
 
 impl ShortcutScreen {
-    pub(super) fn new(config: &Config) -> Self {
+    pub(super) fn new(_config: &Config) -> Self {
         Self {
-            input: config.activation.keybind.clone(),
             selected_action: 0,
             status: ShortcutStatus::Idle,
         }
@@ -416,14 +415,13 @@ impl ShortcutScreen {
         )
     }
 
-    pub(super) fn body(&self, keybind_status: &str) -> Paragraph<'static> {
+    pub(super) fn body(&self, bound: &str) -> Paragraph<'static> {
         let mut lines = vec![
-            Line::from(format!("Shortcut: {}_", self.input)),
-            Line::from(if keybind_status == "untested" {
-                "Currently bound: (not confirmed by the desktop yet)".to_string()
-            } else {
-                format!("Currently bound: {keybind_status}")
-            }),
+            Line::from(format!("Currently bound: {bound}")),
+            Line::from(
+                "TongueTyped registers the action with your desktop and never picks a \
+                        key - choose one in the system dialog.",
+            ),
             Line::from(""),
         ];
         for (index, action) in SHORTCUT_ACTIONS.iter().enumerate() {
@@ -441,7 +439,7 @@ impl ShortcutScreen {
 
     pub(super) fn status_line(&self) -> Line<'static> {
         match &self.status {
-            ShortcutStatus::Idle => Line::from("A successful test saves the typed shortcut."),
+            ShortcutStatus::Idle => Line::from("Enter runs the selected action."),
             ShortcutStatus::Testing => Line::from(Span::styled(
                 "Waiting for you to press the shortcut...",
                 Style::default().fg(Color::Yellow),

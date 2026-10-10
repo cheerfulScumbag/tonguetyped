@@ -694,9 +694,6 @@ impl Coordinator {
 
     pub fn validate_reload(&self, config: &Config) -> anyhow::Result<()> {
         config.validate()?;
-        if self.state.lock().unwrap().config.activation.keybind != config.activation.keybind {
-            anyhow::bail!("changing activation.keybind requires a daemon restart");
-        }
         Ok(())
     }
 
@@ -1029,8 +1026,29 @@ impl Coordinator {
         self.last_result.lock().unwrap().clone()
     }
 
-    pub fn activation_keybind(&self) -> String {
-        self.state.lock().unwrap().config.activation.keybind.clone()
+    /// Records the trigger description the desktop reports is bound for the
+    /// activation action, normalized into the app's own wording so the stored
+    /// value matches what both configuration UIs persist. Display-only: the
+    /// daemon never binds from it, and a failed save is logged rather than
+    /// fatal - the in-memory value still reflects reality for this run.
+    pub fn record_activation_binding(&self, reported: String) {
+        let reported = crate::activation::keybind_label(&reported);
+        {
+            let mut inner = self.state.lock().unwrap();
+            if inner.config.activation.keybind == reported {
+                return;
+            }
+            inner.config.activation.keybind = reported.clone();
+        }
+        let persisted = Config::load().and_then(|mut on_disk| {
+            on_disk.activation.keybind = reported;
+            on_disk.save()
+        });
+        if let Err(error) = persisted {
+            tracing::warn!(
+                "could not persist the activation binding reported by the desktop: {error}"
+            );
+        }
     }
 
     pub fn set_runtime_error(&self, error: String) {

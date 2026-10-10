@@ -32,18 +32,22 @@ pub struct Config {
 pub struct ActivationConfig {
     #[serde(default = "default_activation_mode")]
     pub mode: ActivationMode,
-    #[serde(default = "default_keybind")]
+    /// The dictation shortcut the desktop currently has bound for this app,
+    /// as reported by the global-shortcuts portal and normalized into the
+    /// app's own wording (KDE's `Meta+O` is stored as `Super+O`), or empty
+    /// when none is known yet. TongueTyped never chooses or registers a key:
+    /// the binding belongs to the desktop, so this is only the last value the
+    /// portal told us is bound. Render it with
+    /// `crate::activation::keybind_display`, never parse or re-register it.
+    #[serde(default)]
     pub keybind: String,
-    #[serde(default = "default_keybind_status")]
-    pub keybind_status: String,
 }
 
 impl Default for ActivationConfig {
     fn default() -> Self {
         ActivationConfig {
             mode: ActivationMode::Hold,
-            keybind: default_keybind(),
-            keybind_status: default_keybind_status(),
+            keybind: String::new(),
         }
     }
 }
@@ -386,14 +390,6 @@ fn default_activation_mode() -> ActivationMode {
     ActivationMode::Hold
 }
 
-fn default_keybind() -> String {
-    "Super+O".to_string()
-}
-
-fn default_keybind_status() -> String {
-    "untested".to_string()
-}
-
 fn default_active_model() -> String {
     crate::catalog::DEFAULT_MODEL_ID.to_string()
 }
@@ -523,6 +519,50 @@ fn migrate_legacy_model_config(raw: &mut toml::Value) -> bool {
     true
 }
 
+/// Rewrites a config file's legacy `[activation]` table, which used to carry
+/// a second `keybind_status` field alongside `keybind`. TongueTyped no longer
+/// chooses a default key and no longer stores a separate status: `keybind`
+/// now holds only what the desktop reports is bound. Removes `keybind_status`
+/// (so `#[serde(deny_unknown_fields)]` keeps loading old files) and drops a
+/// `keybind` that was never confirmed by the desktop (the old status
+/// `"untested"` meant it was a typed-but-unverified value, never a portal
+/// report). A real reported status is the desktop's own descriptor of what is
+/// bound, so it replaces whatever typed `keybind` sat beside it. Mutates
+/// `raw` in place and returns whether a migration happened.
+fn migrate_legacy_activation_config(raw: &mut toml::Value) -> bool {
+    let Some(activation) = raw
+        .as_table_mut()
+        .and_then(|table| table.get_mut("activation"))
+        .and_then(|activation| activation.as_table_mut())
+    else {
+        return false;
+    };
+    let Some(status) = activation.remove("keybind_status") else {
+        return false;
+    };
+    let reported = status
+        .as_str()
+        .map(str::trim)
+        .filter(|status| !status.is_empty());
+    match reported {
+        Some("untested") | None => {
+            // Never confirmed by the desktop: the value was the old
+            // app-chosen/typed guess, not something bound, so forget it.
+            activation.remove("keybind");
+        }
+        Some(reported) => {
+            // A real descriptor was recorded: it is what the desktop actually
+            // has bound, so it is the source of truth and replaces any old
+            // app-chosen/typed `keybind`.
+            activation.insert(
+                "keybind".to_string(),
+                toml::Value::String(crate::activation::keybind_label(reported)),
+            );
+        }
+    }
+    true
+}
+
 impl Config {
     pub fn config_path() -> anyhow::Result<PathBuf> {
         let dir = directories::BaseDirs::new()
@@ -541,7 +581,8 @@ impl Config {
         }
         let content = fs::read_to_string(&path)?;
         let mut raw: toml::Value = toml::from_str(&content)?;
-        let migrated = migrate_legacy_model_config(&mut raw);
+        let migrated =
+            migrate_legacy_model_config(&mut raw) | migrate_legacy_activation_config(&mut raw);
         let config: Config = raw.try_into()?;
         config.validate()?;
         if migrated {
@@ -558,6 +599,7 @@ impl Config {
         let content = fs::read_to_string(&path)?;
         let mut raw: toml::Value = toml::from_str(&content)?;
         migrate_legacy_model_config(&mut raw);
+        migrate_legacy_activation_config(&mut raw);
         let config: Config = raw.try_into()?;
         config.validate()?;
         Ok(config)
@@ -572,7 +614,6 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        crate::activation::portal_trigger(&self.activation.keybind)?;
         if crate::catalog::find(&self.model.active_model).is_none() {
             anyhow::bail!("unsupported model: {}", self.model.active_model);
         }
@@ -800,6 +841,69 @@ mod tests {
         assert!(!migrate_legacy_model_config(&mut raw));
         let config: Config = raw.try_into().unwrap();
         assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
+    }
+
+    #[test]
+    fn activation_migration_drops_a_never_confirmed_keybind() {
+        // The old `"untested"` status meant the value was a typed guess the
+        // desktop never confirmed, so it must not survive as a binding.
+        let mut raw: toml::Value = toml::from_str(
+            "[activation]\nmode = \"hold\"\nkeybind = \"Super+O\"\nkeybind_status = \"untested\"\n",
+        )
+        .unwrap();
+        assert!(migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "");
+    }
+
+    #[test]
+    fn activation_migration_keeps_a_desktop_reported_binding() {
+        let mut raw: toml::Value =
+            toml::from_str("[activation]\nkeybind = \"Alt+R\"\nkeybind_status = \"Alt+R\"\n")
+                .unwrap();
+        assert!(migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "Alt+R");
+    }
+
+    #[test]
+    fn activation_migration_prefers_the_desktop_reported_status() {
+        // Old configs kept the typed/never-confirmed guess in `keybind` and
+        // the desktop's real report in `keybind_status`; the report is what
+        // was actually bound, so it must win.
+        let mut raw: toml::Value = toml::from_str(
+            "[activation]\nkeybind = \"Super+O\"\nkeybind_status = \"Ctrl+Shift+Space\"\n",
+        )
+        .unwrap();
+        assert!(migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "Ctrl+Shift+Space");
+    }
+
+    #[test]
+    fn activation_migration_normalizes_the_reported_status() {
+        let mut raw: toml::Value =
+            toml::from_str("[activation]\nkeybind_status = \"Meta+O\"\n").unwrap();
+        assert!(migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "Super+O");
+    }
+
+    #[test]
+    fn activation_migration_falls_back_to_the_reported_status() {
+        let mut raw: toml::Value =
+            toml::from_str("[activation]\nkeybind_status = \"Ctrl+Shift+Space\"\n").unwrap();
+        assert!(migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "Ctrl+Shift+Space");
+    }
+
+    #[test]
+    fn activation_migration_is_a_no_op_without_keybind_status() {
+        let mut raw: toml::Value = toml::from_str("[activation]\nkeybind = \"Super+O\"\n").unwrap();
+        assert!(!migrate_legacy_activation_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.activation.keybind, "Super+O");
     }
 
     #[test]

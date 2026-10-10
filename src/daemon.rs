@@ -53,9 +53,8 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let activation = coordinator.clone();
     let activation_status = coordinator.clone();
-    let keybind = activation.activation_keybind();
     tokio::spawn(async move {
-        let listener = tokio::spawn(crate::activation::listen(activation, keybind, ready_tx));
+        let listener = tokio::spawn(crate::activation::listen(activation, ready_tx));
         match ready_rx.await {
             Ok(Ok(())) => activation_status.set_runtime_ready(),
             Ok(Err(error)) => activation_status.set_runtime_error(error),

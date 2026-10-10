@@ -57,8 +57,10 @@ The package installs the binary and the
 The second command installs that same entry in your user autostart directory, so
 KDE starts TongueTyped when you next sign in. Sign out and back in after the
 first installation so the desktop portal discovers the Nix profile application
-entry. KDE displays an authorization dialog for the default `Super+O` shortcut
-when TongueTyped starts.
+entry. TongueTyped registers the "Start or stop dictation" action with your
+desktop but does not choose a shortcut for it: set the key from your desktop's
+own shortcut dialog (or the dashboard's Shortcut screen, which opens it for
+you).
 
 Upgrade the profile package without changing the autostart setting:
 
@@ -100,10 +102,10 @@ console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc
 returns to the previous one, and `q` quits without saving. The microphone step
 shows a live input level meter for whichever microphone is currently
 highlighted after navigation settles, so you can compare devices without
-restarting audio capture for every keypress. On the shortcut step, typing a
-new combination only takes effect the first time a shortcut is ever bound;
-to change an already-bound shortcut, press `Ctrl+R` to open the desktop's
-own native "press your new shortcut" dialog instead. After the model step, the
+restarting audio capture for every keypress. The shortcut step has no key to
+type: TongueTyped registers the dictation action with your desktop and never
+picks a key, so press `Ctrl+R` to set or change it in the desktop's own native
+"press your new shortcut" dialog. After the model step, the
 console fetches the selected GGUF model file if it isn't already installed,
 with progress shown before continuing - the same file every backend (CPU or
 an accelerator) requests, so there is only ever one model to fetch. It then
@@ -135,8 +137,9 @@ entry before requesting shortcut authorization so the desktop portal can
 identify the source build. Starting the daemon downloads the selected GGUF
 model to `$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG
 variables are unset, the standard user config and data directories are used. The
-desktop portal may ask you to approve the configured shortcut, which defaults to
-`Super+O` in hold mode.
+desktop portal may ask you to approve the "Start or stop dictation" action; it
+ships with no default key, so set your own in the desktop's shortcut dialog (the
+dashboard's Shortcut screen opens it).
 
 The default output method is `none`, so transcription does not type or copy
 anything. Retrieve the latest result with:
@@ -150,7 +153,7 @@ transcripts directly. To test typing explicitly, focus a disposable text field
 and run `cargo run -- doctor --test-type`. The regular `doctor` command checks
 the compositor, microphone, model, and typing backends without injecting text
 or requesting shortcut authorization. Run `cargo run -- shortcut-test`
-explicitly, then press the configured shortcut; the command waits up to 15
+explicitly, then press the shortcut you have bound; the command waits up to 15
 seconds and reports whether the press was actually detected.
 
 ## Desktop feedback

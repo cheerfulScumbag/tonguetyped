@@ -253,8 +253,8 @@ struct App {
     command_items: Vec<HomeItem>,
     home_selected: usize,
     pending: Option<PendingAction>,
-    shortcut_test: Option<(String, setup::ShortcutTestHandle)>,
-    shortcut_dialog: Option<(String, setup::ReconfigureHandle)>,
+    shortcut_test: Option<setup::ShortcutTestHandle>,
+    shortcut_dialog: Option<setup::ReconfigureHandle>,
     should_quit: bool,
     daemon_status_cache: Cell<Option<(bool, Instant)>>,
     /// Scroll offset (in wrapped rows) for the current `Screen::Info` pane.
@@ -367,71 +367,44 @@ impl App {
     }
 
     fn poll_shortcut_handles(&mut self) {
-        let test_outcome = self.shortcut_test.as_ref().and_then(|(keybind, handle)| {
-            handle
-                .result
-                .lock()
-                .ok()
-                .and_then(|mut guard| guard.take())
-                .map(|outcome| (keybind.clone(), outcome))
-        });
-        if let Some((keybind, outcome)) = test_outcome {
+        let test_outcome = self
+            .shortcut_test
+            .as_ref()
+            .and_then(|handle| handle.result.lock().ok().and_then(|mut guard| guard.take()));
+        if let Some(outcome) = test_outcome {
             self.shortcut_test = None;
-            self.apply_shortcut_test_outcome(&keybind, outcome);
+            self.apply_shortcut_test_outcome(outcome);
         }
 
-        let dialog_outcome = self.shortcut_dialog.as_ref().and_then(|(keybind, handle)| {
-            handle
-                .result
-                .lock()
-                .ok()
-                .and_then(|mut guard| guard.take())
-                .map(|outcome| (keybind.clone(), outcome))
-        });
-        if let Some((keybind, outcome)) = dialog_outcome {
+        let dialog_outcome = self
+            .shortcut_dialog
+            .as_ref()
+            .and_then(|handle| handle.result.lock().ok().and_then(|mut guard| guard.take()));
+        if let Some(outcome) = dialog_outcome {
             self.shortcut_dialog = None;
-            self.apply_shortcut_dialog_outcome(&keybind, outcome);
+            self.apply_shortcut_dialog_outcome(outcome);
         }
     }
 
     fn apply_shortcut_test_outcome(
         &mut self,
-        submitted_keybind: &str,
         outcome: Result<activation::ShortcutTestOutcome, String>,
     ) {
         let Screen::Shortcut(screen) = &mut self.screen else {
             return;
         };
-        if screen.input.trim() != submitted_keybind {
-            return;
-        }
         match outcome {
             Ok(activation::ShortcutTestOutcome::Pressed) => {
-                // The desktop only listened for presses after actually
-                // binding the shortcut, so a detected press is strong enough
-                // to persist the typed value, same as the console's
-                // shortcut step.
-                let keybind = screen.input.trim().to_string();
-                if keybind != self.config.activation.keybind {
-                    self.config.activation.keybind_status = "untested".to_string();
-                }
-                self.config.activation.keybind = keybind;
-                screen.status = match self.config.save() {
-                    Ok(()) => screens::ShortcutStatus::Message {
-                        text: "shortcut press detected - the binding works".to_string(),
-                        is_error: false,
-                    },
-                    Err(error) => screens::ShortcutStatus::Message {
-                        text: format!(
-                            "shortcut press detected, but saving the configuration failed: {error}"
-                        ),
-                        is_error: true,
-                    },
+                screen.status = screens::ShortcutStatus::Message {
+                    text: "shortcut press detected - the binding works".to_string(),
+                    is_error: false,
                 };
             }
             Ok(activation::ShortcutTestOutcome::TimedOut) => {
                 screen.status = screens::ShortcutStatus::Message {
-                    text: "no shortcut press detected within 15s".to_string(),
+                    text: "no shortcut press detected within 15s - set one with the system \
+                           dialog, then try again"
+                        .to_string(),
                     is_error: true,
                 };
             }
@@ -444,24 +417,19 @@ impl App {
         }
     }
 
-    fn apply_shortcut_dialog_outcome(
-        &mut self,
-        submitted_keybind: &str,
-        outcome: Result<String, String>,
-    ) {
+    fn apply_shortcut_dialog_outcome(&mut self, outcome: Result<String, String>) {
         let Screen::Shortcut(screen) = &mut self.screen else {
             return;
         };
-        if screen.input.trim() != submitted_keybind {
-            return;
-        }
         match outcome {
             Ok(trigger_description) => {
-                self.config.activation.keybind = screen.input.trim().to_string();
-                self.config.activation.keybind_status = trigger_description.clone();
+                self.config.activation.keybind = activation::keybind_label(&trigger_description);
                 screen.status = match self.config.save() {
                     Ok(()) => screens::ShortcutStatus::Message {
-                        text: format!("Shortcut bound: {trigger_description}"),
+                        text: format!(
+                            "Shortcut bound: {}",
+                            activation::keybind_label(&trigger_description)
+                        ),
                         is_error: false,
                     },
                     Err(error) => screens::ShortcutStatus::Message {
@@ -729,11 +697,10 @@ impl App {
         }
     }
 
-    /// The Shortcut screen owns raw text input, so `q` and `j`/`k` are
-    /// literal keybinding characters here (same as the setup console's
-    /// shortcut step) - only the arrow keys, Escape, Enter, Ctrl+R and
-    /// Ctrl+C are commands, and everything is inert while the portal test or
-    /// native dialog is in flight except Escape.
+    /// The Shortcut screen has no editable text: the binding always comes
+    /// from the desktop's own dialog, so the arrow keys, Enter, Ctrl+R,
+    /// Escape and `q` are the only commands, and everything is inert while
+    /// the portal test or native dialog is in flight except Escape.
     fn handle_shortcut_key(&mut self, key: KeyEvent) {
         let busy = matches!(&self.screen, Screen::Shortcut(screen) if screen.is_busy());
         if busy {
@@ -745,6 +712,7 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.screen = Screen::Home,
             KeyCode::Up => {
                 if let Screen::Shortcut(screen) = &mut self.screen {
@@ -756,20 +724,10 @@ impl App {
                     screen.move_selection(1);
                 }
             }
-            KeyCode::Backspace => {
-                if let Screen::Shortcut(screen) = &mut self.screen {
-                    screen.input.pop();
-                }
-            }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.start_shortcut_action(Some(1));
+                self.start_shortcut_action(Some(0));
             }
             KeyCode::Enter => self.start_shortcut_action(None),
-            KeyCode::Char(c) => {
-                if let Screen::Shortcut(screen) = &mut self.screen {
-                    screen.input.push(c);
-                }
-            }
             _ => {}
         }
     }
@@ -778,25 +736,14 @@ impl App {
         let Screen::Shortcut(screen) = &mut self.screen else {
             return;
         };
-        let shortcut = screen.input.trim().to_string();
-        if let Err(error) = activation::portal_trigger(&shortcut) {
-            screen.status = screens::ShortcutStatus::Message {
-                text: format!("Invalid shortcut: {error}"),
-                is_error: true,
-            };
-            return;
-        }
         match action.unwrap_or(screen.selected_action) {
             0 => {
-                screen.status = screens::ShortcutStatus::Testing;
-                self.shortcut_test = Some((shortcut.clone(), setup::shortcut_test_async(shortcut)));
+                screen.status = screens::ShortcutStatus::DialogOpen;
+                self.shortcut_dialog = Some(setup::reconfigure_shortcut_async());
             }
             1 => {
-                screen.status = screens::ShortcutStatus::DialogOpen;
-                self.shortcut_dialog = Some((
-                    shortcut.clone(),
-                    setup::reconfigure_shortcut_async(shortcut),
-                ));
+                screen.status = screens::ShortcutStatus::Testing;
+                self.shortcut_test = Some(setup::shortcut_test_async());
             }
             _ => {}
         }
@@ -950,12 +897,7 @@ impl App {
                 self.spawn_pending("Doctor", doctor_task(config), None);
             }
             "shortcut-test" => {
-                let keybind = self.config.activation.keybind.clone();
-                self.spawn_pending(
-                    "Shortcut test - press it now",
-                    shortcut_test_task(keybind),
-                    None,
-                );
+                self.spawn_pending("Shortcut test - press it now", shortcut_test_task(), None);
             }
             other => unreachable!("dashboard home has no handler for CLI command {other:?}"),
         }
@@ -1110,13 +1052,7 @@ impl App {
                 .capabilities
                 .microphone_label(&self.config.audio.microphone),
             SettingId::Activation => self.config.activation.mode.to_string(),
-            SettingId::Shortcut => {
-                if self.config.activation.keybind_status == "untested" {
-                    self.config.activation.keybind.clone()
-                } else {
-                    self.config.activation.keybind_status.clone()
-                }
-            }
+            SettingId::Shortcut => activation::keybind_display(&self.config.activation.keybind),
             SettingId::TranscriptOutput => match self.config.output.method {
                 OutputMethod::None => "keep in TongueTyped".to_string(),
                 OutputMethod::Type => "type into the focused application".to_string(),
@@ -1336,13 +1272,13 @@ impl App {
             .constraints([Constraint::Min(6), Constraint::Length(1)])
             .split(area);
         frame.render_widget(
-            screen.body(&self.config.activation.keybind_status),
+            screen.body(&activation::keybind_display(
+                &self.config.activation.keybind,
+            )),
             chunks[0],
         );
         frame.render_widget(
-            Paragraph::new(
-                "Type to edit  ↑/↓ choose action  Enter run  Ctrl+R system dialog  Esc back",
-            ),
+            Paragraph::new("↑/↓ choose action  Enter run  Ctrl+R system dialog  Esc back"),
             chunks[1],
         );
     }
@@ -1496,8 +1432,8 @@ async fn doctor_task(config: Config) -> Vec<OutputLine> {
     }
 }
 
-async fn shortcut_test_task(keybind: String) -> Vec<OutputLine> {
-    match activation::test_shortcut_binding(&keybind).await {
+async fn shortcut_test_task() -> Vec<OutputLine> {
+    match activation::test_shortcut_binding().await {
         Ok(activation::ShortcutTestOutcome::Pressed) => vec![OutputLine {
             text: "shortcut press detected - the binding works".to_string(),
             is_error: false,
@@ -1739,60 +1675,46 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_shortcut_action_result_is_never_applied_to_a_different_binding() {
-        use crate::activation::ShortcutTestOutcome;
-
+    fn shortcut_dialog_result_stores_the_desktop_reported_binding() {
         // `save()` validates before it writes, so an out-of-range recording
         // limit makes it fail before it can touch the real config file; the
-        // assertions below are about the in-memory config only.
+        // assertion below is about the in-memory config only.
         let mut config = Config::default();
         config.transcription.max_recording_seconds = 0;
         let mut app = App::new(config);
 
-        // On the Shortcut screen, a test for Super+X is in flight; the user
-        // then leaves with Esc (allowed - the background action just finishes
-        // unobserved).
         app.open_setting(SettingId::Shortcut);
-        if let Screen::Shortcut(screen) = &mut app.screen {
-            screen.input = "Super+X".to_string();
-            screen.status = screens::ShortcutStatus::Testing;
-        }
-        app.shortcut_test = Some((
-            "Super+X".to_string(),
-            setup::ShortcutTestHandle {
-                result: Arc::new(Mutex::new(None)),
-            },
-        ));
-        app.handle_shortcut_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
-        assert!(
-            app.shortcut_test.is_none(),
-            "leaving the Shortcut screen with an action in flight must drop its handle"
-        );
-
-        // Even if a result for Super+X were delivered after re-entering and
-        // editing to Super+Z, it must be discarded rather than binding a
-        // keybind that was never tested.
-        app.open_setting(SettingId::Shortcut);
-        if let Screen::Shortcut(screen) = &mut app.screen {
-            screen.input = "Super+Z".to_string();
-        }
-        app.shortcut_test = Some((
-            "Super+X".to_string(),
-            setup::ShortcutTestHandle {
-                result: Arc::new(Mutex::new(Some(Ok(ShortcutTestOutcome::Pressed)))),
-            },
-        ));
+        app.shortcut_dialog = Some(setup::ReconfigureHandle {
+            result: Arc::new(Mutex::new(Some(Ok("Meta+O".to_string())))),
+        });
         app.poll_shortcut_handles();
 
+        assert!(
+            app.shortcut_dialog.is_none(),
+            "a delivered dialog result must clear the handle"
+        );
         assert_eq!(
             app.config.activation.keybind, "Super+O",
-            "a stale test result must never bind a keybind that was never tested"
+            "the dialog's report is stored in the app's own wording"
         );
+    }
+
+    #[test]
+    fn a_passed_test_never_fabricates_a_binding() {
+        use crate::activation::ShortcutTestOutcome;
+
+        let mut app = App::new(Config::default());
+        app.open_setting(SettingId::Shortcut);
+        app.shortcut_test = Some(setup::ShortcutTestHandle {
+            result: Arc::new(Mutex::new(Some(Ok(ShortcutTestOutcome::Pressed)))),
+        });
+        app.poll_shortcut_handles();
+
         assert!(
-            app.shortcut_test.is_none(),
-            "a delivered result must clear the handle"
+            app.config.activation.keybind.is_empty(),
+            "a detected press confirms the existing binding but never invents one"
         );
+        assert!(app.shortcut_test.is_none());
     }
 
     #[test]
