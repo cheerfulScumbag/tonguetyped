@@ -112,10 +112,11 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     drop(_lock);
     std::fs::remove_file(&sock_path).ok();
     if let Some(error) = release_error {
-        // The engine is still loaded because an in-flight transcription held the
-        // inference lock past the bounded release. Freeing it now would race that
-        // live GPU work and exit-time driver teardown, so exit without running
-        // destructors: the socket is already gone, so `stop`/`restart` proceeds.
+        // The engine is still loaded because a worker is still active after the
+        // bounded wait, or an in-flight transcription held the inference lock
+        // past the bounded release. Freeing it now would race that live GPU work
+        // and exit-time driver teardown, so exit without running destructors: the
+        // socket is already gone, so `stop`/`restart` proceeds.
         tracing::error!(
             "failed to release the inference engine on shutdown ({error}); \
              exiting without freeing it"

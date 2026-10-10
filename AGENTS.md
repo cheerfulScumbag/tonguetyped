@@ -318,15 +318,20 @@ so the native decoder stops between steps. It then waits
 *bounded* (`SHUTDOWN_WORKER_TIMEOUT`) so a worker that ignores cancellation cannot
 hang `stop`/`restart`. Then `daemon::run_daemon`'s accept
 loop (`tokio::select!` against a `tokio::sync::Notify`) stops taking new
-connections, calls `Coordinator::shutdown()` - which stops and JOINS the
+connections, calls `Coordinator::shutdown()` - which refuses while a
+recording/transcription worker is still active (a worker in its VAD phase holds
+no inference lock, yet would still re-acquire it to run inference, so acquiring
+the lock alone must not be read as "done"), and otherwise stops and JOINS the
 detached `tonguetyped-idle-unload` timer thread, then drops the loaded
 inference engine on the shutdown thread with a bounded lock acquisition - releases the instance lock, and only
 then removes the control socket - in that order, since `commands::stop_daemon` treats the socket's
 disappearance as proof the old process (and its lock) is gone, and
-`restart_daemon` chains straight into `spawn_daemon` right after. If that bounded
-engine release cannot acquire the inference lock because a transcription is still
-running, `run_daemon` removes the socket and calls `std::process::exit` *without*
-freeing the engine, so neither the crash below nor an unbounded hang can happen.
+`restart_daemon` chains straight into `spawn_daemon` right after. If
+`Coordinator::shutdown()` returns an error - a worker still active after the
+bounded wait, or the bounded engine release failing to acquire the inference
+lock in time - `run_daemon` removes the socket and calls `std::process::exit`
+*without* freeing the engine, so neither the crash below nor an unbounded hang
+can happen.
 `commands::
 stop_daemon` polls for the socket to actually disappear after sending
 `Shutdown` (so it fails fast with a clear error when no daemon is running,
@@ -356,11 +361,12 @@ NVIDIA driver. Because that thread was never stopped or joined, the daemon could
 and segfaulting (reproduced 10/10 by restarting a Vulkan-loaded daemon;
 coredump shows the idle thread in `ggml_vk_destroy_buffer` and the main thread
 in `__run_exit_handlers`). `Coordinator::shutdown` now makes this deterministic:
-it sends a `Shutdown` command the timer handles before any expiry, joins the
-thread, then drops the engine on the shutting-down thread with a bounded lock
-acquisition (`ENGINE_RELEASE_TIMEOUT`); if that bound expires because a
-transcription still owns the lock, `run_daemon` exits via `std::process::exit`
-without freeing the engine so teardown cannot race live GPU work. `IdleUnloadTimer`'s
+once no worker is active it sends a `Shutdown` command the timer handles before
+any expiry, joins the thread, then drops the engine on the shutting-down thread
+with a bounded lock acquisition (`ENGINE_RELEASE_TIMEOUT`); if a worker is still
+active or that bound expires because a transcription still owns the lock,
+`run_daemon` exits via `std::process::exit` without freeing the engine, so
+teardown cannot race live GPU work. `IdleUnloadTimer`'s
 `Drop` joins as a fallback, and `apply_idle_unload_policy` refuses to re-arm the
 timer once `shutdown_started` is set (the `reload` race). Any new background
 thread that can drop a loaded engine needs the same join-on-shutdown treatment.
