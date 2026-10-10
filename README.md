@@ -173,8 +173,9 @@ feedback_device = "default"
 ```
 
 The visual feedback identifies listening, transcription, completion,
-cancellation, and failure without taking keyboard focus or accepting pointer
-input. It prefers a small, click-through `wlr-layer-shell` overlay badge
+cancellation, failure, and a no-speech outcome (an empty capture that produced
+no text) without taking keyboard focus or accepting pointer input. It prefers
+a small, click-through `wlr-layer-shell` overlay badge
 positioned by `overlay.position` (`top-left`, `top-right`, `bottom-left`,
 `bottom-right`, `top`, `bottom`, or `center`) and `overlay.monitor` (`active`,
 or a specific output name from `tonguetyped doctor`). `overlay.style`
