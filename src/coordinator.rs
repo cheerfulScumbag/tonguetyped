@@ -45,6 +45,10 @@ pub trait CoordinatorRuntime: Send + Sync {
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
         Ok(())
     }
+    /// Abort an in-flight `transcribe` the same way a client `cancel` tears down
+    /// a recording: a cooperative cancellation the inference backend polls, not
+    /// a hard kill. The default is a no-op for runtimes that never run inference.
+    fn cancel_transcription(&self) {}
     fn apply_idle_unload_policy(
         &self,
         _config: &Config,
@@ -86,7 +90,18 @@ struct ProductionRuntime {
     inference: Arc<Mutex<EngineLifecycle<crate::inference::InferenceEngine>>>,
     idle_unload: IdleUnloadTimer,
     shutdown_started: AtomicBool,
+    /// The cancel token of the run currently holding `inference`, published by
+    /// `transcribe` before inference starts. A `cancel` reaches it here instead
+    /// of taking the inference lock (which the in-flight run holds), so
+    /// cancellation never blocks on the very lock it needs to release.
+    cancel_token: Mutex<Option<crate::inference::CancelToken>>,
 }
+
+/// How long `shutdown` waits to acquire the inference lock before giving up and
+/// letting the daemon exit without freeing the engine. Cancellation makes the
+/// normal case finish long before this; the bound is the safety net against a
+/// transcription that ignores cancellation.
+const ENGINE_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct IdleUnloadTimer {
     command_tx: mpsc::Sender<IdleUnloadCommand>,
@@ -236,6 +251,7 @@ impl ProductionRuntime {
             inference,
             idle_unload,
             shutdown_started: AtomicBool::new(false),
+            cancel_token: Mutex::new(None),
         })
     }
 
@@ -433,12 +449,18 @@ impl CoordinatorRuntime for ProductionRuntime {
             "{}@{}",
             config.model.active_model, config.model.preferred_backend
         );
+        // Publish a fresh cancellable run before inference (and before a cold
+        // model load) so a cancel from another thread aborts it instead of
+        // blocking shutdown on the inference lock.
+        let cancel_token = crate::inference::CancelToken::new();
+        *self.cancel_token.lock().unwrap() = Some(cancel_token.clone());
         timings.cold_model_load = !lifecycle.has_model(&engine_key);
         let load_started = Instant::now();
         let engine = match lifecycle.ensure(&engine_key, || {
-            let mut engine = crate::inference::InferenceEngine::new(
+            let mut engine = crate::inference::InferenceEngine::new_with_token(
                 crate::catalog::model_path(&config.model.active_model)?,
                 crate::inference::BackendPreference::parse(&config.model.preferred_backend)?,
+                cancel_token.clone(),
             );
             engine.load()?;
             Ok(engine)
@@ -452,6 +474,9 @@ impl CoordinatorRuntime for ProductionRuntime {
                 };
             }
         };
+        // Cover a reused (already-loaded) engine too: a run always starts from a
+        // freshly installed token, so a stale cancel can never abort it.
+        engine.set_cancel_token(&cancel_token);
         if timings.cold_model_load {
             timings.model_load = load_started.elapsed();
         }
@@ -499,9 +524,48 @@ impl CoordinatorRuntime for ProductionRuntime {
         self.idle_unload.shutdown()?;
         // Release the GPU resources here, on the shutdown thread, while the
         // process is still alive and before `exit()` begins tearing the NVIDIA
-        // driver down.
-        self.inference.lock().unwrap().unload();
-        Ok(())
+        // driver down. Bounded: if an in-flight transcription still holds the
+        // lock (cancellation never reached it), do not block - the caller exits
+        // without freeing the engine so process teardown cannot race live GPU
+        // work.
+        match lock_with_timeout(&self.inference, ENGINE_RELEASE_TIMEOUT) {
+            Some(mut lifecycle) => {
+                lifecycle.unload();
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!(
+                "an in-flight transcription still holds the inference lock; \
+                 leaving the engine loaded so process teardown cannot race it"
+            )),
+        }
+    }
+
+    fn cancel_transcription(&self) {
+        if let Some(token) = self.cancel_token.lock().unwrap().as_ref() {
+            token.cancel();
+        }
+    }
+}
+
+/// Acquire `mutex`, giving up after `timeout`. Used to bound shutdown's engine
+/// release so a wedged in-flight transcription cannot hang daemon `stop`/`restart`
+/// indefinitely.
+fn lock_with_timeout<T>(
+    mutex: &Mutex<T>,
+    timeout: Duration,
+) -> Option<std::sync::MutexGuard<'_, T>> {
+    let deadline = match Instant::now().checked_add(timeout) {
+        Some(deadline) => deadline,
+        None => return mutex.try_lock().ok(),
+    };
+    loop {
+        if let Ok(guard) = mutex.try_lock() {
+            return Some(guard);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -920,6 +984,10 @@ impl Coordinator {
                 self.feedback.send(FeedbackEvent::Cancelled, &inner.config);
                 let timing = inner.active_timing.take();
                 drop(inner);
+                // Reach an in-flight transcription through its cancel token
+                // rather than the inference lock it is holding, so a shutdown
+                // join completes promptly instead of waiting out the inference.
+                self.runtime.cancel_transcription();
                 if let Some(timing) = timing {
                     self.emit_timing(&timing, "cancelled");
                 }

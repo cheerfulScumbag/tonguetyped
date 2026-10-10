@@ -309,18 +309,25 @@ Selecting "Daemon" there instead opens a small `Screen::Daemon` sub-screen
 three operations the CLI exposes, so the dashboard is never missing a way to
 stop or restart a daemon it can start. `Request::Shutdown` (`src/ipc.rs`,
 handled in `daemon::dispatch`) cancels any in-flight recording/processing the same
-way a client `cancel` would (not a hard kill), then waits
-(`Coordinator::wait_for_worker`) for that worker to actually finish before
-replying - so the engine release below can never block on the inference lock an
-in-flight transcription still holds, which would otherwise stall the daemon past
-`stop_daemon`'s fixed socket-poll deadline. Then `daemon::run_daemon`'s accept
+way a client `cancel` would (not a hard kill): `Coordinator::cancel` reaches an
+in-flight transcription through the engine's `transcribe-cpp` `CancelToken`
+(`InferenceEngine::set_cancel_token`, published per run in
+`ProductionRuntime::transcribe`, never through the inference lock the run holds),
+so the native decoder stops between steps. It then waits
+(`Coordinator::wait_for_worker`) for that worker to finish before replying, but
+*bounded* (`SHUTDOWN_WORKER_TIMEOUT`) so a worker that ignores cancellation cannot
+hang `stop`/`restart`. Then `daemon::run_daemon`'s accept
 loop (`tokio::select!` against a `tokio::sync::Notify`) stops taking new
 connections, calls `Coordinator::shutdown()` - which stops and JOINS the
-detached `tonguetyped-idle-unload` timer thread, and only then drops the loaded
-inference engine on the shutdown thread - releases the instance lock, and only
+detached `tonguetyped-idle-unload` timer thread, then drops the loaded
+inference engine on the shutdown thread with a bounded lock acquisition - releases the instance lock, and only
 then removes the control socket - in that order, since `commands::stop_daemon` treats the socket's
 disappearance as proof the old process (and its lock) is gone, and
-`restart_daemon` chains straight into `spawn_daemon` right after. `commands::
+`restart_daemon` chains straight into `spawn_daemon` right after. If that bounded
+engine release cannot acquire the inference lock because a transcription is still
+running, `run_daemon` removes the socket and calls `std::process::exit` *without*
+freeing the engine, so neither the crash below nor an unbounded hang can happen.
+`commands::
 stop_daemon` polls for the socket to actually disappear after sending
 `Shutdown` (so it fails fast with a clear error when no daemon is running,
 instead of hanging) and `restart_daemon` chains that into the existing
@@ -350,7 +357,10 @@ and segfaulting (reproduced 10/10 by restarting a Vulkan-loaded daemon;
 coredump shows the idle thread in `ggml_vk_destroy_buffer` and the main thread
 in `__run_exit_handlers`). `Coordinator::shutdown` now makes this deterministic:
 it sends a `Shutdown` command the timer handles before any expiry, joins the
-thread, then drops the engine on the shutting-down thread; `IdleUnloadTimer`'s
+thread, then drops the engine on the shutting-down thread with a bounded lock
+acquisition (`ENGINE_RELEASE_TIMEOUT`); if that bound expires because a
+transcription still owns the lock, `run_daemon` exits via `std::process::exit`
+without freeing the engine so teardown cannot race live GPU work. `IdleUnloadTimer`'s
 `Drop` joins as a fallback, and `apply_idle_unload_policy` refuses to re-arm the
 timer once `shutdown_started` is set (the `reload` race). Any new background
 thread that can drop a loaded engine needs the same join-on-shutdown treatment.

@@ -20,6 +20,7 @@ struct TestRuntime {
     startup_started: AtomicBool,
     block_transcription: AtomicBool,
     transcription_started: AtomicBool,
+    cancel_stops_transcription: AtomicBool,
     empty_transcript: AtomicBool,
     transcription_error: AtomicBool,
     output_error: AtomicBool,
@@ -237,6 +238,22 @@ impl CoordinatorRuntime for TestRuntime {
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
         let _inference = self.inference_lock.lock().unwrap();
         self.idle_unload_suspensions.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn cancel_transcription(&self) {
+        // A responsive backend aborts an in-flight transcription when the
+        // token is cancelled; only tests that opt in model that, so the rest
+        // keep exercising the manual-release paths.
+        if self.cancel_stops_transcription.load(Ordering::SeqCst) {
+            self.release_transcription();
+        }
+    }
+
+    fn shutdown(&self) -> anyhow::Result<()> {
+        // Mirror `ProductionRuntime`: acquiring the engine lock can only
+        // succeed once no transcription holds it, so this is not vacuous.
+        let _inference = self.inference_lock.lock().unwrap();
         Ok(())
     }
 
@@ -758,6 +775,72 @@ async fn concurrent_shutdown_waiters_both_complete() {
             .unwrap(),
         Response::Ok
     ));
+}
+
+#[tokio::test]
+async fn shutdown_completes_promptly_when_cancellation_reaches_transcription() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    runtime.cancel_stops_transcription.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
+
+    dispatch(&coordinator, Request::Start).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    dispatch(&coordinator, Request::Stop).await;
+    wait_for_flag(&runtime.transcription_started).await;
+
+    // Shutdown's cancel must reach the in-flight transcription, so the request
+    // completes promptly without a manual release.
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        dispatch(&coordinator, Request::Shutdown),
+    )
+    .await
+    .expect("shutdown did not complete promptly after cancelling the transcription");
+    assert!(matches!(response, Response::Ok));
+
+    // With the transcription aborted, the daemon's engine release finds the
+    // inference lock free and completes instead of timing out.
+    let release_coordinator = coordinator.clone();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || release_coordinator.shutdown()),
+    )
+    .await
+    .expect("engine release wedged on the inference lock")
+    .unwrap()
+    .unwrap();
+
+    wait_for_worker_completion(&runtime, owner_count).await;
+}
+
+#[tokio::test]
+async fn shutdown_replies_within_bound_when_transcription_ignores_cancellation() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    // `cancel_stops_transcription` stays false: this transcription never reacts
+    // to the shutdown cancel, so only the bounded wait can release the reply.
+    let _release = TranscriptionReleaseGuard(runtime.clone());
+    let coordinator = coordinator(runtime.clone(), 2);
+
+    dispatch(&coordinator, Request::Start).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    dispatch(&coordinator, Request::Stop).await;
+    wait_for_flag(&runtime.transcription_started).await;
+
+    let start = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch(&coordinator, Request::Shutdown),
+    )
+    .await
+    .expect("shutdown blocked on a transcription that ignores cancellation");
+    assert!(matches!(response, Response::Ok));
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "shutdown waited out the whole transcription instead of its bound"
+    );
 }
 
 #[tokio::test]
