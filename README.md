@@ -179,9 +179,11 @@ a small, click-through `wlr-layer-shell` overlay badge
 positioned by `overlay.position` (`top-left`, `top-right`, `bottom-left`,
 `bottom-right`, `top`, `bottom`, or `center`) and `overlay.monitor` (`active`,
 or a specific output name from `tonguetyped doctor`). `overlay.style`
-(`badge`, `minimal`, `pill`, `blob`, or `border`) picks the overlay's look:
-`border` is a full-screen frame that glows along every screen edge, brightest
-in the corners, and ignores `overlay.position`. `overlay.streaming_indicator`
+(`badge`, `minimal`, `pill`, `blob`, `border`, or `half-circle`) picks the
+overlay's look: `border` is a full-screen frame that glows along every screen
+edge, brightest in the corners, and `half-circle` is a glowing, pulsing
+semicircle resting on the top edge at top-centre; both ignore
+`overlay.position`. `overlay.streaming_indicator`
 (`false` by default) swaps the plain pulsing dot for a busier multi-bar
 animation during recording. `tonguetyped setup`
 prompts for all of these. `zwlr_layer_shell_v1` is a wlroots-originated

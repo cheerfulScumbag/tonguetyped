@@ -333,8 +333,9 @@ period (`BLOB_PULSE_PERIOD`, via the dedicated `blob_breath_fraction`, which kee
 the silhouette's slow breath independent of `animation_fraction`'s faster spinner
 fraction while transcribing), and
 the captain reviewed it through `examples/overlay_style_png.rs` - an offline
-renderer (no compositor needed) that dumps every style/phase plus blob/border
-animation frames to PNGs by calling the public `overlay::render_frame_pixels`.
+renderer (no compositor needed) that dumps every style/phase plus blob/border/
+half-circle animation frames to PNGs by calling the public
+`overlay::render_frame_pixels`.
 Use it for any future overlay look, and note the canvas is wl_shm Argb8888
 (little-endian BGRA), so the example swaps channels when writing PNG.
 `streaming_indicator` is a *synthetic* busier waveform animation (driven by the same
@@ -352,7 +353,7 @@ config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
 `monitor`) and recreates the surface when it changes: an `overlay.style`,
 `position`, or `monitor` change applied via `tonguetyped reload` takes effect on
 the next event, with no daemon restart.
-`border` (the fifth style, captain-requested) is the one exception to the
+`border` (the fifth style, captain-requested) is an exception to the
 small-anchored-badge model: it is a full-screen surface anchored to every edge
 with no margin and a zero requested size (the compositor stretches it to the
 output and reports the real dimensions via `configure`), so
