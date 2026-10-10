@@ -390,11 +390,12 @@ pub struct OverlayConfig {
     pub streaming_indicator: bool,
     // The overlay looks reviewed as Superdesign mockups and approved by the
     // captain (originally `badge`, `minimal`, `pill`; `blob` was added later
-    // as a captain-requested pulsating plasma look, and `border` as a
+    // as a captain-requested pulsating plasma look, `border` as a
     // captain-requested full-screen edge glow that is strongest in the
-    // corners); `src/overlay.rs::style_for` parses this, falling back to
-    // `badge` for an unrecognized value exactly like `anchor_for` falls back
-    // on `position`.
+    // corners, and `half-circle` as a captain-requested glowing, pulsing
+    // semicircle resting on the top edge); `src/overlay.rs::style_for` parses
+    // this, falling back to `badge` for an unrecognized value exactly like
+    // `anchor_for` falls back on `position`.
     #[serde(default = "default_overlay_style")]
     pub style: String,
 }
