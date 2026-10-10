@@ -18,7 +18,14 @@ use std::path::{Path, PathBuf};
 use tonguetyped::overlay::render_frame_pixels;
 
 const STYLES: [&str; 5] = ["badge", "minimal", "pill", "blob", "border"];
-const PHASES: [&str; 5] = ["recording", "transcribing", "success", "cancelled", "error"];
+const PHASES: [&str; 6] = [
+    "recording",
+    "transcribing",
+    "success",
+    "no-speech",
+    "cancelled",
+    "error",
+];
 
 fn main() -> std::io::Result<()> {
     let out = std::env::args()

@@ -4,7 +4,7 @@
 //! a screenshot script) can confirm placement and appearance on a given
 //! compositor, without needing a microphone or a downloaded Whisper model.
 //! Run with `cargo run --example overlay_preview -- top-left`.
-//! Pass a state name (recording/transcribing/success/cancelled/error/
+//! Pass a state name (recording/transcribing/success/no-speech/cancelled/error/
 //! streaming) as a second argument to hold on just that one state for 30s,
 //! e.g. for screenshotting: `cargo run --example overlay_preview -- top-right
 //! recording`. "streaming" holds the Recording phase with
@@ -55,6 +55,7 @@ fn main() {
             }
             "transcribing" => FeedbackEvent::Processing,
             "success" => FeedbackEvent::Success,
+            "no-speech" => FeedbackEvent::NoSpeech,
             "cancelled" => FeedbackEvent::Cancelled,
             "error" => FeedbackEvent::Error,
             other => {

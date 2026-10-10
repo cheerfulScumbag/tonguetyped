@@ -86,6 +86,19 @@ pub struct TranscriptionAttempt {
     pub timings: TranscriptionTimings,
 }
 
+/// The feedback event a completed dictation reports. An `"empty"` result means
+/// the captured audio contained no speech (a muted, unplugged, or wrong input
+/// device), so it gets a distinct cue instead of the generic success - without
+/// this the user sees a normal "Ready" flash and never learns why nothing was
+/// typed. Every other outcome typed text and reports success.
+fn completion_feedback_event(outcome: &str) -> FeedbackEvent {
+    if outcome == "empty" {
+        FeedbackEvent::NoSpeech
+    } else {
+        FeedbackEvent::Success
+    }
+}
+
 struct ProductionRuntime {
     inference: Arc<Mutex<EngineLifecycle<crate::inference::InferenceEngine>>>,
     idle_unload: IdleUnloadTimer,
@@ -1212,7 +1225,8 @@ impl Coordinator {
             inner.state = State::Idle;
             inner.signal_tx = None;
             inner.active_timing = None;
-            self.feedback.send(FeedbackEvent::Success, &inner.config);
+            self.feedback
+                .send(completion_feedback_event(outcome), &inner.config);
             drop(inner);
             self.emit_timing(timing, outcome);
         }

@@ -138,6 +138,22 @@ nothing on screen while recording. Changing the Rust default does not touch an
 already-written `config.toml`; `tonguetyped setup` is how an existing install picks
 up the new default.
 
+A dictation whose transcript is empty (only silence captured - a muted, unplugged,
+or wrong input device) is reported with its own `FeedbackEvent::NoSpeech` /
+overlay `Phase::NoSpeech` (amber, a slashed-microphone glyph across every style)
+instead of the generic `Success`, via `coordinator::completion_feedback_event`
+(`src/coordinator.rs`); the OSD/notification fallback says "No speech detected".
+Before this the VAD-correct "empty" outcome flashed a normal "Ready" and typed
+nothing, so a silent microphone was a silent no-op. `feedback.rs`'s
+`event_style` owns the icon/sound/message per event and
+`tests/coordinator_ipc.rs::empty_transcript_reports_a_no_speech_cue_instead_of_success`
+pins the behavior end-to-end through `dispatch`. To check whether this user's
+`microphone = "default"` is actually capturing, record it
+(`arecord -D default -f S16_LE -r 16000 -c 1 -d 2 /tmp/x.wav`) and measure with
+`ffmpeg -i /tmp/x.wav -af volumedetect -f null /dev/null`: a mean/max around
+-91 dB is digital silence (PipeWire routing `default` to a muted or wrong source),
+not a TongueTyped bug - pick the real device in the dashboard/setup mic list.
+
 `output::type_text`'s `typing_backend = "auto"` path now caches which helper
 (`wtype`/`enigo`/`dotool`) actually works via `output::cached_auto_backend`
 (`OnceLock`, same probe-then-cache shape as the inference and overlay probes above) -

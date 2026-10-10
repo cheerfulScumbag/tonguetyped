@@ -9,6 +9,11 @@ pub enum FeedbackEvent {
     Recording,
     Processing,
     Success,
+    /// The dictation finished but produced no text: the microphone captured
+    /// only silence (muted, unplugged, or pointed at a zero-sample source), so
+    /// VAD rejected everything. Distinct from `Success` so a silent no-op
+    /// still shows the user why nothing was typed.
+    NoSpeech,
     Cancelled,
     Error,
 }
@@ -183,6 +188,12 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
             "low",
         ),
         FeedbackEvent::Success => ("emblem-ok-symbolic", "complete", "Ready", "low"),
+        FeedbackEvent::NoSpeech => (
+            "audio-input-microphone-muted-symbolic",
+            "bell",
+            "No speech detected",
+            "normal",
+        ),
         FeedbackEvent::Cancelled => (
             "process-stop-symbolic",
             "dialog-warning",
@@ -217,6 +228,7 @@ mod tests {
             FeedbackEvent::Recording,
             FeedbackEvent::Processing,
             FeedbackEvent::Success,
+            FeedbackEvent::NoSpeech,
             FeedbackEvent::Cancelled,
             FeedbackEvent::Error,
         ];

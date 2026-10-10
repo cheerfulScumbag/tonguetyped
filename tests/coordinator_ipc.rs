@@ -664,6 +664,36 @@ async fn feedback_tracks_successful_state_transitions_once() {
 }
 
 #[tokio::test]
+async fn empty_transcript_reports_a_no_speech_cue_instead_of_success() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.empty_transcript.store(true, Ordering::SeqCst);
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime, feedback.clone());
+
+    assert!(matches!(
+        dispatch(&coordinator, Request::Start).await,
+        Response::RecordingStarted
+    ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Stop).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
+
+    // A silent/empty capture is the exact "muted microphone saved nothing"
+    // failure: the user must see a distinct cue rather than a success flash.
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![
+            FeedbackEvent::Recording,
+            FeedbackEvent::Processing,
+            FeedbackEvent::NoSpeech,
+        ]
+    );
+}
+
+#[tokio::test]
 async fn shutdown_cancels_in_flight_recording_and_reports_ok() {
     let runtime = Arc::new(TestRuntime::default());
     let coordinator = coordinator(runtime.clone(), 2);
