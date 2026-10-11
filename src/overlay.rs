@@ -427,7 +427,7 @@ impl State {
     /// outputs the compositor currently reports: creates a surface for every
     /// desired output that lacks one, and drops surfaces whose output is no
     /// longer desired. Called on every command and whenever an output is
-    /// added, removed, or updated.
+    /// added or updated.
     fn reconcile_surfaces(&mut self) {
         let target = self.target.clone();
         let outputs: Vec<wl_output::WlOutput> = self.output_state.outputs().collect();
@@ -828,9 +828,14 @@ impl OutputHandler for State {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
+        // smithay-client-toolkit calls this before removing the output from
+        // `OutputState`, so `output_state.outputs()` still lists it here;
+        // reconciling would bind a fresh surface to a wl_output the compositor
+        // is destroying. Removal only drops surfaces - creation on an output
+        // change is handled by `new_output`/`update_output`, which see a
+        // consistent output list.
         self.surfaces
             .retain(|surface| surface.output.as_ref() != Some(&output));
-        self.on_outputs_changed();
     }
 }
 
