@@ -355,9 +355,10 @@ at silence; with it off the badge/minimal/pill pulses still follow
 `recording_level`'s envelope, so silence is calm and loud speech a bigger
 response either way. The blob never draws bars (the captain removed them): its
 own body carries the reaction - `blob_edge` keeps the slow calm breath always
-present, then adds a level-scaled size and a faster wiggle (loud = bigger and
-wigglier, silence = slow calm breathing), and the halo brightens with the
-level; it therefore ignores `live_waveform` entirely. The border/half-circle
+present, then adds a level-scaled body swell and narrow radial spikes
+(`blob_spikes`) so voice peaks become sharp protrusions radiating from the body
+(loud = tall spikes, silence = a soft, round ball), and the halo brightens with
+the level; it therefore ignores `live_waveform` entirely. The border/half-circle
 sweeps also scale with `recording_level`. `HalfCircle`'s `half_circle_profile`
 and the bar geometry are unchanged; the level only scales their amplitudes. Each
 `Style` can request a different Wayland surface size (`overlay::surface_size_for`;

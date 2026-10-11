@@ -56,9 +56,10 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_handlers};
 
 const BADGE: u32 = 56;
-/// The `Blob` style's square surface, larger than `BADGE` so its glow has room
-/// to fall off to nothing before the surface edge (see `paint_blob`).
-const BLOB_SURFACE: u32 = BADGE * 3 / 2;
+/// The `Blob` style's square surface, larger than `BADGE` so its glow - and
+/// the spikes its voice response grows - has room to fade out before the
+/// surface edge (see `paint_blob`/`blob_edge`).
+const BLOB_SURFACE: u32 = 96;
 /// The `LongPill` style's surface: a wide bar whose 8:1 width-to-height ratio
 /// matches the captain's reference (a 944x121 bar, see
 /// `data/tt-pill-overlay-live-microphone-waveform-re-23/reference-long-pill.png`).
@@ -1110,21 +1111,35 @@ fn fill_capsule(
 
 /// The outline of the `Style::Blob` silhouette at `angle`, time `t`, moved by
 /// the live voice level `lf`. The calm slow breath and a faint organic sway are
-/// always present, so silence is a gently breathing orb; the voice adds a
-/// faster, higher-frequency wiggle and swells the whole silhouette (louder =
-/// bigger and wigglier). The amplitudes are bounded so the silhouette plus its
-/// halo always fades out before the surface edge (see `paint_blob` and
-/// `surface_size_for`): at full level the edge reaches `radius * 1.33`.
+/// always present, so silence is a soft, round, gently breathing orb; the voice
+/// makes the body swell slightly and sprouts sharp radial spikes - the louder
+/// the level, the longer the spikes (see `blob_spikes`). The amplitudes are
+/// bounded so the silhouette plus its halo always fades out before the surface
+/// edge (see `paint_blob` and `surface_size_for`): at full level the edge
+/// reaches `radius * 1.61`.
 fn blob_edge(radius: f32, angle: f32, t: f32, lf: f32) -> f32 {
     use std::f32::consts::TAU;
     let breathe = 0.05 * (t * TAU).sin();
     let sway = 0.02 * (2.0 * angle - t * TAU).sin() + 0.01 * (3.0 * angle + t * TAU).sin();
-    // Integer multiples of `TAU` in `t` keep every term periodic across the
-    // breath cycle wrap; the multipliers only make the voice wiggle faster.
-    let wiggle = lf
-        * (0.035 * (4.0 * angle + t * TAU * 2.0).sin()
-            + 0.025 * (6.0 * angle - t * TAU * 3.0).sin());
-    radius * (1.0 + 0.16 * lf) * (1.0 + breathe + sway + wiggle)
+    radius * (1.0 + 0.10 * lf) * (1.0 + breathe + sway) + radius * lf * blob_spikes(angle, t)
+}
+
+/// The blob's spiky voice response at `angle` and time `t`, in units of the
+/// blob's radius: two counter-rotating sets of narrow, high-power lobes, so
+/// voice peaks become sharp spikes radiating from the body rather than a
+/// smooth lumpy wobble. Both sets rotate on integer multiples of the breath
+/// cycle (keeping the silhouette periodic across the breath wrap), and the
+/// caller scales the whole response by the live level so silence leaves a
+/// round ball.
+fn blob_spikes(angle: f32, t: f32) -> f32 {
+    use std::f32::consts::TAU;
+    let lobes = |count: f32, phase: f32, spin: f32, power: i32| -> f32 {
+        let wave = 0.5 + 0.5 * (count * angle + phase + t * TAU * spin).cos();
+        wave.powi(power)
+    };
+    // 5 slow lobes plus 8 faster counter-rotating ones: the two sets rarely
+    // peak together, so the corona breathes unevenly like a rough flame.
+    0.26 * lobes(5.0, 0.0, 1.0, 20) + 0.16 * lobes(8.0, 1.7, -2.0, 24)
 }
 
 /// Blends `color` toward white by `amount` (0..1) - used for the blob's bright
@@ -1930,19 +1945,19 @@ fn long_pill_trace_sample(envelope: f32, i: usize) -> f32 {
 /// (`breath`, derived from `BLOB_PULSE_PERIOD`), with a soft metallic sheen (a
 /// gentle dome highlight and a bright rim) keeping it feeling like liquid metal
 /// rather than a flat disc. The live voice level (`levels`) moves the body
-/// itself - loud speech makes it visibly bigger and wigglier, normal speech
-/// wiggles less, and silence settles back into the slow, calm breathing (no bar
-/// waveform is drawn inside it; see `blob_edge` and the captain's review in
-/// `data/tt-pill-overlay-live-microphone-waveform-re-23/`). The halo brightens
-/// with the voice too. The `Transcribing` spinner glyph advances on the faster
-/// fraction `t` independently, so the silhouette keeps breathing slowly while
-/// the spinner turns. A white glyph carries the state for the terminal phases;
-/// those phases are simply static (`breath` is 0 once the animation stops),
-/// which is why the blob sits still for them.
+/// itself - voice peaks sprout sharp spikes from the body and swell it
+/// slightly, while silence settles back into a soft, round, slowly breathing
+/// ball (no bar waveform is drawn inside it; see `blob_edge`/`blob_spikes` and
+/// the captain's review in `data/tt-pill-overlay-live-microphone-waveform-re-23/`).
+/// The halo brightens with the voice too. The `Transcribing` spinner glyph
+/// advances on the faster fraction `t` independently, so the silhouette keeps
+/// breathing slowly while the spinner turns. A white glyph carries the state
+/// for the terminal phases; those phases are simply static (`breath` is 0 once
+/// the animation stops), which is why the blob sits still for them.
 fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &LevelHistory) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
-    let radius = canvas.width.min(canvas.height) as f32 * 0.30;
+    let radius = canvas.width.min(canvas.height) as f32 * 0.26;
     let color = phase_color(phase);
     let lf = recording_level(levels);
     // A bright body with an even brighter inner glow and a near-white sheen,
@@ -1954,11 +1969,11 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
     // Light and its half-vector (view direction is +z), for the specular dot.
     let (lx, ly, lz) = normalize3(-0.45, -0.68, 0.58);
     let (hx, hy, hz) = normalize3(lx, ly, lz + 1.0);
-    let halo_width = radius * 0.22;
+    let halo_width = radius * 0.18;
     // The halo is dim and steady at silence and flares with the voice.
     let halo_strength = 0.08 + 0.14 * lf;
 
-    let outer = radius * 1.2 + halo_width + 2.0;
+    let outer = radius * 1.7 + halo_width + 2.0;
     let min_x = (cx - outer).floor().max(0.0) as i32;
     let max_x = (cx + outer).ceil().min(canvas.width as f32) as i32;
     let min_y = (cy - outer).floor().max(0.0) as i32;
@@ -3083,10 +3098,10 @@ mod tests {
                 (x - proj_x).powi(2) + (y - cy).powi(2) <= half_height * half_height
             }
             Style::Blob => {
-                // The blob's breath and voice wiggle can push its edge out to
-                // 1.33x the nominal radius, and the glow halo adds a further
-                // 0.22x, so treat ~1.6x as the shape's outer bound.
-                let outer = width.min(height) as f32 * 0.30 * 1.6;
+                // The blob's breath, voice spike and glow can push its edge out
+                // to about 1.79x the nominal radius (1.61x silhouette plus the
+                // 0.18x halo), so treat 1.8x as the shape's outer bound.
+                let outer = width.min(height) as f32 * 0.26 * 1.8;
                 (x - cx).powi(2) + (y - cy).powi(2) <= outer * outer
             }
             Style::Border => {
@@ -3553,6 +3568,57 @@ mod tests {
         assert!(
             envelope_jump < raw_jump / 4.0,
             "the envelope should smooth the raw jolts ({envelope_jump} vs {raw_jump})"
+        );
+    }
+
+    #[test]
+    fn blob_spikes_on_voice_peaks_and_stays_a_soft_ball_in_silence() {
+        let radius = 25.0;
+        let samples = 720;
+        let edge_stats = |lf: f32| -> (f32, f32) {
+            let mut max = 0.0f32;
+            let mut total = 0.0f32;
+            let mut count = 0.0f32;
+            for step in 0..8 {
+                let t = step as f32 / 8.0;
+                for i in 0..samples {
+                    let angle = i as f32 / samples as f32 * std::f32::consts::TAU;
+                    let edge = blob_edge(radius, angle, t, lf);
+                    max = max.max(edge);
+                    total += edge;
+                    count += 1.0;
+                }
+            }
+            (max, total / count)
+        };
+        let (quiet_max, quiet_mean) = edge_stats(0.0);
+        let (loud_max, loud_mean) = edge_stats(1.0);
+
+        // Silence: a soft, round ball - the silhouette never strays far from
+        // the body radius.
+        assert!(
+            quiet_max <= radius * 1.09,
+            "silence should stay round, got max {quiet_max}"
+        );
+        assert!(
+            (quiet_mean - radius).abs() < radius * 0.05,
+            "silence should average the body radius, got {quiet_mean}"
+        );
+
+        // Voice peaks: long sharp spikes - the silhouette reaches well past
+        // the body, while the average stays close to it (the spikes are
+        // narrow rather than a lumpy swell).
+        assert!(
+            loud_max >= radius * 1.4,
+            "voice peaks should sprout long spikes, got max {loud_max}"
+        );
+        assert!(
+            loud_mean < radius * 1.3,
+            "the spikes should be narrow, got mean {loud_mean}"
+        );
+        assert!(
+            loud_max > quiet_max + radius * 0.3,
+            "spikes should protrude when the voice is loud ({loud_max} vs {quiet_max})"
         );
     }
 
