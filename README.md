@@ -247,10 +247,17 @@ and a no-speech outcome (an empty capture). `overlay.style` picks the look:
 | --- | --- |
 | `badge` | The default small rounded badge with an icon and phase colour |
 | `minimal` | A bare dot, no chrome |
-| `pill` | A wider pill-shaped badge |
+| `pill` | A wider pill-shaped badge with a live microphone waveform |
 | `blob` | A bright, glowing orb that slowly breathes |
 | `half-circle` | A gleaming semicircle docked to the top-centre edge |
 | `border` | A full-screen frame that glows along every edge, brightest in the corners |
+
+Every style's recording animation follows your live microphone level: `badge`,
+`minimal`, `pill`, and `blob` show a scrolling multi-bar waveform when
+`overlay.live_waveform` is on (the default), or a pulsing dot that swells with
+your voice when it is off, and `border`/`half-circle` pulse and sweep with it.
+Loud speech is a big response; silence is calm, with the waveform's quiet
+stretches rendered as tiny dots.
 
 `border` and `half-circle` ignore `overlay.position`; the other styles honour
 `overlay.position` (`top-left`, `top-right`, `bottom-left`, `bottom-right`,
@@ -269,14 +276,15 @@ notification - in that fallback tier your desktop controls placement, so
 `overlay.position` and `overlay.monitor` no longer apply. Run `tonguetyped
 doctor` to see which tier is active.
 
-`overlay.streaming_indicator` (`false` by default) adds a busier animation
-during recording. Enable sound feedback separately:
+`overlay.live_waveform` (`true` by default) picks the busier recording glyph:
+the live multi-bar microphone waveform instead of the simple pulsing dot.
+Enable sound feedback separately:
 
 ```toml
 [overlay]
 enabled = true
-style = "blob"
-streaming_indicator = false
+style = "pill"
+live_waveform = true
 
 [audio]
 feedback_sounds = true

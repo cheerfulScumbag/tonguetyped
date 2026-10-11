@@ -2,6 +2,7 @@ use anyhow::Context;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use rubato::{FftFixedIn, Resampler};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -339,6 +340,26 @@ fn compute_rms(samples: &[f32]) -> f32 {
     let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
     let mean_sq = sum_sq / samples.len() as f32;
     mean_sq.sqrt()
+}
+
+/// The newest microphone RMS level, published from the audio-capture thread by
+/// the recording path. The overlay actor reads it to make the recording
+/// animation react to the live voice. A process-global is enough here because
+/// the recorder and the overlay actor always live in the same process (the
+/// daemon); a plain relaxed atomic keeps the capture callback free of locks.
+static LIVE_LEVEL: AtomicU32 = AtomicU32::new(0);
+
+/// Publishes the newest microphone RMS level for the overlay's live
+/// reactivity. Called once per captured audio block, so it must stay cheap.
+pub fn publish_level(level: f32) {
+    LIVE_LEVEL.store(level.to_bits(), Ordering::Relaxed);
+}
+
+/// The newest published microphone RMS level (`0.0` when nothing has published
+/// yet). The overlay samples this on its repaint cadence rather than reacting
+/// to every audio block individually.
+pub fn latest_level() -> f32 {
+    f32::from_bits(LIVE_LEVEL.load(Ordering::Relaxed))
 }
 
 /// Maps a raw RMS level to the 0..1 fraction an input-level gauge shows,

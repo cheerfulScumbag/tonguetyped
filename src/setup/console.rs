@@ -2,8 +2,8 @@ use super::{Capabilities, ModelRequirement, ProvisionHandle, ReconfigureHandle, 
 use crate::audio::{self, level_to_ratio};
 use crate::config::{ActivationMode, Config, OutputMethod};
 use crate::overlay::{
-    POSITION_VALUES as OVERLAY_POSITION_VALUES, STREAMING_LABELS as OVERLAY_STREAMING_LABELS,
-    STYLE_LABELS as OVERLAY_STYLE_LABELS, STYLE_VALUES as OVERLAY_STYLE_VALUES,
+    POSITION_VALUES as OVERLAY_POSITION_VALUES, STYLE_LABELS as OVERLAY_STYLE_LABELS,
+    STYLE_VALUES as OVERLAY_STYLE_VALUES, WAVEFORM_LABELS as OVERLAY_WAVEFORM_LABELS,
 };
 use crate::text_input::TextField;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -50,7 +50,7 @@ enum StepKind {
     OverlayEnabled,
     OverlayPosition,
     OverlayStyle,
-    OverlayStreaming,
+    OverlayWaveform,
     Confirm,
 }
 
@@ -107,7 +107,7 @@ struct ConsoleState {
     overlay_enabled_selection: usize,
     overlay_position_selection: usize,
     overlay_style_selection: usize,
-    overlay_streaming_selection: usize,
+    overlay_waveform_selection: usize,
     shortcut_handle: Option<ReconfigureHandle>,
     shortcut_feedback: Option<Result<String, String>>,
     error: Option<String>,
@@ -178,7 +178,7 @@ impl ConsoleState {
             .iter()
             .position(|value| *value == config.overlay.style)
             .unwrap_or(0);
-        let overlay_streaming_selection = usize::from(config.overlay.streaming_indicator);
+        let overlay_waveform_selection = usize::from(config.overlay.live_waveform);
 
         Self {
             config,
@@ -201,7 +201,7 @@ impl ConsoleState {
             overlay_enabled_selection,
             overlay_position_selection,
             overlay_style_selection,
-            overlay_streaming_selection,
+            overlay_waveform_selection,
             shortcut_handle: None,
             shortcut_feedback: None,
             error: None,
@@ -404,7 +404,7 @@ impl ConsoleState {
             StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
             StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
             StepKind::OverlayStyle => OVERLAY_STYLE_VALUES.len(),
-            StepKind::OverlayStreaming => OVERLAY_STREAMING_LABELS.len(),
+            StepKind::OverlayWaveform => OVERLAY_WAVEFORM_LABELS.len(),
             StepKind::Shortcut
             | StepKind::Confirm
             | StepKind::Downloading
@@ -425,7 +425,7 @@ impl ConsoleState {
             StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
             StepKind::OverlayPosition => &mut self.overlay_position_selection,
             StepKind::OverlayStyle => &mut self.overlay_style_selection,
-            StepKind::OverlayStreaming => &mut self.overlay_streaming_selection,
+            StepKind::OverlayWaveform => &mut self.overlay_waveform_selection,
             StepKind::Shortcut
             | StepKind::Confirm
             | StepKind::Downloading
@@ -440,7 +440,7 @@ impl ConsoleState {
         self.output_selection == 1 && self.capabilities.has_type_backend()
     }
 
-    /// The overlay's position/streaming sub-steps are only worth configuring
+    /// The overlay's position/waveform sub-steps are only worth configuring
     /// once the overlay itself is enabled - mirrors `has_backend_step`'s
     /// pattern of skipping a sub-step whose parent choice ruled it out.
     fn overlay_options_shown(&self) -> bool {
@@ -473,7 +473,7 @@ impl ConsoleState {
         if self.overlay_options_shown() {
             steps.push(OverlayPosition);
             steps.push(OverlayStyle);
-            steps.push(OverlayStreaming);
+            steps.push(OverlayWaveform);
         }
         steps.push(Confirm);
         steps
@@ -598,8 +598,8 @@ impl ConsoleState {
                 self.config.overlay.style =
                     OVERLAY_STYLE_VALUES[self.overlay_style_selection].to_string();
             }
-            StepKind::OverlayStreaming => {
-                self.config.overlay.streaming_indicator = self.overlay_streaming_selection == 1;
+            StepKind::OverlayWaveform => {
+                self.config.overlay.live_waveform = self.overlay_waveform_selection == 1;
             }
             StepKind::Downloading => {}
             StepKind::Confirm => unreachable!("confirm handled separately"),
@@ -716,7 +716,7 @@ impl ConsoleState {
             StepKind::OverlayEnabled => "Overlay",
             StepKind::OverlayPosition => "Overlay position",
             StepKind::OverlayStyle => "Overlay style",
-            StepKind::OverlayStreaming => "Overlay streaming",
+            StepKind::OverlayWaveform => "Overlay waveform",
             StepKind::Confirm => "Review",
         }
     }
@@ -888,10 +888,10 @@ impl ConsoleState {
                 ),
                 area,
             ),
-            StepKind::OverlayStreaming => frame.render_widget(
+            StepKind::OverlayWaveform => frame.render_widget(
                 list_paragraph(
-                    &OVERLAY_STREAMING_LABELS.map(String::from),
-                    self.overlay_streaming_selection,
+                    &OVERLAY_WAVEFORM_LABELS.map(String::from),
+                    self.overlay_waveform_selection,
                     self.step_title(),
                     area.height,
                 ),
@@ -1212,8 +1212,8 @@ impl ConsoleState {
                         "enabled, {}, {} style, {}",
                         self.config.overlay.position,
                         self.config.overlay.style,
-                        if self.config.overlay.streaming_indicator {
-                            "streaming waveform"
+                        if self.config.overlay.live_waveform {
+                            "live waveform"
                         } else {
                             "simple pulse"
                         }
@@ -1363,12 +1363,12 @@ mod tests {
         assert_eq!(
             state.step,
             StepKind::Confirm,
-            "disabling the overlay should skip straight to Confirm, not Position/Streaming"
+            "disabling the overlay should skip straight to Confirm, not Position/Waveform"
         );
     }
 
     #[test]
-    fn enabling_the_overlay_walks_through_position_style_and_streaming_before_confirm() {
+    fn enabling_the_overlay_walks_through_position_style_and_waveform_before_confirm() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::OverlayEnabled;
         state.overlay_enabled_selection = 1;
@@ -1389,21 +1389,21 @@ mod tests {
             .unwrap();
         state.advance().unwrap();
         assert_eq!(state.config.overlay.style, "pill");
-        assert_eq!(state.step, StepKind::OverlayStreaming);
+        assert_eq!(state.step, StepKind::OverlayWaveform);
 
-        state.overlay_streaming_selection = 1;
+        state.overlay_waveform_selection = 1;
         state.advance().unwrap();
-        assert!(state.config.overlay.streaming_indicator);
+        assert!(state.config.overlay.live_waveform);
         assert_eq!(state.step, StepKind::Confirm);
     }
 
     #[test]
-    fn retreating_from_confirm_returns_to_streaming_when_overlay_is_enabled_and_to_overlay_enabled_otherwise(
+    fn retreating_from_confirm_returns_to_waveform_when_overlay_is_enabled_and_to_overlay_enabled_otherwise(
     ) {
         let mut enabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
         enabled_state.step = StepKind::Confirm;
         enabled_state.overlay_enabled_selection = 1;
-        assert_eq!(enabled_state.prev_step(), Some(StepKind::OverlayStreaming));
+        assert_eq!(enabled_state.prev_step(), Some(StepKind::OverlayWaveform));
 
         let mut disabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
         disabled_state.step = StepKind::Confirm;

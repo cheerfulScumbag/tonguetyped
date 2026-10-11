@@ -1180,8 +1180,8 @@ impl App {
                         "enabled, {}, {}, {}",
                         self.config.overlay.position,
                         self.config.overlay.style,
-                        if self.config.overlay.streaming_indicator {
-                            "streaming waveform"
+                        if self.config.overlay.live_waveform {
+                            "live waveform"
                         } else {
                             "simple pulse"
                         }

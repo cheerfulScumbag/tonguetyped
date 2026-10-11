@@ -106,6 +106,9 @@ const HALF_CIRCLE_FILL_FALLOFF: f32 = 0.12;
 const HALF_CIRCLE_SWEEP: f32 = 0.9;
 const MARGIN: i32 = 20;
 const TICK: Duration = Duration::from_millis(33);
+/// How many live microphone level samples the actor keeps: one per `TICK`
+/// while recording, so the waveform's window is about two seconds long.
+const LEVEL_HISTORY: usize = 64;
 const RECORDING_PULSE_PERIOD: Duration = Duration::from_millis(1600);
 /// The `Blob` style breathes more slowly than the other styles' plain pulse -
 /// a calm, slow breath rather than a quick heartbeat.
@@ -302,7 +305,7 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         phase: None,
         deadline: None,
         anim_start: Instant::now(),
-        streaming_indicator: false,
+        live_waveform: false,
         style: Style::Badge,
         // Overwritten by the first `handle_command`; surfaces are not created
         // until then, so these are never used to build a surface beforehand.
@@ -312,6 +315,7 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         ticking: false,
         ticking_animated: false,
         timer_generation: 0,
+        levels: LevelHistory::new(),
         loop_signal: event_loop.get_signal(),
     };
 
@@ -383,7 +387,7 @@ struct State {
     phase: Option<Phase>,
     deadline: Option<Instant>,
     anim_start: Instant,
-    streaming_indicator: bool,
+    live_waveform: bool,
     style: Style,
     position: String,
     target: Target,
@@ -391,19 +395,28 @@ struct State {
     ticking: bool,
     ticking_animated: bool,
     timer_generation: u64,
+    /// Live microphone levels sampled once per tick while recording (newest
+    /// last) - what the recording animations react to.
+    levels: LevelHistory,
     loop_signal: LoopSignal,
 }
 
 impl State {
     fn handle_command(&mut self, command: Command, loop_handle: &LoopHandle<'static, State>) {
         let phase = Phase::from_event(command.event);
+        let previous_phase = self.phase;
         self.phase = Some(phase);
         self.deadline = phase.dwell().map(|dwell| Instant::now() + dwell);
         self.anim_start = Instant::now();
-        self.streaming_indicator = command.config.streaming_indicator;
+        self.live_waveform = command.config.live_waveform;
         self.style = style_for(&command.config.style);
         self.position = command.config.position.clone();
         self.target = target_for(&command.config.monitor);
+        if phase == Phase::Recording && previous_phase != Some(Phase::Recording) {
+            // A new dictation starts a fresh waveform; the previous recording's
+            // voice must never scroll into the new one.
+            self.levels.clear();
+        }
 
         let spec = layer_spec(&command.config, self.style);
         if self.layer_spec.as_ref() != Some(&spec) {
@@ -551,6 +564,12 @@ impl State {
         }
         match self.phase {
             Some(phase) if phase.is_animated() => {
+                if phase == Phase::Recording {
+                    // Sample the live microphone once per tick: the waveform
+                    // scrolls with the tick cadence, and a slow compositor
+                    // drops ticks rather than queueing audio data.
+                    self.levels.push(crate::audio::latest_level());
+                }
                 self.redraw_all();
                 TimeoutAction::ToDuration(TICK)
             }
@@ -621,8 +640,9 @@ impl State {
             self.phase,
             t,
             breath,
-            self.streaming_indicator,
+            self.live_waveform,
             self.style,
+            &self.levels,
         );
 
         layer
@@ -660,16 +680,13 @@ pub(crate) const STYLE_VALUES: [&str; 6] =
 pub(crate) const STYLE_LABELS: [&str; 6] =
     ["Badge", "Minimal", "Pill", "Blob", "Border", "Half Circle"];
 
-/// Display labels for `OverlayConfig::streaming_indicator`: the plain pulsing
-/// dot first, the busier live-capture treatment second. Mirrors Handy's
-/// (github.com/cjpais/Handy) distinction between a minimal recording pill and
-/// a busier "Live" panel with a reactive waveform once streaming
-/// transcription is active - see `OverlayConfig::streaming_indicator` for why
-/// this is a synthetic animation rather than a true audio-reactive one.
-pub(crate) const STREAMING_LABELS: [&str; 2] = [
-    "Simple pulse",
-    "Streaming waveform (live-capture indicator)",
-];
+/// Display labels for `OverlayConfig::live_waveform`: the plain pulsing dot
+/// first, the live multi-bar waveform second. Every style's recording
+/// animation reacts to the microphone either way - the waveform styles follow
+/// the live level sample by sample, the simple-pulse styles follow its
+/// envelope - so this only picks the busier glyph, not whether the overlay is
+/// voice-reactive.
+pub(crate) const WAVEFORM_LABELS: [&str; 2] = ["Simple pulse", "Live microphone waveform"];
 
 fn anchor_for(position: &str) -> Anchor {
     match position {
@@ -684,38 +701,112 @@ fn anchor_for(position: &str) -> Anchor {
     }
 }
 
-/// The `overlay.streaming_indicator` look for `Phase::Recording`: a small
-/// multi-bar waveform in place of the single pulsing dot, standing in for
-/// Handy's reactive live-capture waveform (see `OverlayConfig::
-/// streaming_indicator`'s doc comment for why this is synthetic animation
-/// rather than real microphone-reactive bars - there is no live audio-level
-/// feed wired to this actor, only the elapsed-time fraction every other phase
-/// already animates from). Shared by every `Style` - each passes its own
-/// available width/height/color so the same five-bar motion reads correctly
-/// whether it sits inside a round badge or a wide pill.
-fn paint_waveform_bars(
+/// The `overlay.live_waveform` look for `Phase::Recording`: a small
+/// multi-bar waveform in place of the single pulsing dot. The bars come from
+/// [`LevelHistory`], which the actor fills from the recording path's published
+/// microphone level (see [`crate::audio::publish_level`]), so the shape follows
+/// the voice: loud speech reaches up the available height, quiet stretches sit
+/// as tiny dots, and the newest sample is the right-most bar. Shared by every
+/// `Style` - each passes its own available width/height/color so the same
+/// motion reads correctly whether it sits inside a round badge or a wide pill.
+fn paint_live_waveform(
     canvas: &mut Canvas,
     cx: f32,
-    baseline_y: f32,
+    cy: f32,
     available_width: f32,
     max_bar_height: f32,
     rgb: (u8, u8, u8),
-    t: f32,
+    levels: &LevelHistory,
 ) {
-    use std::f32::consts::TAU;
-    const BAR_COUNT: usize = 5;
-    const FREQUENCIES: [f32; BAR_COUNT] = [1.0, 1.6, 2.3, 1.4, 1.9];
-    const PHASE_OFFSETS: [f32; BAR_COUNT] = [0.0, 0.5, 0.15, 0.8, 0.35];
+    /// Horizontal distance between bar centres; determines how many thin bars
+    /// fit the available width at a given style size.
+    const BAR_PITCH: f32 = 3.0;
+    /// Fraction of the pitch the bar itself fills, leaving a gap between bars.
+    const BAR_WIDTH_FRACTION: f32 = 0.55;
 
-    let gap = available_width * 0.08;
-    let bar_width = (available_width - (BAR_COUNT - 1) as f32 * gap) / BAR_COUNT as f32;
-    let total_width = BAR_COUNT as f32 * bar_width + (BAR_COUNT - 1) as f32 * gap;
-    let mut x = cx - total_width / 2.0 + bar_width / 2.0;
-    for i in 0..BAR_COUNT {
-        let wave = 0.5 + 0.5 * ((t + PHASE_OFFSETS[i]) * TAU * FREQUENCIES[i]).sin();
-        let height = max_bar_height * (0.22 + 0.78 * wave);
-        fill_bar(canvas, x, baseline_y, bar_width, height, rgb);
-        x += bar_width + gap;
+    let count = ((available_width / BAR_PITCH).round() as usize).clamp(6, LEVEL_HISTORY);
+    let pitch = available_width / count as f32;
+    let bar_width = (pitch * BAR_WIDTH_FRACTION).max(1.0);
+    let mut x = cx - available_width / 2.0 + pitch / 2.0;
+    for i in 0..count {
+        let level = levels.waveform_sample(count, i);
+        let height = (max_bar_height * bar_height_fraction(level)).max(bar_width);
+        fill_centered_bar(canvas, x, cy, bar_width, height, rgb);
+        x += pitch;
+    }
+}
+
+/// Maps a raw microphone RMS level to the 0..1 reactivity fraction the
+/// recording animations use: 0 at silence (about -50 dB and below, where
+/// room noise lives), 1 at full scale. The slight gamma lift keeps quiet
+/// speech visible without letting idle noise animate the overlay.
+fn level_fraction(level: f32) -> f32 {
+    let ratio = crate::audio::level_to_ratio(level) as f32;
+    ((ratio - 0.15) / 0.85).clamp(0.0, 1.0).powf(0.7)
+}
+
+/// Maps a raw microphone RMS level to a waveform bar's height fraction in
+/// `MIN_BAR_FRACTION..=1.0`: silence still leaves a small dot (the reference's
+/// quiet moments), and louder speech grows toward the full bar height.
+fn bar_height_fraction(level: f32) -> f32 {
+    const MIN_BAR_FRACTION: f32 = 0.10;
+    MIN_BAR_FRACTION + (1.0 - MIN_BAR_FRACTION) * level_fraction(level)
+}
+
+/// A short rolling history of microphone level samples (raw block RMS), newest
+/// at the end. The overlay actor pushes one sample per animation tick while
+/// recording, and paints a scrolling window of it with the newest bar at the
+/// right. The capacity bounds memory and the visible window length.
+struct LevelHistory {
+    samples: [f32; LEVEL_HISTORY],
+    len: usize,
+}
+
+impl LevelHistory {
+    const fn new() -> Self {
+        Self {
+            samples: [0.0; LEVEL_HISTORY],
+            len: 0,
+        }
+    }
+
+    /// Forgets all samples - used when a new dictation starts, so the waveform
+    /// never shows the previous recording's voice.
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn push(&mut self, level: f32) {
+        if self.len == LEVEL_HISTORY {
+            self.samples.copy_within(1.., 0);
+            self.len -= 1;
+        }
+        self.samples[self.len] = level;
+        self.len += 1;
+    }
+
+    /// The level for waveform bar `i` of `count`, ordering bars oldest
+    /// (`i = 0`, left) to newest (`i = count - 1`, right). Missing older
+    /// samples read as silence, so a fresh history starts with flat dots on
+    /// the left while the live audio fills in from the right.
+    fn waveform_sample(&self, count: usize, i: usize) -> f32 {
+        let pad = count.saturating_sub(self.len);
+        if i < pad {
+            return 0.0;
+        }
+        let start = self.len.saturating_sub(count);
+        self.samples[start + (i - pad)]
+    }
+
+    /// Peak of the newest `window` samples: the envelope the non-waveform
+    /// recording pulses follow, so a brief quiet moment inside speech does not
+    /// collapse the animation.
+    fn recent_peak(&self, window: usize) -> f32 {
+        let start = self.len.saturating_sub(window);
+        self.samples[start..self.len]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max)
     }
 }
 
@@ -989,16 +1080,17 @@ fn fill_capsule(
     }
 }
 
-/// The outline of the `Style::Blob` silhouette at `angle`, time `t`: a slow,
-/// calm breathing scale with only a faint low-frequency sway, so it reads as a
-/// gently living blob rather than a churning one. The amplitudes sum to 0.12,
-/// bounding the outline at `radius * 1.12` - what `paint_blob` and
-/// `surface_size_for` account for.
-fn blob_edge(radius: f32, angle: f32, t: f32) -> f32 {
+/// The outline of the `Style::Blob` silhouette at `angle`, time `t`, scaled by
+/// the live voice level `lf`: a slow, calm breathing scale with only a faint
+/// low-frequency sway, so it reads as a gently living blob rather than a
+/// churning one. The amplitudes sum to 0.12, bounding the outline at
+/// `radius * 1.12` at full level - what `paint_blob` and `surface_size_for`
+/// account for; at silence (`lf = 0`) the silhouette is the still base circle.
+fn blob_edge(radius: f32, angle: f32, t: f32, lf: f32) -> f32 {
     use std::f32::consts::TAU;
     let breathe = 0.07 * (t * TAU).sin();
     let sway = 0.03 * (2.0 * angle - t * TAU).sin() + 0.02 * (3.0 * angle + t * TAU).sin();
-    radius * (1.0 + breathe + sway)
+    radius * (1.0 + lf * (breathe + sway))
 }
 
 /// Blends `color` toward white by `amount` (0..1) - used for the blob's bright
@@ -1093,21 +1185,21 @@ fn fill_square(canvas: &mut Canvas, cx: f32, cy: f32, half: f32, rgb: (u8, u8, u
     }
 }
 
-/// Fills a vertical bar of `width` centered on `cx`, growing upward from
-/// `baseline_y` by `height` - the building block for the streaming-indicator
-/// waveform (see `paint`'s `Phase::Recording` branch).
-fn fill_bar(
+/// Fills a vertical bar of `width` centered on `cx` and `cy`, extending
+/// `height` in both directions - the building block for the live waveform's
+/// equalizer-style bars (see `paint_live_waveform`).
+fn fill_centered_bar(
     canvas: &mut Canvas,
     cx: f32,
-    baseline_y: f32,
+    cy: f32,
     width: f32,
     height: f32,
     rgb: (u8, u8, u8),
 ) {
     let min_x = (cx - width / 2.0).round().max(0.0) as i32;
     let max_x = (cx + width / 2.0).round().min(canvas.width as f32) as i32;
-    let min_y = (baseline_y - height).round().max(0.0) as i32;
-    let max_y = baseline_y.round().min(canvas.height as f32) as i32;
+    let min_y = (cy - height / 2.0).round().max(0.0) as i32;
+    let max_y = (cy + height / 2.0).round().min(canvas.height as f32) as i32;
     for y in min_y..max_y {
         for x in min_x..max_x {
             canvas.blend(x, y, rgb, 1.0);
@@ -1338,54 +1430,67 @@ fn paint(
     phase: Option<Phase>,
     t: f32,
     breath: f32,
-    streaming_indicator: bool,
+    live_waveform: bool,
     style: Style,
+    levels: &LevelHistory,
 ) {
     canvas.pixels.fill(0);
     let Some(phase) = phase else { return };
     match style {
-        Style::Badge => paint_badge(canvas, phase, t, streaming_indicator),
-        Style::Minimal => paint_minimal(canvas, phase, t, streaming_indicator),
-        Style::Pill => paint_pill(canvas, phase, t, streaming_indicator),
-        Style::Blob => paint_blob(canvas, phase, t, breath, streaming_indicator),
-        Style::Border => paint_border(canvas, phase, t, streaming_indicator),
-        Style::HalfCircle => paint_half_circle(canvas, phase, t, streaming_indicator),
+        Style::Badge => paint_badge(canvas, phase, t, live_waveform, levels),
+        Style::Minimal => paint_minimal(canvas, phase, t, live_waveform, levels),
+        Style::Pill => paint_pill(canvas, phase, t, live_waveform, levels),
+        Style::Blob => paint_blob(canvas, phase, t, breath, live_waveform, levels),
+        Style::Border => paint_border(canvas, phase, t, live_waveform, levels),
+        Style::HalfCircle => paint_half_circle(canvas, phase, t, live_waveform, levels),
     }
 }
 
-fn paint_badge(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+/// The 0..1 level envelope the non-waveform recording animations follow while
+/// `Phase::Recording`: the newest samples' peak, so the pulse/breath tracks
+/// the voice but does not flicker on every quiet intra-word gap.
+fn recording_level(levels: &LevelHistory) -> f32 {
+    level_fraction(levels.recent_peak(5))
+}
+
+fn paint_badge(
+    canvas: &mut Canvas,
+    phase: Phase,
+    t: f32,
+    live_waveform: bool,
+    levels: &LevelHistory,
+) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let disc_radius = canvas.width.min(canvas.height) as f32 * 0.42;
     let color = phase_color(phase);
+    let lf = recording_level(levels);
 
     match phase {
-        Phase::Recording if streaming_indicator => {
+        Phase::Recording if live_waveform => {
             fill_circle(canvas, cx, cy, disc_radius, color);
-            // Keep the waveform's bounding box well inside the disc: the
-            // tallest bar reaches `max_bar_height` above the baseline and the
-            // bars span `available_width` across, so centering that box on the
-            // disc center leaves it within the circle's radius (its half
-            // diagonal is ~0.67*disc_radius).
-            let max_bar_height = disc_radius * 0.62;
-            paint_waveform_bars(
+            // The bars are centred in the disc; the bounding box's half
+            // diagonal (~0.81 * disc_radius) stays inside the circle.
+            paint_live_waveform(
                 canvas,
                 cx,
-                cy + max_bar_height * 0.5,
+                cy,
                 disc_radius * 1.2,
-                max_bar_height,
+                disc_radius * 1.1,
                 GLYPH_COLOR,
-                t,
+                levels,
             );
         }
         Phase::Recording => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
+            // The inner dot's size follows the voice: a small calm marker at
+            // silence, the original pulsing dot at full speech level.
             fill_circle(
                 canvas,
                 cx,
                 cy,
-                disc_radius * (0.32 + 0.10 * pulse),
+                disc_radius * (0.22 + 0.20 * lf * (0.8 + 0.2 * pulse)),
                 GLYPH_COLOR,
             );
         }
@@ -1445,12 +1550,19 @@ fn paint_badge(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: b
 /// A thin outline ring with a small centered, phase-colored glyph - the
 /// lowest-visual-weight style, with no filled background to rest a
 /// contrasting white glyph against.
-fn paint_minimal(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+fn paint_minimal(
+    canvas: &mut Canvas,
+    phase: Phase,
+    t: f32,
+    live_waveform: bool,
+    levels: &LevelHistory,
+) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let ring_radius = canvas.width.min(canvas.height) as f32 * 0.34;
     let ring_thickness = ring_radius * 0.14;
     let color = phase_color(phase);
+    let lf = recording_level(levels);
     stroke_arc(
         canvas,
         cx,
@@ -1462,20 +1574,26 @@ fn paint_minimal(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator:
     );
 
     match phase {
-        Phase::Recording if streaming_indicator => {
-            paint_waveform_bars(
+        Phase::Recording if live_waveform => {
+            paint_live_waveform(
                 canvas,
                 cx,
-                cy + ring_radius * 0.5,
+                cy,
                 ring_radius * 1.5,
                 ring_radius * 0.9,
                 color,
-                t,
+                levels,
             );
         }
         Phase::Recording => {
             let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
-            fill_circle(canvas, cx, cy, ring_radius * (0.28 + 0.12 * pulse), color);
+            fill_circle(
+                canvas,
+                cx,
+                cy,
+                ring_radius * (0.20 + 0.20 * lf * (0.8 + 0.2 * pulse)),
+                color,
+            );
         }
         Phase::Transcribing => {
             let angle = t * std::f32::consts::TAU;
@@ -1526,25 +1644,32 @@ fn paint_minimal(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator:
 }
 
 /// A capsule ("pill") badge, solid-filled like `Badge` but wider than tall -
-/// the extra width gives the streaming waveform more room to read.
-fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+/// the extra width gives the live waveform more room to read.
+fn paint_pill(
+    canvas: &mut Canvas,
+    phase: Phase,
+    t: f32,
+    live_waveform: bool,
+    levels: &LevelHistory,
+) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let half_width = canvas.width as f32 * 0.46;
     let half_height = canvas.height as f32 * 0.42;
     let color = phase_color(phase);
+    let lf = recording_level(levels);
     fill_capsule(canvas, cx, cy, half_width, half_height, color);
 
     match phase {
-        Phase::Recording if streaming_indicator => {
-            paint_waveform_bars(
+        Phase::Recording if live_waveform => {
+            paint_live_waveform(
                 canvas,
                 cx,
-                cy + half_height * 0.6,
+                cy,
                 half_width * 1.5,
-                half_height * 1.3,
+                half_height * 1.5,
                 GLYPH_COLOR,
-                t,
+                levels,
             );
         }
         Phase::Recording => {
@@ -1553,7 +1678,7 @@ fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bo
                 canvas,
                 cx,
                 cy,
-                half_height * (0.4 + 0.14 * pulse),
+                half_height * (0.28 + 0.26 * lf * (0.8 + 0.2 * pulse)),
                 GLYPH_COLOR,
             );
         }
@@ -1609,17 +1734,27 @@ fn paint_pill(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bo
 /// style. The silhouette gently inhales and exhales on its own slower cycle
 /// (`breath`, derived from `BLOB_PULSE_PERIOD`) with only a faint organic sway,
 /// while a soft metallic sheen (a gentle dome highlight and a bright rim) keeps
-/// it feeling like liquid metal rather than a flat disc. The `Transcribing`
+/// it feeling like liquid metal rather than a flat disc. The breathing and the
+/// halo both follow the live voice level (`levels`): loud speech swells and
+/// brightens the blob, silence leaves it as a calm, still orb. The `Transcribing`
 /// spinner glyph advances on the faster fraction `t` independently, so the
 /// silhouette keeps breathing slowly while the spinner turns. A white glyph
-/// carries the state for the terminal phases and the streaming waveform,
-/// exactly as every other style does; those phases are simply static (`breath`
-/// is 0 once the animation stops), which is why the blob sits still for them.
-fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_indicator: bool) {
+/// carries the state for the terminal phases and the live waveform, exactly as
+/// every other style does; those phases are simply static (`breath` is 0 once
+/// the animation stops), which is why the blob sits still for them.
+fn paint_blob(
+    canvas: &mut Canvas,
+    phase: Phase,
+    t: f32,
+    breath: f32,
+    live_waveform: bool,
+    levels: &LevelHistory,
+) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let radius = canvas.width.min(canvas.height) as f32 * 0.30;
     let color = phase_color(phase);
+    let lf = recording_level(levels);
     // A bright body with an even brighter inner glow and a near-white sheen,
     // so the blob stays luminous rather than turning dark and silvered.
     let body = scale_color(lighten(color, 0.1), 0.88);
@@ -1630,6 +1765,8 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
     let (lx, ly, lz) = normalize3(-0.45, -0.68, 0.58);
     let (hx, hy, hz) = normalize3(lx, ly, lz + 1.0);
     let halo_width = radius * 0.22;
+    // The halo is dim and steady at silence and flares with the voice.
+    let halo_strength = 0.08 + 0.14 * lf;
 
     let outer = radius * 1.2 + halo_width + 2.0;
     let min_x = (cx - outer).floor().max(0.0) as i32;
@@ -1643,7 +1780,7 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
             let dy = y as f32 + 0.5 - cy;
             let dist = (dx * dx + dy * dy).sqrt();
             let angle = dy.atan2(dx);
-            let edge = blob_edge(radius, angle, breath);
+            let edge = blob_edge(radius, angle, breath, lf);
 
             if dist >= edge {
                 // A soft glowing halo hugging the silhouette, so the blob
@@ -1651,7 +1788,7 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
                 let into_halo = dist - edge;
                 if into_halo < halo_width {
                     let strength = 1.0 - into_halo / halo_width;
-                    canvas.blend(x, y, sheen, 0.22 * strength * strength);
+                    canvas.blend(x, y, sheen, halo_strength * strength * strength);
                 }
                 continue;
             }
@@ -1679,15 +1816,15 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, streaming_
     }
 
     match phase {
-        Phase::Recording if streaming_indicator => {
-            paint_waveform_bars(
+        Phase::Recording if live_waveform => {
+            paint_live_waveform(
                 canvas,
                 cx,
-                cy + radius * 0.55,
+                cy,
                 radius * 1.4,
                 radius * 1.1,
                 GLYPH_COLOR,
-                t,
+                levels,
             );
         }
         Phase::Recording => {}
@@ -1758,10 +1895,18 @@ fn border_glow(x: f32, y: f32, width: f32, height: f32, pulse: f32) -> f32 {
 /// corners - the `Border` style. Unlike every other style its surface fills the
 /// output, so it paints a border/glow band rather than a centered shape and
 /// leaves the centre transparent. The whole frame breathes on the elapsed-time
-/// fraction; with `streaming_indicator` a bright highlight also sweeps once
-/// around the frame per cycle, standing in for the "actively capturing" signal
-/// the other styles show as a waveform (see `OverlayConfig::streaming_indicator`).
-fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+/// fraction, with the breath's amplitude following the live voice level
+/// (`levels`), so the frame pulses with speech and settles calm in silence;
+/// with `live_waveform` a bright highlight also sweeps once around the frame per
+/// cycle, standing in for the "actively capturing" signal the other styles show
+/// as a waveform (see `OverlayConfig::live_waveform`).
+fn paint_border(
+    canvas: &mut Canvas,
+    phase: Phase,
+    t: f32,
+    live_waveform: bool,
+    levels: &LevelHistory,
+) {
     use std::f32::consts::{PI, TAU};
     let width = canvas.width as f32;
     let height = canvas.height as f32;
@@ -1770,11 +1915,15 @@ fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: 
     // with only a light lift on the core so the hue never washes out to white.
     let color = bolden(phase_color(phase));
     let hot = lighten(color, 0.28);
-    let pulse = 0.7 + 0.3 * (0.5 + 0.5 * (t * TAU).sin());
+    let lf = recording_level(levels);
+    let carrier = 0.5 + 0.5 * (t * TAU).sin();
+    let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
     let head = t * TAU - PI;
     // The sweep is a recording-only "actively capturing" cue, matching every
-    // other style's `Phase::Recording if streaming_indicator` branch.
-    let sweeping = streaming_indicator && matches!(phase, Phase::Recording);
+    // other style's `Phase::Recording if live_waveform` branch; the voice
+    // level scales its brightness but never turns it off.
+    let sweeping = live_waveform && matches!(phase, Phase::Recording);
+    let sweep_strength = 0.85 * (0.5 + 0.5 * lf);
     // Angular half-width of the streaming highlight's bright arc.
     const SWEEP: f32 = 0.55;
 
@@ -1787,7 +1936,7 @@ fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: 
                 let angle = (py - cy).atan2(px - cx);
                 let delta = (angle - head + PI).rem_euclid(TAU) - PI;
                 let sweep = (1.0 - delta.abs() / SWEEP).clamp(0.0, 1.0);
-                intensity = (intensity + sweep * sweep * 0.85).min(1.0);
+                intensity = (intensity + sweep * sweep * sweep_strength).min(1.0);
             }
             if intensity <= 0.0 {
                 continue;
@@ -1820,11 +1969,18 @@ fn half_circle_profile(r: f32, radius: f32, glow: f32) -> f32 {
 /// a half-sun rising from the top bezel. It is drawn through the same per-pixel
 /// alpha-blending path every other style uses: a soft solid fill over the
 /// shared phase colour dissolving into a smooth radial glow. The whole dome
-/// breathes on the elapsed-time fraction; with `streaming_indicator` a bright
-/// highlight additionally sweeps along the arc, standing in for the "actively
-/// capturing" signal the badge styles show as a waveform (see
-/// `OverlayConfig::streaming_indicator`).
-fn paint_half_circle(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indicator: bool) {
+/// breathes on the elapsed-time fraction, with the breath's amplitude following
+/// the live voice level (`levels`), so the dome pulses with speech and settles
+/// calm in silence; with `live_waveform` a bright highlight additionally sweeps
+/// along the arc, standing in for the "actively capturing" signal the badge
+/// styles show as a waveform (see `OverlayConfig::live_waveform`).
+fn paint_half_circle(
+    canvas: &mut Canvas,
+    phase: Phase,
+    t: f32,
+    live_waveform: bool,
+    levels: &LevelHistory,
+) {
     use std::f32::consts::{PI, TAU};
     let width = canvas.width as f32;
     let height = canvas.height as f32;
@@ -1833,10 +1989,14 @@ fn paint_half_circle(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indica
     let glow = height * HALF_CIRCLE_GLOW_FRACTION;
     let color = phase_color(phase);
     let hot = lighten(color, 0.22);
-    let pulse = 0.8 + 0.2 * (0.5 + 0.5 * (t * TAU).sin());
+    let lf = recording_level(levels);
+    let carrier = 0.5 + 0.5 * (t * TAU).sin();
+    let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
     // The sweep is a recording-only "actively capturing" cue, matching every
-    // other style's `Phase::Recording if streaming_indicator` branch.
-    let sweeping = streaming_indicator && matches!(phase, Phase::Recording);
+    // other style's `Phase::Recording if live_waveform` branch; the voice
+    // level scales its brightness but never turns it off.
+    let sweeping = live_waveform && matches!(phase, Phase::Recording);
+    let sweep_strength = 0.7 * (0.5 + 0.5 * lf);
     // The visible semicircle spans the polar angles `0..PI` (screen-space `y`
     // grows downward), so the highlight sweeps that full range across a cycle.
     let head = t * PI;
@@ -1858,7 +2018,7 @@ fn paint_half_circle(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indica
                 // bright bead travelling along the arc rather than a hard pie
                 // wedge from the dome's centre.
                 let radial = (r / radius).clamp(0.0, 1.0).powi(2);
-                intensity = (intensity + angular * radial * 0.7).min(1.0);
+                intensity = (intensity + angular * radial * sweep_strength).min(1.0);
             }
             let rgb = mix_color(color, hot, intensity);
             canvas.blend(x as i32, y as i32, rgb, intensity);
@@ -1872,7 +2032,9 @@ fn paint_half_circle(canvas: &mut Canvas, phase: Phase, t: f32, streaming_indica
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`; `recording`/
 /// `transcribing`/`success`/`no-speech`/`cancelled`/`error`), and `None` clears
-/// to fully transparent.
+/// to fully transparent. `levels` is the live microphone history the recording
+/// animations follow, oldest first - an empty slice means silence, and a
+/// representative pattern is how the offline mockups show the speaking look.
 /// Returns `(width, height, pixels)` with `width * height * 4` bytes. For the
 /// full-screen `border` style this is the representative `BORDER_PREVIEW` size,
 /// not a compositor-provided output size.
@@ -1881,7 +2043,8 @@ pub fn render_frame_pixels(
     style: &str,
     phase: Option<&str>,
     t: f32,
-    streaming_indicator: bool,
+    live_waveform: bool,
+    levels: &[f32],
 ) -> (u32, u32, Vec<u8>) {
     let style = style_for(style);
     let phase = phase.map(|name| match name {
@@ -1892,6 +2055,10 @@ pub fn render_frame_pixels(
         "error" => Phase::Error,
         _ => Phase::Recording,
     });
+    let mut history = LevelHistory::new();
+    for level in levels {
+        history.push(*level);
+    }
     let (width, height) = surface_size_for(style);
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     {
@@ -1900,7 +2067,7 @@ pub fn render_frame_pixels(
             width,
             height,
         };
-        paint(&mut canvas, phase, t, t, streaming_indicator, style);
+        paint(&mut canvas, phase, t, t, live_waveform, style, &history);
     }
     (width, height, pixels)
 }
@@ -2076,21 +2243,51 @@ mod tests {
         Style::HalfCircle,
     ];
 
-    fn paint_to_pixels(
-        phase: Option<Phase>,
-        t: f32,
-        streaming_indicator: bool,
-        style: Style,
-    ) -> Vec<u8> {
-        paint_to_pixels_with_breath(phase, t, t, streaming_indicator, style)
+    /// A quiet room: a faint steady hiss far below speech, which every style
+    /// should render as calm/flat.
+    fn quiet_history() -> LevelHistory {
+        let mut history = LevelHistory::new();
+        for i in 0..LEVEL_HISTORY {
+            history.push(0.0015 + 0.0004 * (i as f32 * 0.7).sin());
+        }
+        history
+    }
+
+    /// A voice-like burst pattern with quiet gaps, so the recorded waveform
+    /// has tall bars and dots rather than one flat level.
+    fn speaking_history() -> LevelHistory {
+        let mut history = LevelHistory::new();
+        for i in 0..LEVEL_HISTORY {
+            let sample = i as f32;
+            let in_word = ((sample / 64.0 * 5.0) % 1.0) < 0.78;
+            let syllable = 0.35 + 0.65 * (sample * 0.9).sin().abs();
+            let volume = 0.04 + 0.14 * (sample * 0.23).cos().abs();
+            history.push(if in_word { syllable * volume } else { 0.001 });
+        }
+        history
+    }
+
+    fn paint_to_pixels(phase: Option<Phase>, t: f32, live_waveform: bool, style: Style) -> Vec<u8> {
+        paint_to_pixels_with_breath(phase, t, t, live_waveform, style)
     }
 
     fn paint_to_pixels_with_breath(
         phase: Option<Phase>,
         t: f32,
         breath: f32,
-        streaming_indicator: bool,
+        live_waveform: bool,
         style: Style,
+    ) -> Vec<u8> {
+        paint_to_pixels_with_levels(phase, t, breath, live_waveform, style, &speaking_history())
+    }
+
+    fn paint_to_pixels_with_levels(
+        phase: Option<Phase>,
+        t: f32,
+        breath: f32,
+        live_waveform: bool,
+        style: Style,
+        levels: &LevelHistory,
     ) -> Vec<u8> {
         let (width, height) = surface_size_for(style);
         let mut pixels = vec![0u8; (width * height * 4) as usize];
@@ -2100,7 +2297,7 @@ mod tests {
                 width,
                 height,
             };
-            paint(&mut canvas, phase, t, breath, streaming_indicator, style);
+            paint(&mut canvas, phase, t, breath, live_waveform, style, levels);
         }
         pixels
     }
@@ -2147,14 +2344,13 @@ mod tests {
     }
 
     #[test]
-    fn streaming_indicator_paints_a_different_recording_glyph_than_the_default_pulse_in_every_style(
-    ) {
+    fn live_waveform_paints_a_different_recording_glyph_than_the_default_pulse_in_every_style() {
         for style in ALL_STYLES {
             let default_pixels = paint_to_pixels(Some(Phase::Recording), 0.25, false, style);
             let streaming_pixels = paint_to_pixels(Some(Phase::Recording), 0.25, true, style);
             assert_ne!(
                 default_pixels, streaming_pixels,
-                "{style:?}: streaming_indicator should visually differ from the default pulse"
+                "{style:?}: the live waveform should visually differ from the default pulse"
             );
         }
     }
@@ -2304,8 +2500,8 @@ mod tests {
         let radius = 30.0;
         for i in 0..64 {
             let angle = i as f32 / 64.0 * std::f32::consts::TAU - std::f32::consts::PI;
-            let start = blob_edge(radius, angle, 0.0);
-            let wrap = blob_edge(radius, angle, 1.0);
+            let start = blob_edge(radius, angle, 0.0, 1.0);
+            let wrap = blob_edge(radius, angle, 1.0, 1.0);
             assert!(
                 (start - wrap).abs() < 0.01,
                 "blob_edge jumps at the breath wrap for angle {angle}: {start} vs {wrap}"
@@ -2500,7 +2696,7 @@ mod tests {
     }
 
     #[test]
-    fn border_streaming_indicator_sweeps_a_travelling_highlight() {
+    fn border_live_waveform_sweeps_a_travelling_highlight() {
         let sum =
             |pixels: &[u8]| -> u64 { pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum() };
         let default = paint_to_pixels(Some(Phase::Recording), 0.15, false, Style::Border);
@@ -2636,7 +2832,7 @@ mod tests {
     }
 
     #[test]
-    fn half_circle_streaming_indicator_sweeps_a_travelling_highlight() {
+    fn half_circle_live_waveform_sweeps_a_travelling_highlight() {
         let sum =
             |pixels: &[u8]| -> u64 { pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum() };
         let default = paint_to_pixels(Some(Phase::Recording), 0.15, false, Style::HalfCircle);
@@ -2710,47 +2906,245 @@ mod tests {
     }
 
     #[test]
-    fn streaming_waveform_bars_stay_inside_every_style_shape() {
-        // Identify the waveform pixels and check every one sits inside the
-        // style's shape. `Badge`/`Pill` draw the bars in opaque white over a
-        // solid phase-colored fill, so those are exactly the pure-white
-        // pixels. `Minimal` draws the bars in the same color as its ring, so
-        // the bars are the phase-colored pixels that move as the animation
-        // advances (the ring itself is static). Every pixel found must be
-        // inside the shape; the pre-fix badge sprawled ~2px past the disc on
-        // each side.
-        const SAMPLES: [f32; 5] = [0.0, 0.13, 0.27, 0.41, 0.55];
+    fn live_waveform_pixels_stay_inside_every_style_shape() {
+        // Identify the level-reactive pixels by comparing a silent recording
+        // against a speaking one and check every pixel that changed sits
+        // inside the style's shape. For the waveform styles those are the
+        // bars; for `border`/`half-circle` the level scales the glow pulse and
+        // sweep, which must equally stay inside the shape. The pre-fix badge
+        // sprawled ~2px past the disc on each side.
         for style in ALL_STYLES {
             let (width, height) = surface_size_for(style);
-            let frames: Vec<Vec<u8>> = SAMPLES
-                .iter()
-                .map(|&t| paint_to_pixels(Some(Phase::Recording), t, true, style))
-                .collect();
-            let white_glyph = matches!(style, Style::Badge | Style::Pill);
-            let base = &frames[0];
+            let quiet = quiet_history();
+            let speaking = speaking_history();
+            let base =
+                paint_to_pixels_with_levels(Some(Phase::Recording), 0.0, 0.0, true, style, &quiet);
+            let loud = paint_to_pixels_with_levels(
+                Some(Phase::Recording),
+                0.0,
+                0.0,
+                true,
+                style,
+                &speaking,
+            );
             let mut waveform_pixels = 0u32;
             for y in 0..height {
                 for x in 0..width {
                     let index = ((y * width + x) * 4) as usize;
-                    let varies = frames
-                        .iter()
-                        .any(|frame| frame[index..index + 4] != base[index..index + 4]);
-                    let glyph = white_glyph && base[index..index + 4] == [255, 255, 255, 255];
-                    if !varies && !glyph {
+                    if base[index..index + 4] == loud[index..index + 4] {
                         continue;
                     }
                     waveform_pixels += 1;
                     let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
                     assert!(
                         inside_style_shape(style, px, py),
-                        "{style:?}: waveform pixel ({x},{y}) painted outside the shape"
+                        "{style:?}: live-waveform pixel ({x},{y}) painted outside the shape"
                     );
                 }
             }
             assert!(
                 waveform_pixels >= 30,
-                "{style:?}: expected a visible waveform inside the shape, only {waveform_pixels} waveform pixels"
+                "{style:?}: expected a visible live waveform inside the shape, only {waveform_pixels} waveform pixels"
             );
+        }
+    }
+
+    #[test]
+    fn level_history_ring_keeps_a_rolling_window_newest_last() {
+        let mut history = LevelHistory::new();
+        assert_eq!(history.waveform_sample(4, 0), 0.0);
+        assert_eq!(history.recent_peak(5), 0.0);
+
+        // Fewer samples than the window: silence pads the left, the newest
+        // sample is the right-most bar.
+        history.push(0.1);
+        history.push(0.2);
+        assert_eq!(
+            (0..4)
+                .map(|i| history.waveform_sample(4, i))
+                .collect::<Vec<_>>(),
+            vec![0.0, 0.0, 0.1, 0.2]
+        );
+
+        // More samples than the ring can hold: the oldest are dropped, and
+        // the window still ends on the newest.
+        for i in 0..(LEVEL_HISTORY + 10) {
+            history.push(i as f32 + 1.0);
+        }
+        assert_eq!(history.len, LEVEL_HISTORY);
+        assert_eq!(
+            history.waveform_sample(LEVEL_HISTORY, LEVEL_HISTORY - 1),
+            (LEVEL_HISTORY + 10) as f32
+        );
+        assert_eq!(
+            history.waveform_sample(LEVEL_HISTORY, 0),
+            11.0,
+            "the oldest 10 samples should have been dropped"
+        );
+
+        // A window peak looks only at the newest samples.
+        history.clear();
+        history.push(1.0);
+        for _ in 0..9 {
+            history.push(0.01);
+        }
+        assert_eq!(history.recent_peak(5), 0.01);
+        assert_eq!(history.recent_peak(10), 1.0);
+    }
+
+    #[test]
+    fn bar_heights_are_flat_at_silence_and_grow_with_level() {
+        // Silence (and room noise below the floor) leaves the tiny dot, never
+        // no bar at all, and the reference's quiet stretches stay flat.
+        const MIN: f32 = 0.10;
+        assert_eq!(bar_height_fraction(0.0), MIN);
+        assert_eq!(bar_height_fraction(0.0005), MIN);
+        assert_eq!(level_fraction(0.0), 0.0);
+        assert_eq!(level_fraction(0.0005), 0.0);
+
+        // Louder speech only ever grows the bar, up to the full height.
+        let levels = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.3, 0.9];
+        let fractions: Vec<f32> = levels.iter().copied().map(bar_height_fraction).collect();
+        assert!(
+            fractions.windows(2).all(|pair| pair[1] > pair[0]),
+            "bar heights should grow monotonically with level: {fractions:?}"
+        );
+        assert!(
+            fractions[0] < 0.15 && *fractions.last().unwrap() > 0.9,
+            "quiet speech should be short and loud speech near full height: {fractions:?}"
+        );
+        assert!((bar_height_fraction(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn live_waveform_reacts_to_the_level_and_puts_the_newest_sample_on_the_right() {
+        let width = surface_size_for(Style::Pill).0;
+        let white_extent = |pixels: &[u8], x: u32| -> u32 {
+            (0..surface_size_for(Style::Pill).1)
+                .filter(|&y| {
+                    let index = ((y * width + x) * 4) as usize;
+                    pixels[index..index + 4] == [255, 255, 255, 255]
+                })
+                .count() as u32
+        };
+        let quiet = paint_to_pixels_with_levels(
+            Some(Phase::Recording),
+            0.0,
+            0.0,
+            true,
+            Style::Pill,
+            &quiet_history(),
+        );
+        let speaking = paint_to_pixels_with_levels(
+            Some(Phase::Recording),
+            0.0,
+            0.0,
+            true,
+            Style::Pill,
+            &speaking_history(),
+        );
+
+        // The speaking frame paints many more bar pixels than the quiet one,
+        // and reaches visibly higher at a loud syllable's column.
+        let painted = |pixels: &[u8]| -> u32 { (0..width).map(|x| white_extent(pixels, x)).sum() };
+        assert!(
+            painted(&speaking) > painted(&quiet) * 2,
+            "speaking should paint a far more prominent waveform: {} vs {}",
+            painted(&speaking),
+            painted(&quiet)
+        );
+
+        // A single loud sample near the end: the newest sample is drawn as
+        // the right-most bar, so a burst one sample fresher sits further right
+        // than the same burst one sample older.
+        let ending_with = |tail: &[f32]| -> LevelHistory {
+            let mut history = LevelHistory::new();
+            for _ in 0..(LEVEL_HISTORY - tail.len()) {
+                history.push(0.0015);
+            }
+            for level in tail {
+                history.push(*level);
+            }
+            history
+        };
+        let newest = ending_with(&[0.0015, 0.5]);
+        let older = ending_with(&[0.5, 0.0015]);
+        let newest_frame = paint_to_pixels_with_levels(
+            Some(Phase::Recording),
+            0.0,
+            0.0,
+            true,
+            Style::Pill,
+            &newest,
+        );
+        let older_frame = paint_to_pixels_with_levels(
+            Some(Phase::Recording),
+            0.0,
+            0.0,
+            true,
+            Style::Pill,
+            &older,
+        );
+        let tallest_column =
+            |pixels: &[u8]| -> u32 { (0..width).max_by_key(|&x| white_extent(pixels, x)).unwrap() };
+        assert!(
+            tallest_column(&newest_frame) > width / 2,
+            "the newest sample's tall bar should sit on the right"
+        );
+        assert!(
+            tallest_column(&newest_frame) > tallest_column(&older_frame),
+            "the newest sample should occupy a bar further right than the older one"
+        );
+    }
+
+    #[test]
+    fn every_recording_style_reacts_to_the_live_level() {
+        // The captain's ask covers every style, not just the pill's waveform:
+        // each recording animation must visibly change when the voice level
+        // changes, in both the simple-pulse and live-waveform treatments.
+        // Opaque-fill styles (badge/pill) cannot show growth through alpha, so
+        // compare their painted white response; the others grow in alpha.
+        let response = |style: Style, pixels: &[u8]| -> u64 {
+            if matches!(style, Style::Badge | Style::Pill) {
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|pixel| *pixel == &[255, 255, 255, 255])
+                    .count() as u64
+            } else {
+                pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum()
+            }
+        };
+        for style in ALL_STYLES {
+            for live_waveform in [false, true] {
+                let quiet = paint_to_pixels_with_levels(
+                    Some(Phase::Recording),
+                    0.0,
+                    0.0,
+                    live_waveform,
+                    style,
+                    &quiet_history(),
+                );
+                let speaking = paint_to_pixels_with_levels(
+                    Some(Phase::Recording),
+                    0.0,
+                    0.0,
+                    live_waveform,
+                    style,
+                    &speaking_history(),
+                );
+                assert_ne!(
+                    quiet, speaking,
+                    "{style:?} (live_waveform={live_waveform}) should react to the microphone level"
+                );
+                assert!(
+                    response(style, &speaking) > response(style, &quiet),
+                    "{style:?} (live_waveform={live_waveform}): a louder voice should paint a bigger response ({} vs {})",
+                    response(style, &speaking),
+                    response(style, &quiet)
+                );
+            }
         }
     }
 

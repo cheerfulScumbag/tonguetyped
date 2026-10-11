@@ -357,7 +357,7 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
         "the Inference backend row should show the configured preference:\n{screen}"
     );
     assert!(
-        screen.contains("Overlay            enabled, top-right, badge, simple pulse"),
+        screen.contains("Overlay            enabled, top-right, badge, live waveform"),
         "the Overlay row should summarize the real config:\n{screen}"
     );
     assert!(
@@ -665,7 +665,8 @@ fn pty_overlay_setting_cycles_position_and_persists_it() {
 
     let opened = session.wait_for("Position    top-right", Duration::from_secs(3));
     assert!(
-        opened.contains("Style       Badge") && opened.contains("Streaming   Simple pulse"),
+        opened.contains("Style       Badge")
+            && opened.contains("Waveform    Live microphone waveform"),
         "the Overlay screen should show all current values:\n{opened}"
     );
     assert!(
@@ -687,7 +688,7 @@ fn pty_overlay_setting_cycles_position_and_persists_it() {
     // Home's summary row reflects the new value.
     session.send(KEY_ESC);
     let home = session.wait_for(
-        "enabled, center, badge, simple pulse",
+        "enabled, center, badge, live waveform",
         Duration::from_secs(3),
     );
     assert!(
@@ -722,8 +723,8 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
     // Disabled state: only the two enable rows, no configuration sub-rows.
     let disabled = session.wait_for("> Disabled", Duration::from_secs(3));
     assert!(
-        !disabled.contains("Position") && !disabled.contains("Streaming"),
-        "a disabled overlay must not show position/style/streaming:\n{disabled}"
+        !disabled.contains("Position") && !disabled.contains("Waveform"),
+        "a disabled overlay must not show position/style/waveform:\n{disabled}"
     );
 
     // Move to Enabled and apply: the three configuration rows appear.
