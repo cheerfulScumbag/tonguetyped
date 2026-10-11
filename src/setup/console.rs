@@ -1,4 +1,5 @@
 use super::{Capabilities, ModelRequirement, ProvisionHandle, ReconfigureHandle, SetupOutcome};
+use crate::activation::ReconfigureOutcome;
 use crate::audio::{self, level_to_ratio};
 use crate::config::{ActivationMode, Config, OutputMethod};
 use crate::overlay::{
@@ -109,7 +110,7 @@ struct ConsoleState {
     overlay_style_selection: usize,
     overlay_waveform_selection: usize,
     shortcut_handle: Option<ReconfigureHandle>,
-    shortcut_feedback: Option<Result<String, String>>,
+    shortcut_feedback: Option<Result<ReconfigureOutcome, String>>,
     error: Option<String>,
     mic_monitor: audio::MicMonitor,
     download_queue: Vec<ModelRequirement>,
@@ -344,13 +345,28 @@ impl ConsoleState {
 
     fn handle_shortcut_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
         if self.shortcut_handle.is_some() {
-            // The background thread driving the native dialog isn't
-            // cancellable, but leaving the step is still allowed - same
-            // permissiveness `handle_downloading_key` already gives an
-            // in-flight download. The thread finishes on its own; its
-            // result is simply never polled again.
             return match key.code {
-                KeyCode::Esc => Ok(self.retreat()),
+                // Leaving the step must also stop the background wait: without
+                // this the handle stays pending across a retreat/return (and
+                // Ctrl+R stays swallowed) until the 120s timeout, which is the
+                // "stuck in the shortcut menu" dead end.
+                KeyCode::Esc => {
+                    self.cancel_shortcut_reconfigure();
+                    Ok(self.retreat())
+                }
+                // The immediate way past a desktop dialog that was closed with
+                // no change: keep whatever is bound now instead of waiting out
+                // the timeout. Distinct from a failure - see `render_shortcut`.
+                KeyCode::Enter => {
+                    self.settle_shortcut_unchanged();
+                    Ok(ControlFlow::Continue)
+                }
+                // Reopen the dialog without waiting out the old wait.
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.cancel_shortcut_reconfigure();
+                    self.start_shortcut_reconfigure();
+                    Ok(ControlFlow::Continue)
+                }
                 _ => Ok(ControlFlow::Continue),
             };
         }
@@ -364,6 +380,25 @@ impl ConsoleState {
             _ => {}
         }
         Ok(ControlFlow::Continue)
+    }
+
+    /// Stops the in-flight portal wait, if any. The background thread settles
+    /// on its own (an `Unchanged` outcome) once the cancellation lands; its
+    /// late result is simply never polled again.
+    fn cancel_shortcut_reconfigure(&mut self) {
+        if let Some(handle) = self.shortcut_handle.take() {
+            handle.cancel();
+        }
+    }
+
+    /// The user kept the current binding (typically after closing a desktop
+    /// settings window without applying a change): stop waiting and settle on
+    /// whatever is bound, reporting it as "no change", not a failure.
+    fn settle_shortcut_unchanged(&mut self) {
+        self.cancel_shortcut_reconfigure();
+        self.shortcut_feedback = Some(Ok(ReconfigureOutcome::Unchanged {
+            trigger_description: self.config.activation.keybind.clone(),
+        }));
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
@@ -694,7 +729,10 @@ impl ConsoleState {
             return;
         };
         self.shortcut_handle = None;
-        if let Ok(trigger_description) = &outcome {
+        if let Ok(ReconfigureOutcome::Changed {
+            trigger_description,
+        }) = &outcome
+        {
             self.config.activation.keybind = crate::activation::keybind_label(trigger_description);
         }
         self.shortcut_feedback = Some(outcome);
@@ -784,7 +822,7 @@ impl ConsoleState {
     fn hint_text(&self) -> &'static str {
         match self.step {
             StepKind::Shortcut if self.shortcut_handle.is_some() => {
-                "Waiting for the system shortcut dialog...  Esc back"
+                "System dialog open - Enter keep current  Ctrl+R reopen  Esc back"
             }
             StepKind::Shortcut => "Ctrl+R set via system dialog  Enter continue  Esc back",
             StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
@@ -1075,17 +1113,31 @@ impl ConsoleState {
         lines.push(Line::from(""));
         if self.shortcut_handle.is_some() {
             lines.push(Line::from(Span::styled(
-                "A system dialog is open - press your new shortcut there now.",
+                "A shortcut settings window is open. Set or change your shortcut there, then \
+                 close it.",
                 Style::default().fg(Color::Yellow),
             )));
         } else if let Some(feedback) = &self.shortcut_feedback {
             match feedback {
-                Ok(trigger_description) => lines.push(Line::from(Span::styled(
+                Ok(ReconfigureOutcome::Changed {
+                    trigger_description,
+                }) => lines.push(Line::from(Span::styled(
                     format!(
                         "Shortcut bound: {}",
                         crate::activation::keybind_label(trigger_description)
                     ),
                     Style::default().fg(Color::Green),
+                ))),
+                // Not a failure: the user closed the desktop's settings window
+                // without applying anything, or kept the binding on purpose.
+                Ok(ReconfigureOutcome::Unchanged {
+                    trigger_description,
+                }) => lines.push(Line::from(Span::styled(
+                    format!(
+                        "No change was made - the shortcut is still {}",
+                        crate::activation::keybind_display(trigger_description)
+                    ),
+                    Style::default().fg(Color::Yellow),
                 ))),
                 Err(error) => lines.push(Line::from(Span::styled(
                     format!("Reconfigure failed: {error}"),
@@ -1623,9 +1675,11 @@ mod tests {
     fn completed_reconfigure_stores_the_real_trigger_and_clears_the_handle() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle {
-            result: Arc::new(Mutex::new(Some(Ok("Ctrl + Shift + Space".to_string())))),
-        });
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(Ok(
+            ReconfigureOutcome::Changed {
+                trigger_description: "Ctrl + Shift + Space".to_string(),
+            },
+        ))))));
 
         state.refresh_shortcut_reconfigure();
 
@@ -1633,7 +1687,9 @@ mod tests {
         assert_eq!(state.config.activation.keybind, "Ctrl + Shift + Space");
         assert_eq!(
             state.shortcut_feedback,
-            Some(Ok("Ctrl + Shift + Space".to_string()))
+            Some(Ok(ReconfigureOutcome::Changed {
+                trigger_description: "Ctrl + Shift + Space".to_string(),
+            }))
         );
     }
 
@@ -1641,9 +1697,11 @@ mod tests {
     fn reconfigure_rewrites_kdes_meta_wording_to_super() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle {
-            result: Arc::new(Mutex::new(Some(Ok("Meta+O".to_string())))),
-        });
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(Ok(
+            ReconfigureOutcome::Changed {
+                trigger_description: "Meta+O".to_string(),
+            },
+        ))))));
 
         state.refresh_shortcut_reconfigure();
 
@@ -1651,15 +1709,39 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_reconfigure_keeps_the_binding_and_is_not_an_error() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        state.config.activation.keybind = "Super+O".to_string();
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(Ok(
+            ReconfigureOutcome::Unchanged {
+                trigger_description: "Meta+O".to_string(),
+            },
+        ))))));
+
+        state.refresh_shortcut_reconfigure();
+
+        assert!(state.shortcut_handle.is_none());
+        assert_eq!(
+            state.config.activation.keybind, "Super+O",
+            "a no-change settle must not rewrite the binding"
+        );
+        assert_eq!(
+            state.shortcut_feedback,
+            Some(Ok(ReconfigureOutcome::Unchanged {
+                trigger_description: "Meta+O".to_string(),
+            }))
+        );
+    }
+
+    #[test]
     fn failed_reconfigure_reports_the_error_and_leaves_the_binding_untouched() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::Shortcut;
         let previous_binding = state.config.activation.keybind.clone();
-        state.shortcut_handle = Some(ReconfigureHandle {
-            result: Arc::new(Mutex::new(Some(Err("timed out waiting for the shortcut \
-                dialog"
-                .to_string())))),
-        });
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(
+            Err("global shortcuts portal unavailable".to_string()),
+        )))));
 
         state.refresh_shortcut_reconfigure();
 
@@ -1667,7 +1749,7 @@ mod tests {
         assert_eq!(state.config.activation.keybind, previous_binding);
         assert_eq!(
             state.shortcut_feedback,
-            Some(Err("timed out waiting for the shortcut dialog".to_string()))
+            Some(Err("global shortcuts portal unavailable".to_string()))
         );
     }
 
@@ -1683,28 +1765,61 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_reconfigure_blocks_every_shortcut_key_except_escape() {
+    fn enter_while_waiting_settles_on_the_current_binding_without_advancing() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle {
-            result: Arc::new(Mutex::new(None)),
-        });
+        state.config.activation.keybind = "Super+O".to_string();
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
 
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        state.handle_shortcut_key(enter).unwrap();
-        assert_eq!(
-            state.step,
-            StepKind::Shortcut,
-            "Enter must not advance while the native dialog is still open"
-        );
+        let flow = state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
 
-        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        let flow = state.handle_shortcut_key(esc).unwrap();
         assert!(matches!(flow, ControlFlow::Continue));
         assert_eq!(
             state.step,
-            StepKind::Activation,
-            "Esc still retreats even with a reconfigure in flight, same as Downloading"
+            StepKind::Shortcut,
+            "keeping the current binding must not skip the step"
         );
+        assert!(state.shortcut_handle.is_none());
+        assert_eq!(state.config.activation.keybind, "Super+O");
+        assert_eq!(
+            state.shortcut_feedback,
+            Some(Ok(ReconfigureOutcome::Unchanged {
+                trigger_description: "Super+O".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn escape_while_waiting_cancels_the_handle_and_retreats() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
+
+        let flow = state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(flow, ControlFlow::Continue));
+        assert!(
+            state.shortcut_handle.is_none(),
+            "leaving must stop the wait"
+        );
+        assert_eq!(state.step, StepKind::Activation);
+    }
+
+    #[test]
+    fn other_keys_are_ignored_while_a_reconfigure_is_in_flight() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
+
+        state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(state.step, StepKind::Shortcut);
+        assert!(state.shortcut_handle.is_some());
     }
 }

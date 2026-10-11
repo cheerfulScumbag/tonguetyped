@@ -109,7 +109,34 @@ fn run_shortcut_test() -> Result<crate::activation::ShortcutTestOutcome, String>
 /// synchronous and must keep drawing while the portal's native "press your
 /// new shortcut" dialog (`activation::reconfigure_shortcut`) is open.
 pub(crate) struct ReconfigureHandle {
-    pub result: Arc<Mutex<Option<Result<String, String>>>>,
+    pub result: Arc<Mutex<Option<Result<crate::activation::ReconfigureOutcome, String>>>>,
+    cancel: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl ReconfigureHandle {
+    /// Stops the background wait early. The reconfigure thread returns an
+    /// `Unchanged` outcome (settling on whatever is bound) rather than blocking
+    /// out `SHORTCUT_RECONFIGURE_TIMEOUT`, so the UI can give the user an
+    /// immediate way past a desktop dialog that was closed with no change.
+    /// Idempotent; dropping the handle without cancelling lets the thread
+    /// finish on its own.
+    pub(crate) fn cancel(&self) {
+        if let Ok(mut guard) = self.cancel.lock() {
+            if let Some(sender) = guard.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        result: Arc<Mutex<Option<Result<crate::activation::ReconfigureOutcome, String>>>>,
+    ) -> Self {
+        Self {
+            result,
+            cancel: Mutex::new(None),
+        }
+    }
 }
 
 /// Spawns a background thread that drives `activation::reconfigure_shortcut`
@@ -119,23 +146,27 @@ pub(crate) struct ReconfigureHandle {
 pub(crate) fn reconfigure_shortcut_async() -> ReconfigureHandle {
     let result = Arc::new(Mutex::new(None));
     let result_for_thread = result.clone();
+    let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let outcome = run_reconfigure();
+        let outcome = run_reconfigure(cancel_rx);
         if let Ok(mut guard) = result_for_thread.lock() {
             *guard = Some(outcome);
         }
     });
-    ReconfigureHandle { result }
+    ReconfigureHandle {
+        result,
+        cancel: Mutex::new(Some(cancel)),
+    }
 }
 
-fn run_reconfigure() -> Result<String, String> {
+fn run_reconfigure(
+    cancel: tokio::sync::oneshot::Receiver<()>,
+) -> Result<crate::activation::ReconfigureOutcome, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    runtime
-        .block_on(crate::activation::reconfigure_shortcut())
-        .map(|outcome| outcome.trigger_description)
+    runtime.block_on(crate::activation::reconfigure_shortcut(cancel))
 }
 
 pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static str {

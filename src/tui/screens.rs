@@ -483,16 +483,6 @@ impl ShortcutScreen {
         self.selected_action = next;
     }
 
-    /// While the portal test or the native dialog is in flight, every key
-    /// except Escape is ignored - same permissiveness the setup console gives
-    /// its in-flight reconfigure dialog.
-    pub(super) fn is_busy(&self) -> bool {
-        matches!(
-            self.status,
-            ShortcutStatus::Testing | ShortcutStatus::DialogOpen
-        )
-    }
-
     pub(super) fn body(&self, bound: &str) -> Paragraph<'static> {
         let mut lines = vec![
             Line::from(format!("Currently bound: {bound}")),
@@ -523,13 +513,25 @@ impl ShortcutScreen {
                 Style::default().fg(Color::Yellow),
             )),
             ShortcutStatus::DialogOpen => Line::from(Span::styled(
-                "A system dialog is open - press your new shortcut there now.",
+                "A shortcut settings window is open - set or change your shortcut there, \
+                 then close it.",
                 Style::default().fg(Color::Yellow),
             )),
             ShortcutStatus::Message { text, is_error } => Line::from(Span::styled(
                 text.clone(),
                 Style::default().fg(if *is_error { Color::Red } else { Color::Green }),
             )),
+        }
+    }
+
+    /// The key legend, aware of the in-flight state: while the desktop's
+    /// settings window is open, Enter keeps the current binding and Ctrl+R
+    /// reopens the dialog, so a window closed with no change is never a dead
+    /// end.
+    pub(super) fn footer(&self) -> &'static str {
+        match self.status {
+            ShortcutStatus::DialogOpen => "Enter keep current  Ctrl+R reopen  Esc back",
+            _ => "↑/↓ choose action  Enter run  Ctrl+R system dialog  Esc back",
         }
     }
 }
