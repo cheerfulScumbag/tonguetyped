@@ -248,16 +248,19 @@ and a no-speech outcome (an empty capture). `overlay.style` picks the look:
 | `badge` | The default small rounded badge with an icon and phase colour |
 | `minimal` | A bare dot, no chrome |
 | `pill` | A wider pill-shaped badge with a live microphone waveform |
-| `blob` | A bright, glowing orb that slowly breathes |
+| `blob` | A bright, glowing orb that breathes and swells with your voice |
 | `half-circle` | A gleaming semicircle docked to the top-centre edge |
 | `border` | A full-screen frame that glows along every edge, brightest in the corners |
+| `long-pill` | A wide dark bar with a squiggly live waveform and a round status button |
 
 Every style's recording animation follows your live microphone level: `badge`,
-`minimal`, `pill`, and `blob` show a scrolling multi-bar waveform when
+`minimal`, and `pill` show a scrolling multi-bar waveform when
 `overlay.live_waveform` is on (the default), or a pulsing dot that swells with
-your voice when it is off, and `border`/`half-circle` pulse and sweep with it.
-Loud speech is a big response; silence is calm, with the waveform's quiet
-stretches rendered as tiny dots.
+your voice when it is off; `long-pill` always shows its squiggly trace; `blob`
+grows bigger and wigglier as you speak and settles into slow calm breathing in
+silence; and `border`/`half-circle` pulse and sweep with your voice. Loud
+speech is a big response; silence is calm, with the waveform's quiet stretches
+rendered as tiny dots.
 
 `border` and `half-circle` ignore `overlay.position`; the other styles honour
 `overlay.position` (`top-left`, `top-right`, `bottom-left`, `bottom-right`,

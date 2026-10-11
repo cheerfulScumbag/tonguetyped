@@ -19,7 +19,15 @@ use std::path::{Path, PathBuf};
 
 use tonguetyped::overlay::render_frame_pixels;
 
-const STYLES: [&str; 6] = ["badge", "minimal", "pill", "blob", "border", "half-circle"];
+const STYLES: [&str; 7] = [
+    "badge",
+    "minimal",
+    "pill",
+    "blob",
+    "border",
+    "half-circle",
+    "long-pill",
+];
 const PHASES: [&str; 6] = [
     "recording",
     "transcribing",
@@ -48,26 +56,13 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    for (index, t) in [0.0_f32, 0.25, 0.5, 0.75].iter().enumerate() {
-        for style in ["blob", "border", "half-circle"] {
-            for (label, live_waveform) in [("pulse", false), ("waveform", true)] {
-                let (width, height, pixels) =
-                    render_frame_pixels(style, Some("recording"), *t, live_waveform, &[]);
-                write_png(
-                    &out.join(format!("{style}-recording-{label}-{index}.png")),
-                    width,
-                    height,
-                    &pixels,
-                )?;
-            }
-        }
-    }
-
     // The live-microphone history makes every style's recording animation
     // react: the waveform styles show the level sample by sample, the pulse
-    // styles follow its envelope, and the blob's breath and halo swell with
-    // it. Render both a quiet room and a speaking voice so the difference is
-    // inspectable offline.
+    // styles follow its envelope, and the blob's body and halo swell with it.
+    // Render both a quiet room and a speaking voice so the difference is
+    // inspectable offline; the animation-cycle frames above use the speaking
+    // history too, except the blob which ignores `live_waveform` (its reaction
+    // lives in its body) and so needs only one variant.
     let quiet = quiet_levels();
     let speaking = speaking_levels();
     for style in STYLES {
@@ -83,6 +78,38 @@ fn main() -> std::io::Result<()> {
                 )?;
             }
         }
+    }
+
+    for (index, t) in [0.0_f32, 0.25, 0.5, 0.75].iter().enumerate() {
+        for style in ["blob", "border", "half-circle"] {
+            for (label, live_waveform) in [("pulse", false), ("waveform", true)] {
+                if style == "blob" && live_waveform {
+                    continue;
+                }
+                let (width, height, pixels) =
+                    render_frame_pixels(style, Some("recording"), *t, live_waveform, &speaking);
+                write_png(
+                    &out.join(format!("{style}-recording-{label}-{index}.png")),
+                    width,
+                    height,
+                    &pixels,
+                )?;
+            }
+        }
+    }
+
+    // The captain's long-pill reference pairs the recording bar with the
+    // success bar over the same waveform; render both from one level history
+    // so the status-button swap (red dot -> green check) is reviewable.
+    for (label, phase) in [("recording", "recording"), ("success", "success")] {
+        let (width, height, pixels) =
+            render_frame_pixels("long-pill", Some(phase), 0.0, true, &speaking);
+        write_png(
+            &out.join(format!("long-pill-{label}-speaking-review.png")),
+            width,
+            height,
+            &pixels,
+        )?;
     }
 
     println!("wrote overlay style preview frames to {}", out.display());
