@@ -59,6 +59,28 @@ const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
     "NoDisplay=true\n"
 );
 
+/// The one runtime every one-shot portal call runs on, kept alive for the
+/// life of the process.
+///
+/// [`ashpd`] caches its `zbus::Connection` in a process-global `OnceLock`, and
+/// zbus's tokio backend spawns that connection's socket-reader task on
+/// whichever runtime first opened it. Building a fresh runtime per call (as
+/// the wizard's and dashboard's one-shot shortcut threads used to) tears that
+/// reader down the moment the call returns, so every later portal call -
+/// reopening the shortcut dialog, re-running the test - blocks forever inside
+/// [`GlobalShortcuts::new`] before it reaches D-Bus. Routing every such call
+/// through this shared runtime keeps the cached connection usable.
+pub(crate) fn portal_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("failed to build the shared portal runtime")
+    })
+}
+
 fn application_id() -> anyhow::Result<&'static str> {
     if !cfg!(debug_assertions) {
         return Ok(INSTALLED_APPLICATION_ID);

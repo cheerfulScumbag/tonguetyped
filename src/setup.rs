@@ -79,9 +79,10 @@ pub(crate) struct ShortcutTestHandle {
 }
 
 /// Spawns a background thread that drives `activation::test_shortcut_binding`
-/// to completion and reports its outcome through the returned handle. Runs
-/// its own single-threaded tokio runtime, same as `reconfigure_shortcut_async`
-/// below.
+/// to completion and reports its outcome through the returned handle. Runs on
+/// the shared portal runtime (`activation::portal_runtime`), not a fresh
+/// per-thread one, so the process-global portal connection it opens stays
+/// usable for later calls; same as `reconfigure_shortcut_async` below.
 pub(crate) fn shortcut_test_async() -> ShortcutTestHandle {
     let result = Arc::new(Mutex::new(None));
     let result_for_thread = result.clone();
@@ -95,11 +96,7 @@ pub(crate) fn shortcut_test_async() -> ShortcutTestHandle {
 }
 
 fn run_shortcut_test() -> Result<crate::activation::ShortcutTestOutcome, String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| error.to_string())?;
-    runtime.block_on(crate::activation::test_shortcut_binding())
+    crate::activation::portal_runtime().block_on(crate::activation::test_shortcut_binding())
 }
 
 /// Shared state a background shortcut-reconfigure thread reports into,
@@ -140,9 +137,10 @@ impl ReconfigureHandle {
 }
 
 /// Spawns a background thread that drives `activation::reconfigure_shortcut`
-/// to completion and reports its outcome through the returned handle. Runs
-/// its own single-threaded tokio runtime, same as `fetch_requirement` below,
-/// rather than borrowing the caller's (the console has none to borrow).
+/// to completion and reports its outcome through the returned handle. Runs on
+/// the shared portal runtime (`activation::portal_runtime`) rather than a
+/// fresh per-thread one, so the process-global portal connection stays alive
+/// across reconfigures (a second Ctrl+R must actually reopen the dialog).
 pub(crate) fn reconfigure_shortcut_async() -> ReconfigureHandle {
     let result = Arc::new(Mutex::new(None));
     let result_for_thread = result.clone();
@@ -162,11 +160,7 @@ pub(crate) fn reconfigure_shortcut_async() -> ReconfigureHandle {
 fn run_reconfigure(
     cancel: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<crate::activation::ReconfigureOutcome, String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| error.to_string())?;
-    runtime.block_on(crate::activation::reconfigure_shortcut(cancel))
+    crate::activation::portal_runtime().block_on(crate::activation::reconfigure_shortcut(cancel))
 }
 
 pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static str {
