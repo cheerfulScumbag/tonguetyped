@@ -174,11 +174,13 @@ feedback_device = "default"
 
 The visual feedback identifies listening, transcription, completion,
 cancellation, failure, and a no-speech outcome (an empty capture that produced
-no text) without taking keyboard focus or accepting pointer input. It prefers
-a small, click-through `wlr-layer-shell` overlay badge
-positioned by `overlay.position` (`top-left`, `top-right`, `bottom-left`,
-`bottom-right`, `top`, `bottom`, or `center`) and `overlay.monitor` (`active`,
-or a specific output name from `tonguetyped doctor`). `overlay.style`
+no text) without taking keyboard focus or accepting pointer input. It draws a
+small, click-through `wlr-layer-shell` overlay badge on every connected screen
+by default: `overlay.monitor` is `all` (the legacy `active` is an alias for it),
+or set a specific output name from `tonguetyped doctor` to pin it to one screen.
+`overlay.position` (`top-left`, `top-right`, `bottom-left`,
+`bottom-right`, `top`, `bottom`, or `center`) positions each badge.
+`overlay.style`
 (`badge`, `minimal`, `pill`, `blob`, `border`, or `half-circle`) picks the
 overlay's look: `border` is a full-screen frame that glows along every screen
 edge, brightest in the corners, and `half-circle` is a glowing, pulsing
@@ -186,8 +188,9 @@ semicircle resting on the top edge at top-centre; both ignore
 `overlay.position`. `overlay.streaming_indicator`
 (`false` by default) swaps the plain pulsing dot for a busier multi-bar
 animation during recording. `tonguetyped setup`
-prompts for all of these. `zwlr_layer_shell_v1` is a wlroots-originated
-protocol; it is available on wlroots-based compositors
+prompts for enabling the overlay and its position, style, and streaming
+indicator, but not for the monitor. `zwlr_layer_shell_v1` is a
+wlroots-originated protocol; it is available on wlroots-based compositors
 (code-reviewed against Mango, but not live-validated) and on modern KWin
 (validated against KDE Plasma 6.7+), but not on X11 sessions or older/other
 compositors that never advertise it. Where it is unavailable, TongueTyped

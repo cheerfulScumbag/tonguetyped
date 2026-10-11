@@ -1,15 +1,20 @@
 //! Passive wlr-layer-shell HUD overlay for dictation feedback.
 //!
-//! Renders directly into a persistent, click-through `zwlr_layer_shell_v1`
-//! surface so recording/transcribing/success/no-speech/cancellation/failure
-//! state is glanceable without stealing keyboard or pointer focus. The
-//! surface is created lazily, on the first event; between events it holds a
-//! fully transparent buffer rather than being mapped and unmapped, and it is
-//! only recreated when the config-derived geometry or placement changes (an
-//! `overlay.style`/`position`/`monitor` change applied via `tonguetyped
+//! Renders directly into persistent, click-through `zwlr_layer_shell_v1`
+//! surfaces - one per target output - so recording/transcribing/success/
+//! no-speech/cancellation/failure state is glanceable on every connected
+//! screen at once, without stealing keyboard or pointer focus. By default
+//! (`overlay.monitor = "all"`) the overlay is shown on *every* connected
+//! output; a named monitor narrows it to that one output (see [`target_for`]).
+//! Each surface is created lazily, on the first event; between events it holds
+//! a fully transparent buffer rather than being mapped and unmapped, and the
+//! set is only recreated when the config-derived geometry or placement changes
+//! (an `overlay.style`/`position`/`monitor` change applied via `tonguetyped
 //! reload`), never per dictation, so there is no per-dictation
 //! surface-creation round trip on the latency-sensitive stop path (see
-//! AGENTS.md's stop-to-idle latency note).
+//! AGENTS.md's stop-to-idle latency note). Output add/remove is handled live:
+//! a hotplugged monitor gains its own surface on the next reconcile and a
+//! removed one's surface is dropped.
 //!
 //! `zwlr_layer_shell_v1` originated as a wlroots protocol extension (this
 //! project is code-reviewed, but not live-validated, against Mango, a
@@ -164,15 +169,67 @@ struct Command {
     config: OverlayConfig,
 }
 
+/// Which output(s) the overlay renders on, resolved from `overlay.monitor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    /// Every connected output - the default.
+    All,
+    /// Only the output whose name matches, when it is connected.
+    Named(String),
+}
+
+/// Resolves `overlay.monitor` into a [`Target`]. `"all"` (the default), the
+/// legacy `"active"`, and an empty value all mean every connected output; any
+/// other value names a single output to pin the overlay to. Folding the old
+/// `"active"` in means existing installs (whose config still says `"active"`)
+/// gain the all-screens behavior instead of silently staying on one screen;
+/// a named monitor remains the "just the one" escape hatch.
+fn target_for(monitor: &str) -> Target {
+    if monitor.is_empty() || monitor == "all" || monitor == "active" {
+        Target::All
+    } else {
+        Target::Named(monitor.to_string())
+    }
+}
+
+/// Whether `target` wants the overlay on the output with this name (`None` when
+/// the compositor has not reported a name yet). `All` wants every output, even
+/// before its name is known, so surfaces appear as soon as outputs do; `Named`
+/// wants exactly the matching name, so it waits for the name to resolve.
+fn target_includes_output(target: &Target, name: Option<&str>) -> bool {
+    match target {
+        Target::All => true,
+        Target::Named(wanted) => name == Some(wanted.as_str()),
+    }
+}
+
+/// Which connected outputs (by index into `names`, in compositor order) the
+/// overlay should render on: every one for [`Target::All`], only the name
+/// matches for [`Target::Named`]. An empty result means "no outputs", which the
+/// caller turns into a single compositor-chosen fallback surface only for
+/// [`Target::All`] - a named target that is disconnected stays dark rather than
+/// leaking onto another screen.
+fn selected_output_indices(target: &Target, names: &[Option<&str>]) -> Vec<usize> {
+    match target {
+        Target::All => (0..names.len()).collect(),
+        Target::Named(_) => names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| target_includes_output(target, **name))
+            .map(|(index, _)| index)
+            .collect(),
+    }
+}
+
 /// The config-derived inputs that fix a layer surface's geometry and placement:
 /// whether it spans the whole output, its requested size, and the anchor
-/// position and output it is bound to.
+/// position and target outputs.
 #[derive(Debug, PartialEq, Eq)]
 struct LayerSpec {
     fullscreen: bool,
     size: (u32, u32),
     position: String,
-    monitor: String,
+    target: Target,
 }
 
 fn layer_spec(config: &OverlayConfig, style: Style) -> LayerSpec {
@@ -180,7 +237,7 @@ fn layer_spec(config: &OverlayConfig, style: Style) -> LayerSpec {
         fullscreen: is_fullscreen_style(style),
         size: surface_size_for(style),
         position: config.position.clone(),
-        monitor: config.monitor.clone(),
+        target: target_for(&config.monitor),
     }
 }
 
@@ -241,15 +298,16 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         shm,
         qh,
         pool,
-        layer: None,
-        width: BADGE,
-        height: BADGE,
-        configured: false,
+        surfaces: Vec::new(),
         phase: None,
         deadline: None,
         anim_start: Instant::now(),
         streaming_indicator: false,
         style: Style::Badge,
+        // Overwritten by the first `handle_command`; surfaces are not created
+        // until then, so these are never used to build a surface beforehand.
+        position: "top-right".to_string(),
+        target: Target::All,
         layer_spec: None,
         ticking: false,
         ticking_animated: false,
@@ -302,6 +360,17 @@ impl Phase {
     }
 }
 
+/// One created layer surface and the output it belongs to. `output` is the
+/// output the surface is bound to, or `None` for the compositor-chosen surface
+/// used as a fallback when no outputs are enumerated yet.
+struct Surface {
+    output: Option<wl_output::WlOutput>,
+    layer: LayerSurface,
+    width: u32,
+    height: u32,
+    configured: bool,
+}
+
 struct State {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -310,15 +379,14 @@ struct State {
     shm: Shm,
     qh: QueueHandle<State>,
     pool: SlotPool,
-    layer: Option<LayerSurface>,
-    width: u32,
-    height: u32,
-    configured: bool,
+    surfaces: Vec<Surface>,
     phase: Option<Phase>,
     deadline: Option<Instant>,
     anim_start: Instant,
     streaming_indicator: bool,
     style: Style,
+    position: String,
+    target: Target,
     layer_spec: Option<LayerSpec>,
     ticking: bool,
     ticking_animated: bool,
@@ -334,25 +402,67 @@ impl State {
         self.anim_start = Instant::now();
         self.streaming_indicator = command.config.streaming_indicator;
         self.style = style_for(&command.config.style);
+        self.position = command.config.position.clone();
+        self.target = target_for(&command.config.monitor);
 
         let spec = layer_spec(&command.config, self.style);
-        if self.layer.is_none() || self.layer_spec.as_ref() != Some(&spec) {
-            self.configured = false;
-            self.create_layer(&command.config);
+        if self.layer_spec.as_ref() != Some(&spec) {
+            // Geometry/placement/style/target changed: every existing surface
+            // was built with the old spec, so tear them down and rebuild for
+            // the newly resolved target set.
+            self.surfaces.clear();
             self.layer_spec = Some(spec);
-        } else {
-            // A no-op before the first `configure` arrives: `redraw` guards
-            // on `self.configured` itself, and the pending `configure`
-            // handler will redraw with this (already-updated) phase once it
-            // lands.
-            self.redraw();
         }
+        // Create surfaces for any desired output that lacks one (first event,
+        // or a hotplug) and drop any no longer desired.
+        self.reconcile_surfaces();
+        // A no-op for not-yet-`configure`d surfaces; the pending `configure`
+        // handler redraws each with this (already-updated) phase once it lands.
+        self.redraw_all();
 
         self.arm_timer(loop_handle);
     }
 
-    fn create_layer(&mut self, config: &OverlayConfig) {
-        let output = resolve_output(&self.output_state, &config.monitor);
+    /// Brings the live surface set in line with the resolved [`Target`] and the
+    /// outputs the compositor currently reports: creates a surface for every
+    /// desired output that lacks one, and drops surfaces whose output is no
+    /// longer desired. Called on every command and whenever an output is
+    /// added or updated.
+    fn reconcile_surfaces(&mut self) {
+        let target = self.target.clone();
+        let outputs: Vec<wl_output::WlOutput> = self.output_state.outputs().collect();
+        let names: Vec<Option<String>> = outputs
+            .iter()
+            .map(|output| self.output_state.info(output).and_then(|info| info.name))
+            .collect();
+        let name_refs: Vec<Option<&str>> = names.iter().map(|name| name.as_deref()).collect();
+        let desired: Vec<Option<wl_output::WlOutput>> =
+            if target == Target::All && outputs.is_empty() {
+                // No outputs enumerated (yet): fall back to a single
+                // compositor-chosen surface so feedback still shows.
+                vec![None]
+            } else {
+                selected_output_indices(&target, &name_refs)
+                    .into_iter()
+                    .map(|index| Some(outputs[index].clone()))
+                    .collect()
+            };
+
+        // Preserve surfaces whose output is still desired (so an unchanged set
+        // is never torn down and recreated), then create the missing ones.
+        self.surfaces
+            .retain(|surface| desired.iter().any(|output| output == &surface.output));
+        for output in desired {
+            if self.surfaces.iter().any(|surface| surface.output == output) {
+                continue;
+            }
+            self.create_surface(output);
+        }
+    }
+
+    /// Builds one layer surface bound to `output` (`None` for the
+    /// compositor-chosen fallback output) using the current style/position.
+    fn create_surface(&mut self, output: Option<wl_output::WlOutput>) {
         let surface = self.compositor.create_surface(&self.qh);
         let layer = self.layer_shell.create_layer_surface(
             &self.qh,
@@ -374,7 +484,7 @@ impl State {
         } else if top_docked {
             Anchor::TOP
         } else {
-            anchor_for(&config.position)
+            anchor_for(&self.position)
         });
         let margin = if fullscreen || top_docked { 0 } else { MARGIN };
         layer.set_margin(margin, margin, margin, margin);
@@ -391,9 +501,25 @@ impl State {
             layer.set_input_region(Some(region.wl_region()));
         }
         layer.commit();
-        self.width = width;
-        self.height = height;
-        self.layer = Some(layer);
+        self.surfaces.push(Surface {
+            output,
+            layer,
+            width,
+            height,
+            configured: false,
+        });
+    }
+
+    /// Reconciles after a compositor-reported output change (hotplug). A no-op
+    /// before the first event: surfaces are created lazily, so an idle actor
+    /// with nothing to draw stays at zero weight until the first command
+    /// reconciles it.
+    fn on_outputs_changed(&mut self) {
+        if self.phase.is_none() && self.surfaces.is_empty() {
+            return;
+        }
+        self.reconcile_surfaces();
+        self.redraw_all();
     }
 
     fn arm_timer(&mut self, loop_handle: &LoopHandle<'static, State>) {
@@ -425,7 +551,7 @@ impl State {
         }
         match self.phase {
             Some(phase) if phase.is_animated() => {
-                self.redraw();
+                self.redraw_all();
                 TimeoutAction::ToDuration(TICK)
             }
             Some(_) => {
@@ -437,7 +563,7 @@ impl State {
                 if now >= deadline {
                     self.phase = None;
                     self.deadline = None;
-                    self.redraw();
+                    self.redraw_all();
                     self.ticking = false;
                     TimeoutAction::Drop
                 } else {
@@ -451,15 +577,29 @@ impl State {
         }
     }
 
-    fn redraw(&mut self) {
+    fn redraw_all(&mut self) {
+        for index in 0..self.surfaces.len() {
+            self.redraw_surface(index);
+        }
+    }
+
+    fn redraw_surface(&mut self, index: usize) {
+        let Some((layer, width, height, configured)) = self.surfaces.get(index).map(|surface| {
+            (
+                surface.layer.clone(),
+                surface.width,
+                surface.height,
+                surface.configured,
+            )
+        }) else {
+            return;
+        };
         // Attaching a buffer before the first `configure` is a protocol
         // error; `on_tick`'s animated-phase branch can otherwise race this
         // (e.g. the compositor takes longer than one `TICK` to send it).
-        if !self.configured {
+        if !configured {
             return;
         }
-        let Some(layer) = &self.layer else { return };
-        let (width, height) = (self.width, self.height);
         let stride = width as i32 * 4;
         let Ok((buffer, pixels)) = self.pool.create_buffer(
             width as i32,
@@ -491,19 +631,6 @@ impl State {
         let _ = buffer.attach_to(layer.wl_surface());
         layer.commit();
     }
-}
-
-fn resolve_output(output_state: &OutputState, monitor: &str) -> Option<wl_output::WlOutput> {
-    if monitor == "active" {
-        return None;
-    }
-    output_state.outputs().find(|output| {
-        output_state
-            .info(output)
-            .and_then(|info| info.name)
-            .as_deref()
-            == Some(monitor)
-    })
 }
 
 /// The `OverlayConfig::position` values both configuration UIs (the setup
@@ -681,6 +808,8 @@ impl OutputHandler for State {
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        // A hotplugged monitor gains its own surface (when the target is all).
+        self.on_outputs_changed();
     }
 
     fn update_output(
@@ -689,40 +818,68 @@ impl OutputHandler for State {
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        // An output's name becomes known here; a `Named` target may now match.
+        self.on_outputs_changed();
     }
 
     fn output_destroyed(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        // smithay-client-toolkit calls this before removing the output from
+        // `OutputState`, so `output_state.outputs()` still lists it here;
+        // reconciling would bind a fresh surface to a wl_output the compositor
+        // is destroying. Removal only drops surfaces - creation on an output
+        // change is handled by `new_output`/`update_output`, which see a
+        // consistent output list.
+        self.surfaces
+            .retain(|surface| surface.output.as_ref() != Some(&output));
     }
 }
 
 impl LayerShellHandler for State {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.layer = None;
-        self.loop_signal.stop();
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        // One surface was closed (e.g. its output went away). Drop just that
+        // one and keep the actor alive for the remaining outputs; stopping the
+        // event loop here, as the single-surface version did, would kill
+        // feedback on every other screen. A replacement is created on the next
+        // reconcile when the output reappears.
+        self.surfaces.retain(|surface| &surface.layer != layer);
     }
 
     fn configure(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        let Some(index) = self
+            .surfaces
+            .iter()
+            .position(|surface| &surface.layer == layer)
+        else {
+            return;
+        };
         let (width, height) = configure.new_size;
         // A full-screen style's real size arrives here (the compositor fills in
         // the stretched dimensions); fall back to the style's representative
         // size only if a compositor reports a zero dimension.
         let fallback = surface_size_for(self.style);
-        self.width = if width == 0 { fallback.0 } else { width };
-        self.height = if height == 0 { fallback.1 } else { height };
-        self.configured = true;
-        self.redraw();
+        let (width, height) = (
+            if width == 0 { fallback.0 } else { width },
+            if height == 0 { fallback.1 } else { height },
+        );
+        {
+            let surface = &mut self.surfaces[index];
+            surface.width = width;
+            surface.height = height;
+            surface.configured = true;
+        }
+        self.redraw_surface(index);
     }
 }
 
@@ -1061,7 +1218,7 @@ fn style_for(name: &str) -> Style {
 
 /// Whether a style owns the whole output rather than a small anchored badge.
 /// Only `Border` does: it is a full-screen `zwlr_layer_shell_v1` surface whose
-/// glow traces the screen edges, so `create_layer` anchors it to every edge
+/// glow traces the screen edges, so `create_surface` anchors it to every edge
 /// with no margin and a zero requested size (the compositor stretches it to the
 /// output), and `configure` supplies its real dimensions.
 fn is_fullscreen_style(style: Style) -> bool {
@@ -1070,7 +1227,7 @@ fn is_fullscreen_style(style: Style) -> bool {
 
 /// Whether a style is docked to a single screen edge rather than placed at the
 /// configured `overlay.position`. Only `HalfCircle` is: a semicircle resting on
-/// the top edge only reads correctly at top-centre, so `create_layer` anchors it
+/// the top edge only reads correctly at top-centre, so `create_surface` anchors it
 /// to the top edge (which centres it horizontally) with no margin, and it
 /// ignores `overlay.position` the same way `Border` does.
 fn is_top_docked_style(style: Style) -> bool {
@@ -1082,7 +1239,7 @@ fn is_top_docked_style(style: Style) -> bool {
 /// fade out before the surface edge, and `HalfCircle` is wider than tall so its
 /// dome and glow have room to fade. For the full-screen `Border` style this
 /// is only the representative size used by the offline preview and the tests;
-/// `create_layer` requests a stretched zero-sized surface instead.
+/// `create_surface` requests a stretched zero-sized surface instead.
 fn surface_size_for(style: Style) -> (u32, u32) {
     match style {
         Style::Badge | Style::Minimal => (BADGE, BADGE),
@@ -1818,8 +1975,8 @@ mod tests {
         assert_ne!(base_spec, layer_spec(&base, Style::Border));
         assert_ne!(base_spec, layer_spec(&base, Style::Pill));
 
-        // The anchor (position) and the output (monitor) are baked into the
-        // surface at creation too, so each must move the spec.
+        // The anchor (position) and the target outputs (monitor) are baked into
+        // the surface at creation too, so each must move the spec.
         let mut other_position = base.clone();
         other_position.position = "bottom-left".into();
         assert_ne!(base_spec, layer_spec(&other_position, Style::Badge));
@@ -1828,8 +1985,63 @@ mod tests {
         other_monitor.monitor = "HDMI-A-1".into();
         assert_ne!(base_spec, layer_spec(&other_monitor, Style::Badge));
 
+        // Folding the legacy "active" into the all-screens default means it
+        // yields the same spec as the new "all" default.
+        let mut legacy_active = base.clone();
+        legacy_active.monitor = "active".into();
+        assert_eq!(base_spec, layer_spec(&legacy_active, Style::Badge));
+
         // An identical config must not force a recreation.
         assert_eq!(base_spec, layer_spec(&base.clone(), Style::Badge));
+    }
+
+    #[test]
+    fn target_for_folds_all_active_and_empty_into_every_output() {
+        assert_eq!(target_for("all"), Target::All);
+        assert_eq!(target_for("active"), Target::All);
+        assert_eq!(target_for(""), Target::All);
+        assert_eq!(target_for("HDMI-A-1"), Target::Named("HDMI-A-1".into()));
+    }
+
+    #[test]
+    fn target_includes_output_selects_the_right_outputs() {
+        // "all" wants every output, even before its name is known.
+        assert!(target_includes_output(&Target::All, Some("DP-1")));
+        assert!(target_includes_output(&Target::All, None));
+
+        // A named target matches only its own output, and waits (excludes)
+        // while the name is still unknown.
+        let named = Target::Named("DP-1".into());
+        assert!(target_includes_output(&named, Some("DP-1")));
+        assert!(!target_includes_output(&named, Some("HDMI-A-1")));
+        assert!(!target_includes_output(&named, None));
+    }
+
+    #[test]
+    fn selected_output_indices_covers_all_or_only_the_named_match() {
+        // `All` picks every connected output, in order, including any whose
+        // name the compositor has not reported yet.
+        let names = [Some("DP-1"), Some("HDMI-A-1"), None];
+        assert_eq!(selected_output_indices(&Target::All, &names), vec![0, 1, 2]);
+
+        // A named target picks exactly its match, and nothing when it is not
+        // connected (so it stays dark instead of leaking onto another screen).
+        assert_eq!(
+            selected_output_indices(&Target::Named("HDMI-A-1".into()), &names),
+            vec![1]
+        );
+        assert_eq!(
+            selected_output_indices(&Target::Named("DP-9".into()), &names),
+            Vec::<usize>::new()
+        );
+
+        // No outputs selected and no outputs connected both yield no indices;
+        // the `All` caller substitutes its single fallback surface, a named
+        // caller does not.
+        assert_eq!(
+            selected_output_indices(&Target::All, &[]),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]

@@ -117,17 +117,19 @@ probe-then-cache shape as the inference module's `backend_info`/
 `cached_backend_info` split above) and `feedback.rs` falls back to the
 existing Plasma OSD / notification / sound chain whenever it's absent (X11
 sessions, compositors that never added
-it). The layer surface is created lazily, on the first event and kept
-transparent-but-mapped between dictations rather than being torn down, so
-there's no per-dictation Wayland round trip on the stop-to-idle hot path.
-`examples/overlay_preview.rs` cycles or holds each semantic state for manual
-validation on a given compositor (`cargo run --example overlay_preview --
-top-right recording`); screenshotting it requires a compositor-native tool
-(`grim` needs wlr-screencopy, which KWin doesn't have - use `spectacle -b -f -n
--o out.png` there) and, on a multi-monitor KWin session, checking every
-output's corner, since `output: None` (config's `monitor = "active"`) places
-the surface on whichever output KWin currently considers focused, not
-necessarily the one at the top-left of the combined virtual screen.
+it). One layer surface is created per target output, lazily on the first event,
+and kept transparent-but-mapped between dictations rather than being torn down,
+so there's no per-dictation Wayland round trip on the stop-to-idle hot path.
+`overlay.monitor` (default now `"all"`) selects every connected output; the
+legacy `"active"` is folded into the same all-screens behavior, and a named
+monitor pins the overlay to that one output. The surface set reconciles on
+output add/remove/update, so hotplug is handled live without restarting the
+actor. `examples/overlay_preview.rs` cycles or holds each semantic state for
+manual validation on a given compositor (`cargo run --example overlay_preview --
+top-right recording`; a fourth arg is `overlay.monitor`); screenshotting it
+requires a compositor-native tool (`grim` needs wlr-screencopy, which KWin
+doesn't have - use `spectacle -b -f -n -o out.png` there), and on a
+multi-monitor KWin session every output's corner should show a surface at once.
 
 `config::OverlayConfig::enabled` defaults to `true` (changed from `false`): this is
 the only visual dictation feedback there is - `feedback.rs::DesktopFeedback::send`
@@ -350,14 +352,14 @@ doesn't have). Each `Style` can request a different Wayland surface size
 (`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges). A layer
 surface's geometry and placement are fixed at creation, so the actor keeps the
 config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
-`monitor`) and recreates the surface when it changes: an `overlay.style`,
+`target`) and recreates the surfaces when it changes: an `overlay.style`,
 `position`, or `monitor` change applied via `tonguetyped reload` takes effect on
 the next event, with no daemon restart.
 `border` (the fifth style, captain-requested) is an exception to the
 small-anchored-badge model: it is a full-screen surface anchored to every edge
 with no margin and a zero requested size (the compositor stretches it to the
 output and reports the real dimensions via `configure`), so
-`overlay::is_fullscreen_style` drives `create_layer`'s anchor/size/margin and
+`overlay::is_fullscreen_style` drives `create_surface`'s anchor/size/margin and
 `surface_size_for(Border)` returns only the representative `BORDER_PREVIEW`
 used by the offline preview and the pixel tests. `paint_border`/`border_glow`
 draw a thin ~2px phase-coloured line hugging the nearest edge that dissolves
@@ -381,7 +383,7 @@ side is the screen's top edge and the dome bulges downward, with a
 `half_circle_profile` radial fill-plus-glow that fades monotonically to zero
 (no band edge) and is mirror-symmetric about the vertical centre line. Like
 `border` it ignores `overlay.position`; where `border` is full-screen,
-`half-circle` is top-docked - `overlay::is_top_docked_style` makes `create_layer`
+`half-circle` is top-docked - `overlay::is_top_docked_style` makes `create_surface`
 anchor it to `Anchor::TOP` (compositor-centres horizontally) with no margin, and
 `surface_size_for(HalfCircle)` is `BADGE*2` wide by `BADGE` tall (the size is a
 real requested size, unlike `border`'s representative-only `BORDER_PREVIEW`).

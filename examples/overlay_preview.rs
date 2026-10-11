@@ -15,7 +15,11 @@
 //! overlay_preview -- top-right recording blob`. The `border` style ignores
 //! `position`: it is a full-screen frame that hugs every screen edge. The
 //! `half-circle` style also ignores `position`: it is a semicircle resting on
-//! the top edge, always at top-centre.
+//! the top edge, always at top-centre. The overlay shows on every connected
+//! output by default; pass `overlay.monitor` as a fourth argument
+//! (`all`/`active` for every screen, or a monitor name like `DP-1` to pin one)
+//! to preview the scoping, e.g. `cargo run --example overlay_preview --
+//! top-right recording badge DP-1`.
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -33,10 +37,11 @@ fn main() {
     let style = std::env::args()
         .nth(3)
         .unwrap_or_else(|| "badge".to_string());
+    let monitor = std::env::args().nth(4).unwrap_or_else(|| "all".to_string());
     let mut config = OverlayConfig {
         enabled: true,
         position,
-        monitor: "active".to_string(),
+        monitor,
         streaming_indicator: false,
         style,
     };
