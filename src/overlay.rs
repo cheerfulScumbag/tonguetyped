@@ -61,8 +61,8 @@ const BADGE: u32 = 56;
 /// surface edge (see `paint_blob`/`blob_edge`).
 const BLOB_SURFACE: u32 = 96;
 /// The `LongPill` style's surface: a wide bar whose 8:1 width-to-height ratio
-/// matches the captain's reference (a 944x121 bar, see
-/// `data/tt-pill-overlay-live-microphone-waveform-re-23/reference-long-pill.png`).
+/// matches the captain's reference (a 944x121 bar; see the design record at
+/// `data/tt-pill-overlay-live-microphone-waveform-re-23/design-brief.md`).
 /// Unlike the small badge styles it has no glow to pad for, so the surface is
 /// exactly the bar itself.
 const LONG_PILL_SURFACE: (u32, u32) = (384, 48);
@@ -1797,8 +1797,9 @@ fn paint_pill(
 
 /// A wide dark bar holding one continuous squiggly waveform line plus a round
 /// phase status button at its right end - the `LongPill` style, built to the
-/// captain's reference (`data/tt-pill-overlay-live-microphone-waveform-re-23/
-/// reference-long-pill.png`): the bar is a neutral #323232 capsule (the phase
+/// captain's reference (see the design record at
+/// `data/tt-pill-overlay-live-microphone-waveform-re-23/design-brief.md`): the
+/// bar is a neutral #323232 capsule (the phase
 /// colour lives in the button, not the bar), the trace is a smooth light-grey
 /// line that rolls with the live `LevelHistory`, and the button is the phase
 /// colour made vivid with `bolden` (red with a white dot while recording, green
@@ -1955,7 +1956,8 @@ fn long_pill_trace_sample(envelope: f32, i: usize) -> f32 {
 /// itself - voice peaks sprout sharp spikes from the body and swell it
 /// slightly, while silence settles back into a soft, round, slowly breathing
 /// ball (no bar waveform is drawn inside it; see `blob_edge`/`blob_spikes` and
-/// the captain's review in `data/tt-pill-overlay-live-microphone-waveform-re-23/`).
+/// the captain's review in
+/// `data/tt-pill-overlay-live-microphone-waveform-re-23/design-brief.md`).
 /// The halo brightens with the voice too. The `Transcribing` spinner glyph
 /// advances on the faster fraction `t` independently, so the silhouette keeps
 /// breathing slowly while the spinner turns. A white glyph carries the state

@@ -411,9 +411,9 @@ Its per-phase pixel checks live in `src/overlay.rs` tests; `half-circle` is in
 continuous squiggly light-grey trace plus a round phase status button at its
 right end (phase colour vivid via `bolden`; red with a white dot while
 recording, green with a checkmark on success, and the matching glyph for every
-other phase), built to the captain's reference
-`data/tt-pill-overlay-live-microphone-waveform-re-23/reference-long-pill.png`
-(`long-pill-vs-reference.png` there is the side-by-side sign-off render).
+other phase), built to the captain's reference look (the design record,
+including the ask and the not-committed reference capture, is
+`data/tt-pill-overlay-live-microphone-waveform-re-23/design-brief.md`).
 `paint_long_pill` derives all geometry from the bar height (button 0.752h,
 trace 0.066h thick, +/-0.27h excursions, trace from 0.039w to just short of the
 button). The trace rolls with the same `LevelHistory`: `long_pill_envelope`
