@@ -1027,6 +1027,14 @@ struct Canvas<'a> {
 }
 
 impl Canvas<'_> {
+    /// Source-over blends `rgb` at `coverage` opacity into the canvas.
+    ///
+    /// The buffer is the layer surface's wl_shm `Argb8888`, whose alpha is
+    /// **premultiplied** (the Wayland contract), so the stored colour is
+    /// `rgb * coverage` plus whatever was already there scaled by its own
+    /// alpha. Getting this wrong is very visible: a straight-alpha fade is
+    /// read by the compositor as an opaque, full-brightness colour wherever
+    /// alpha > 0, so glows stop fading and pale tints read as solid white.
     fn blend(&mut self, x: i32, y: i32, rgb: (u8, u8, u8), coverage: f32) {
         if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
             return;
@@ -1043,11 +1051,13 @@ impl Canvas<'_> {
             pixel.copy_from_slice(&[0, 0, 0, 0]);
             return;
         }
+        // Both terms are already premultiplied: the source contributes its
+        // colour scaled by its coverage, the destination what it already holds
+        // scaled by how much of it survives.
         let mix = |src: u8, dst: u8| -> u8 {
-            let src = src as f32 / 255.0;
-            let dst = dst as f32 / 255.0;
-            let out = (src * coverage + dst * existing_alpha * (1.0 - coverage)) / out_alpha;
-            (out * 255.0).round().clamp(0.0, 255.0) as u8
+            let src = src as f32 / 255.0 * coverage;
+            let dst = dst as f32 / 255.0 * (1.0 - coverage);
+            ((src + dst) * 255.0).round().clamp(0.0, 255.0) as u8
         };
         pixel[0] = mix(rgb.2, pixel[0]);
         pixel[1] = mix(rgb.1, pixel[1]);
@@ -1998,11 +2008,14 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
 
             if dist >= edge {
                 // A soft glowing halo hugging the silhouette, so the blob
-                // still reads as a luminous plasma on a dark desktop.
+                // still reads as a luminous plasma on a dark desktop. It is
+                // the phase hue fading by opacity only - never a pale,
+                // whitened tint (the captain's review: the red should just
+                // fade opacity).
                 let into_halo = dist - edge;
                 if into_halo < halo_width {
                     let strength = 1.0 - into_halo / halo_width;
-                    canvas.blend(x, y, sheen, halo_strength * strength * strength);
+                    canvas.blend(x, y, color, halo_strength * strength * strength);
                 }
                 continue;
             }
@@ -2114,10 +2127,11 @@ fn paint_border(
     let width = canvas.width as f32;
     let height = canvas.height as f32;
     let (cx, cy) = (width / 2.0, height / 2.0);
-    // Bolder, brighter hues than the base phase colour (the captain's ask),
-    // with only a light lift on the core so the hue never washes out to white.
+    // Bolder, brighter hues than the base phase colour (the captain's ask).
+    // The fade is alpha-only: the glow keeps this hue and only loses opacity
+    // (the captain's review: red must fade by opacity, never blend toward a
+    // pale or greenish white).
     let color = bolden(phase_color(phase));
-    let hot = lighten(color, 0.28);
     let lf = recording_level(levels);
     let carrier = 0.5 + 0.5 * (t * TAU).sin();
     let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
@@ -2144,8 +2158,7 @@ fn paint_border(
             if intensity <= 0.0 {
                 continue;
             }
-            let rgb = mix_color(color, hot, intensity);
-            canvas.blend(x as i32, y as i32, rgb, intensity);
+            canvas.blend(x as i32, y as i32, color, intensity);
         }
     }
 }
@@ -2191,7 +2204,8 @@ fn paint_half_circle(
     let radius = height * HALF_CIRCLE_RADIUS_FRACTION;
     let glow = height * HALF_CIRCLE_GLOW_FRACTION;
     let color = phase_color(phase);
-    let hot = lighten(color, 0.22);
+    // The dome's fade is alpha-only, same as the border: the phase hue never
+    // shifts toward white as it dissolves outward.
     let lf = recording_level(levels);
     let carrier = 0.5 + 0.5 * (t * TAU).sin();
     let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
@@ -2223,15 +2237,16 @@ fn paint_half_circle(
                 let radial = (r / radius).clamp(0.0, 1.0).powi(2);
                 intensity = (intensity + angular * radial * sweep_strength).min(1.0);
             }
-            let rgb = mix_color(color, hot, intensity);
-            canvas.blend(x as i32, y as i32, rgb, intensity);
+            canvas.blend(x as i32, y as i32, color, intensity);
         }
     }
 }
 
-/// Renders one overlay frame into a straight-alpha BGRA8 buffer (wl_shm
-/// `Argb8888`, little-endian), for the offline design-preview example
-/// (`examples/overlay_style_png.rs`, which reorders it to PNG's RGBA). `style`
+/// Renders one overlay frame into a premultiplied-alpha BGRA8 buffer (wl_shm
+/// `Argb8888`, little-endian) - the exact byte layout and alpha convention the
+/// layer surface consumes, so offline frames match what the compositor shows.
+/// `examples/overlay_style_png.rs` reorders it to PNG's RGBA (and
+/// unpremultiplies, since PNG alpha is straight). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`;
 /// `recording`/`transcribing`/`success`/`no-speech`/`cancelled`/`error`), and
@@ -2436,6 +2451,103 @@ mod tests {
             0,
             "corner outside the circle should stay transparent"
         );
+    }
+
+    #[test]
+    fn canvas_blend_stores_premultiplied_alpha() {
+        // wl_shm `Argb8888` is premultiplied: a half-opacity red pixel must be
+        // stored as roughly (112, 25, 25) at alpha 128, never as full-strength
+        // (224, 49, 49). Storing the straight colour is exactly what made the
+        // compositor show full-brightness glows instead of fades.
+        let mut pixels = vec![0u8; 4];
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width: 1,
+            height: 1,
+        };
+        canvas.blend(0, 0, (224, 49, 49), 0.5);
+        assert_eq!(pixels[3], 128, "alpha should be 0.5");
+        assert!(
+            (pixels[2] as i32 - 112).abs() <= 1,
+            "premultiplied red should be ~112, got {}",
+            pixels[2]
+        );
+        assert!(
+            (pixels[1] as i32 - 25).abs() <= 1,
+            "premultiplied green should be ~25, got {}",
+            pixels[1]
+        );
+        assert!(
+            (pixels[0] as i32 - 25).abs() <= 1,
+            "premultiplied blue should be ~25, got {}",
+            pixels[0]
+        );
+
+        // The premultiplied invariant holds after any blend, including over an
+        // existing translucent pixel: no colour channel may exceed alpha, or
+        // the compositor would show a colour that cannot fade out.
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width: 1,
+            height: 1,
+        };
+        canvas.blend(0, 0, (224, 49, 49), 0.25);
+        canvas.blend(0, 0, (255, 255, 255), 0.3);
+        assert!(
+            pixels[0] <= pixels[3] && pixels[1] <= pixels[3] && pixels[2] <= pixels[3],
+            "premultiplied channels must never exceed alpha: {pixels:?}"
+        );
+    }
+
+    #[test]
+    fn glows_fade_by_opacity_without_shifting_hue() {
+        // Every translucent "glow" pixel keeps the phase hue: for a red
+        // recording it stays red-dominant with green and blue together, never
+        // a pale/whitened tint. Covers the border glow, the half-circle glow
+        // and the blob halo, the three styles with wide soft fades.
+        let is_faded_red = |pixel: &[u8]| -> bool {
+            let (b, g, r, a) = (pixel[0] as i32, pixel[1] as i32, pixel[2] as i32, pixel[3]);
+            a > 0 && a < 250 && r > g + 8 && (g - b).abs() <= 2
+        };
+        for style in [Style::Border, Style::HalfCircle, Style::Blob] {
+            let (width, height) = surface_size_for(style);
+            let pixels = paint_to_pixels(Some(Phase::Recording), 0.0, false, style);
+            let faded = (0..width * height)
+                .map(|i| {
+                    let index = (i * 4) as usize;
+                    &pixels[index..index + 4]
+                })
+                .filter(|pixel| is_faded_red(pixel))
+                .count();
+            assert!(
+                faded >= 50,
+                "{style:?}: expected a red-dominant opacity fade, only {faded} faded red pixels"
+            );
+            // ...and no translucent pixel may be a whitened tint (green and
+            // blue clearly above the phase colour's level and close to red).
+            let whitened = (0..width * height)
+                .map(|i| {
+                    let index = (i * 4) as usize;
+                    &pixels[index..index + 4]
+                })
+                .filter(|pixel| {
+                    let (b, g, r, a) = (
+                        pixel[0] as i32,
+                        pixel[1] as i32,
+                        pixel[2] as i32,
+                        pixel[3] as i32,
+                    );
+                    // whiteness also means the *stored* colour survived at near
+                    // full strength while alpha is low: premultiplied channels
+                    // must never exceed alpha.
+                    a > 0 && (b > a + 4 || g > a + 4 || r > a + 4)
+                })
+                .count();
+            assert_eq!(
+                whitened, 0,
+                "{style:?}: {whitened} pixels store colour brighter than their alpha"
+            );
+        }
     }
 
     const ALL_STYLES: [Style; 7] = [

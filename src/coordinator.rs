@@ -1011,14 +1011,14 @@ impl Coordinator {
                 inner.last_action = Some(Instant::now());
                 self.feedback.send(FeedbackEvent::Cancelled, &inner.config);
                 let timing = inner.active_timing.take();
+                if let Some(timing) = &timing {
+                    self.emit_timing(timing, "cancelled");
+                }
                 drop(inner);
                 // Reach an in-flight transcription through its cancel token
                 // rather than the inference lock it is holding, so a shutdown
                 // join completes promptly instead of waiting out the inference.
                 self.runtime.cancel_transcription();
-                if let Some(timing) = timing {
-                    self.emit_timing(&timing, "cancelled");
-                }
                 CoordinatorResponse::Cancelled
             }
         }
@@ -1230,8 +1230,8 @@ impl Coordinator {
             inner.active_timing = None;
             self.feedback
                 .send(completion_feedback_event(outcome), &inner.config);
-            drop(inner);
             self.emit_timing(timing, outcome);
+            drop(inner);
         }
     }
 
@@ -1249,8 +1249,8 @@ impl Coordinator {
             inner.active_timing = None;
             inner.last_error = Some(error);
             self.feedback.send(FeedbackEvent::Error, &inner.config);
-            drop(inner);
             self.emit_timing(timing, outcome);
+            drop(inner);
         }
     }
 

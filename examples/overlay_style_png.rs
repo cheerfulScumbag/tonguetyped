@@ -156,18 +156,26 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> std::io::Resu
     write_chunk(&mut out, b"IHDR", &ihdr);
 
     // PNG scanlines are each prefixed by a filter byte; filter 0 is "none".
-    // The canvas buffer is wl_shm Argb8888 (little-endian BGRA), so reorder to
-    // PNG's RGBA.
+    // The canvas buffer is wl_shm Argb8888 (little-endian BGRA) with
+    // premultiplied alpha, so reorder to PNG's RGBA and unpremultiply (PNG
+    // alpha is straight).
     let mut raw = Vec::with_capacity((height * (1 + width * 4)) as usize);
     for y in 0..height {
         raw.push(0);
         for x in 0..width {
             let index = ((y * width + x) * 4) as usize;
+            let alpha = rgba[index + 3] as u32;
+            let straight = |channel: u8| -> u8 {
+                (channel as u32 * 255)
+                    .checked_div(alpha)
+                    .map(|value| value.min(255) as u8)
+                    .unwrap_or(0)
+            };
             raw.extend_from_slice(&[
-                rgba[index + 2],
-                rgba[index + 1],
-                rgba[index],
-                rgba[index + 3],
+                straight(rgba[index + 2]),
+                straight(rgba[index + 1]),
+                straight(rgba[index]),
+                alpha as u8,
             ]);
         }
     }
