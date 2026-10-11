@@ -415,10 +415,14 @@ other phase), built to the captain's reference
 (`long-pill-vs-reference.png` there is the side-by-side sign-off render).
 `paint_long_pill` derives all geometry from the bar height (button 0.752h,
 trace 0.066h thick, +/-0.27h excursions, trace from 0.039w to just short of the
-button). The trace rolls with the same `LevelHistory`: `long_pill_trace_sample`
-scales each sample by a slow visual carrier (`WAVE_PERIOD_SAMPLES`), so it rises
-and falls around the centre line like a waveform whose size follows the voice,
-with a small floor keeping silence a gentle waver rather than a dead line. It
+button). The trace rolls with the same `LevelHistory`: `long_pill_envelope`
+averages the levels over a short sliding window (the captain's round-2 review
+asked for a more uniform squiggle - the raw per-sample size left it jagged) and
+`long_pill_trace_sample` puts each smoothed size on a slow visual carrier
+(`WAVE_PERIOD_SAMPLES`), so the trace rises and falls evenly around the centre
+line like a wave whose size follows the voice, with a small floor keeping
+silence a gentle waver rather than a dead line. The bar stays open in every
+phase - only the status button's colour and glyph swap. It
 ignores `live_waveform` (the squiggle is the style's whole point), and unlike
 `border`/`half-circle` it honours `overlay.position` like the badge styles.
 Its per-phase pixel checks live in `src/overlay.rs` tests; `long-pill` is in

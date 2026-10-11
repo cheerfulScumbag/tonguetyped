@@ -1860,18 +1860,17 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
     let line_end = button_cx - button_radius - height * 0.21;
     let thickness = height * 0.066;
     let max_excursion = height * 0.27;
-    let samples = LEVEL_HISTORY;
-    let count = LEVEL_HISTORY;
+    let envelope = long_pill_envelope(levels);
     let span = (line_end - line_start).max(1.0);
     let mut previous: Option<(f32, f32)> = None;
     let mut x = line_start;
     while x <= line_end {
-        let position = (x - line_start) / span * (samples - 1) as f32;
+        let position = (x - line_start) / span * (LEVEL_HISTORY - 1) as f32;
         let i0 = position.floor() as usize;
-        let i1 = (i0 + 1).min(samples - 1);
+        let i1 = (i0 + 1).min(LEVEL_HISTORY - 1);
         let frac = position - i0 as f32;
-        let a = long_pill_trace_sample(levels, count, i0);
-        let b = long_pill_trace_sample(levels, count, i1);
+        let a = long_pill_trace_sample(envelope[i0], i0);
+        let b = long_pill_trace_sample(envelope[i1], i1);
         let value = a + (b - a) * frac;
         let point = (x, cy - value * max_excursion);
         if let Some(previous) = previous {
@@ -1890,19 +1889,39 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
     }
 }
 
-/// The long pill's signed trace excursion in `-1.0..=1.0` for sample `i` of
-/// `count` (oldest left, newest right): the live level's size at that sample
-/// on a slow visual carrier, so the trace rises and falls around the centre
-/// line like a real waveform while its overall size follows the voice. The
-/// small floor keeps silence a gently wavering line rather than a dead
-/// straight edge.
-fn long_pill_trace_sample(levels: &LevelHistory, count: usize, i: usize) -> f32 {
+/// The long pill's trace envelope: the live level's size for each of the
+/// `LEVEL_HISTORY` positions, averaged over a short sliding window. The
+/// smoothing is what makes the wave *uniform* - a raw per-sample size jitters
+/// with every audio block and leaves a jagged line, while the reference's
+/// squiggle swells and falls evenly with the voice.
+fn long_pill_envelope(levels: &LevelHistory) -> [f32; LEVEL_HISTORY] {
+    /// Positions either side of the centre that the average reaches.
+    const SMOOTHING: usize = 4;
+    let mut envelope = [0.0f32; LEVEL_HISTORY];
+    for (i, value) in envelope.iter_mut().enumerate() {
+        let start = i.saturating_sub(SMOOTHING);
+        let end = (i + SMOOTHING).min(LEVEL_HISTORY - 1);
+        let sum: f32 = (start..=end)
+            .map(|j| level_fraction(levels.waveform_sample(LEVEL_HISTORY, j)))
+            .sum();
+        *value = sum / (end - start + 1) as f32;
+    }
+    envelope
+}
+
+/// The long pill's signed trace excursion in `-1.0..=1.0` for position `i` at
+/// size `envelope` (see `long_pill_envelope`, oldest left, newest right): the
+/// level's size on a slow visual carrier, so the trace rises and falls around
+/// the centre line like a real waveform while its overall size follows the
+/// voice. The small floor keeps silence a gently wavering line rather than a
+/// dead straight edge.
+fn long_pill_trace_sample(envelope: f32, i: usize) -> f32 {
     use std::f32::consts::TAU;
     /// Samples per visual wave: the reference's squiggle has a handful of
     /// tight, smooth bumps across the bar.
     const WAVE_PERIOD_SAMPLES: f32 = 12.0;
     const FLOOR: f32 = 0.05;
-    let size = FLOOR + (1.0 - FLOOR) * level_fraction(levels.waveform_sample(count, i));
+    let size = FLOOR + (1.0 - FLOOR) * envelope;
     size * (i as f32 / WAVE_PERIOD_SAMPLES * TAU).sin()
 }
 
@@ -3487,6 +3506,53 @@ mod tests {
         assert_ne!(
             original, rolled,
             "new audio should roll the long pill's trace"
+        );
+    }
+
+    #[test]
+    fn long_pill_envelope_keeps_the_wave_even() {
+        // A constant voice gives a constant envelope away from the padded
+        // start of a fresh history, so the wave's amplitude is steady.
+        let mut steady = LevelHistory::new();
+        for _ in 0..LEVEL_HISTORY {
+            steady.push(0.05);
+        }
+        let envelope = long_pill_envelope(&steady);
+        let expected = envelope[LEVEL_HISTORY / 2];
+        assert!(expected > 0.0);
+        assert!(
+            envelope[8..LEVEL_HISTORY - 8]
+                .iter()
+                .all(|value| (value - expected).abs() < 1e-5),
+            "a steady level should render an even envelope"
+        );
+
+        // A spiky level is low-passed: the envelope never jumps anywhere near
+        // as hard as the raw level does, which is what stops the rendered
+        // trace from looking jagged.
+        let mut spiky = LevelHistory::new();
+        for i in 0..LEVEL_HISTORY {
+            spiky.push(if i % 2 == 0 { 0.2 } else { 0.001 });
+        }
+        let raw_fractions: Vec<f32> = (0..LEVEL_HISTORY)
+            .map(|i| level_fraction(spiky.waveform_sample(LEVEL_HISTORY, i)))
+            .collect();
+        let envelope = long_pill_envelope(&spiky);
+        let raw_jump = raw_fractions
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f32::max);
+        let envelope_jump = envelope[8..LEVEL_HISTORY - 8]
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            raw_jump > 0.5,
+            "the fixture should actually alternate: {raw_jump}"
+        );
+        assert!(
+            envelope_jump < raw_jump / 4.0,
+            "the envelope should smooth the raw jolts ({envelope_jump} vs {raw_jump})"
         );
     }
 

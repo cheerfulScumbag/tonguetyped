@@ -99,13 +99,15 @@ fn main() -> std::io::Result<()> {
     }
 
     // The captain's long-pill reference pairs the recording bar with the
-    // success bar over the same waveform; render both from one level history
-    // so the status-button swap (red dot -> green check) is reviewable.
-    for (label, phase) in [("recording", "recording"), ("success", "success")] {
+    // success bar over the same waveform; render every phase over one level
+    // history so the bar staying open with only the status-button glyph
+    // swapping (red dot, spinner, green check, muted mic, stop, cross) is
+    // reviewable.
+    for phase in PHASES {
         let (width, height, pixels) =
             render_frame_pixels("long-pill", Some(phase), 0.0, true, &speaking);
         write_png(
-            &out.join(format!("long-pill-{label}-speaking-review.png")),
+            &out.join(format!("long-pill-{phase}-speaking-review.png")),
             width,
             height,
             &pixels,
