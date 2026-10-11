@@ -352,14 +352,14 @@ doesn't have). Each `Style` can request a different Wayland surface size
 (`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges). A layer
 surface's geometry and placement are fixed at creation, so the actor keeps the
 config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
-`monitor`) and recreates the surface when it changes: an `overlay.style`,
+`target`) and recreates the surfaces when it changes: an `overlay.style`,
 `position`, or `monitor` change applied via `tonguetyped reload` takes effect on
 the next event, with no daemon restart.
 `border` (the fifth style, captain-requested) is an exception to the
 small-anchored-badge model: it is a full-screen surface anchored to every edge
 with no margin and a zero requested size (the compositor stretches it to the
 output and reports the real dimensions via `configure`), so
-`overlay::is_fullscreen_style` drives `create_layer`'s anchor/size/margin and
+`overlay::is_fullscreen_style` drives `create_surface`'s anchor/size/margin and
 `surface_size_for(Border)` returns only the representative `BORDER_PREVIEW`
 used by the offline preview and the pixel tests. `paint_border`/`border_glow`
 draw a thin ~2px phase-coloured line hugging the nearest edge that dissolves
@@ -383,7 +383,7 @@ side is the screen's top edge and the dome bulges downward, with a
 `half_circle_profile` radial fill-plus-glow that fades monotonically to zero
 (no band edge) and is mirror-symmetric about the vertical centre line. Like
 `border` it ignores `overlay.position`; where `border` is full-screen,
-`half-circle` is top-docked - `overlay::is_top_docked_style` makes `create_layer`
+`half-circle` is top-docked - `overlay::is_top_docked_style` makes `create_surface`
 anchor it to `Anchor::TOP` (compositor-centres horizontally) with no margin, and
 `surface_size_for(HalfCircle)` is `BADGE*2` wide by `BADGE` tall (the size is a
 real requested size, unlike `border`'s representative-only `BORDER_PREVIEW`).
