@@ -385,7 +385,10 @@ impl CoordinatorRuntime for ProductionRuntime {
         let mut recorder = match crate::audio::AudioRecorder::new(
             microphone,
             16_000,
-            Some(Arc::new(|level| tracing::trace!(level, "microphone level"))),
+            // Publish every captured block's level for the overlay's live
+            // waveform/reactivity; the preview recorder used by the setup UI
+            // passes its own callback and never touches this feed.
+            Some(Arc::new(crate::audio::publish_level)),
             Some(error_callback),
         ) {
             Ok(recorder) => recorder,

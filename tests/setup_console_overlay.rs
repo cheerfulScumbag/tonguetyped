@@ -196,7 +196,7 @@ fn advance_from_inference_backend_to_overlay_enabled(session: &mut Session) {
 }
 
 #[test]
-fn pty_enabling_overlay_walks_through_position_style_and_streaming_and_persists_choices() {
+fn pty_enabling_overlay_walks_through_position_style_and_waveform_and_persists_choices() {
     let sandbox = Sandbox::new("enable");
     let mut session = Session::spawn(&sandbox, 100, 32);
 
@@ -235,21 +235,21 @@ fn pty_enabling_overlay_walks_through_position_style_and_streaming_and_persists_
     session.send(KEY_DOWN);
     session.send(KEY_DOWN);
     session.send(KEY_ENTER);
-    let streaming_screen = session.wait_for("Overlay streaming", Duration::from_secs(5));
+    let waveform_screen = session.wait_for("Overlay waveform", Duration::from_secs(5));
     assert!(
-        streaming_screen.contains("Simple pulse")
-            && streaming_screen.contains("Streaming waveform"),
-        "streaming step should list both indicator modes:\n{streaming_screen}"
+        waveform_screen.contains("Simple pulse")
+            && waveform_screen.contains("Live microphone waveform"),
+        "waveform step should list both indicator modes:\n{waveform_screen}"
     );
 
-    // Select "Streaming waveform" (index 1) and confirm into Review.
+    // Select "Live microphone waveform" (index 1) and confirm into Review.
     session.send(KEY_DOWN);
     session.send(KEY_ENTER);
     let confirm_screen = session.wait_for("Write this configuration?", Duration::from_secs(5));
     assert!(
         confirm_screen.contains("bottom-left")
             && confirm_screen.contains("pill")
-            && confirm_screen.contains("streaming waveform"),
+            && confirm_screen.contains("live waveform"),
         "confirm screen should summarize the chosen overlay settings:\n{confirm_screen}"
     );
 
@@ -260,11 +260,11 @@ fn pty_enabling_overlay_walks_through_position_style_and_streaming_and_persists_
     assert!(config.contains("enabled = true"), "{config}");
     assert!(config.contains("position = \"bottom-left\""), "{config}");
     assert!(config.contains("style = \"pill\""), "{config}");
-    assert!(config.contains("streaming_indicator = true"), "{config}");
+    assert!(config.contains("live_waveform = true"), "{config}");
 }
 
 #[test]
-fn pty_disabling_overlay_skips_the_position_style_and_streaming_steps() {
+fn pty_disabling_overlay_skips_the_position_style_and_waveform_steps() {
     let sandbox = Sandbox::new("disable");
     let mut session = Session::spawn(&sandbox, 100, 32);
 
@@ -273,7 +273,7 @@ fn pty_disabling_overlay_skips_the_position_style_and_streaming_steps() {
 
     // Default selection is "Enabled" (index 1); move up to "Disabled"
     // (index 0) and confirm - should skip straight to Confirm, never
-    // showing Position/Style/Streaming.
+    // showing Position/Style/Waveform.
     session.send(KEY_UP);
     session.send(KEY_ENTER);
 
@@ -284,7 +284,7 @@ fn pty_disabling_overlay_skips_the_position_style_and_streaming_steps() {
     );
     assert!(
         !confirm_screen.contains("Overlay position") && !confirm_screen.contains("Overlay style"),
-        "disabling the overlay must skip the position/style/streaming sub-steps:\n{confirm_screen}"
+        "disabling the overlay must skip the position/style/waveform sub-steps:\n{confirm_screen}"
     );
 
     session.send(KEY_ENTER); // save

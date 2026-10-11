@@ -8,16 +8,26 @@
 //! Run with `cargo run --example overlay_style_png -- <output-dir>` (defaults
 //! to `overlay-preview` in the current directory). Every style is written once
 //! per phase; the `blob`, `border`, and `half-circle` styles additionally get
-//! frames across one animation cycle, for both the default and streaming
-//! treatments. The full-screen `border` frames are written at their
-//! representative preview size rather than a compositor-provided output size.
+//! frames across one animation cycle, and every style gets recording frames
+//! over two representative live-microphone level histories (quiet and
+//! speaking), for both the default and live-waveform treatments. The
+//! full-screen `border` frames are written at their representative preview size
+//! rather than a compositor-provided output size.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use tonguetyped::overlay::render_frame_pixels;
 
-const STYLES: [&str; 6] = ["badge", "minimal", "pill", "blob", "border", "half-circle"];
+const STYLES: [&str; 7] = [
+    "badge",
+    "minimal",
+    "pill",
+    "blob",
+    "border",
+    "half-circle",
+    "long-pill",
+];
 const PHASES: [&str; 6] = [
     "recording",
     "transcribing",
@@ -36,7 +46,7 @@ fn main() -> std::io::Result<()> {
 
     for style in STYLES {
         for phase in PHASES {
-            let (width, height, pixels) = render_frame_pixels(style, Some(phase), 0.0, false);
+            let (width, height, pixels) = render_frame_pixels(style, Some(phase), 0.0, false, &[]);
             write_png(
                 &out.join(format!("{style}-{phase}.png")),
                 width,
@@ -46,11 +56,38 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // The live-microphone history makes every style's recording animation
+    // react: the waveform styles show the level sample by sample, the pulse
+    // styles follow its envelope, and the blob's body and halo swell with it.
+    // Render both a quiet room and a speaking voice so the difference is
+    // inspectable offline; the animation-cycle frames above use the speaking
+    // history too, except the blob which ignores `live_waveform` (its reaction
+    // lives in its body) and so needs only one variant.
+    let quiet = quiet_levels();
+    let speaking = speaking_levels();
+    for style in STYLES {
+        for (label, levels) in [("quiet", &quiet), ("speaking", &speaking)] {
+            for (index, t) in [0.0_f32, 0.5].iter().enumerate() {
+                let (width, height, pixels) =
+                    render_frame_pixels(style, Some("recording"), *t, true, levels);
+                write_png(
+                    &out.join(format!("{style}-recording-live-{label}-{index}.png")),
+                    width,
+                    height,
+                    &pixels,
+                )?;
+            }
+        }
+    }
+
     for (index, t) in [0.0_f32, 0.25, 0.5, 0.75].iter().enumerate() {
         for style in ["blob", "border", "half-circle"] {
-            for (label, streaming) in [("pulse", false), ("streaming", true)] {
+            for (label, live_waveform) in [("pulse", false), ("waveform", true)] {
+                if style == "blob" && live_waveform {
+                    continue;
+                }
                 let (width, height, pixels) =
-                    render_frame_pixels(style, Some("recording"), *t, streaming);
+                    render_frame_pixels(style, Some("recording"), *t, live_waveform, &speaking);
                 write_png(
                     &out.join(format!("{style}-recording-{label}-{index}.png")),
                     width,
@@ -61,8 +98,51 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // The captain's long-pill reference pairs the recording bar with the
+    // success bar over the same waveform; render every phase over one level
+    // history so the bar staying open with only the status-button glyph
+    // swapping (red dot, spinner, green check, muted mic, stop, cross) is
+    // reviewable.
+    for phase in PHASES {
+        let (width, height, pixels) =
+            render_frame_pixels("long-pill", Some(phase), 0.0, true, &speaking);
+        write_png(
+            &out.join(format!("long-pill-{phase}-speaking-review.png")),
+            width,
+            height,
+            &pixels,
+        )?;
+    }
+
     println!("wrote overlay style preview frames to {}", out.display());
     Ok(())
+}
+
+/// A quiet room: a faint, steady hiss far below speech, which every style
+/// should render as a calm/flat recording.
+fn quiet_levels() -> Vec<f32> {
+    (0..64)
+        .map(|i| 0.0015 + 0.0004 * (i as f32 * 0.7).sin())
+        .collect()
+}
+
+/// A voice: syllable-rate bursts grouped into words with real pauses between
+/// them, so the rendered waveform shows the reference look - tall bars while
+/// speaking, tiny dots in the gaps, the newest audio at the right.
+fn speaking_levels() -> Vec<f32> {
+    (0..64)
+        .map(|i| {
+            let sample = i as f32;
+            let in_word = ((sample / 64.0 * 5.0) % 1.0) < 0.78;
+            let syllable = 0.35 + 0.65 * (sample * 0.9).sin().abs();
+            let volume = 0.04 + 0.14 * (sample * 0.23).cos().abs();
+            if in_word {
+                syllable * volume
+            } else {
+                0.0015
+            }
+        })
+        .collect()
 }
 
 fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<()> {

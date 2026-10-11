@@ -5,13 +5,13 @@
 //! compositor, without needing a microphone or a downloaded Whisper model.
 //! Run with `cargo run --example overlay_preview -- top-left`.
 //! Pass a state name (recording/transcribing/success/no-speech/cancelled/error/
-//! streaming) as a second argument to hold on just that one state for 30s,
+//! waveform) as a second argument to hold on just that one state for 30s,
 //! e.g. for screenshotting: `cargo run --example overlay_preview -- top-right
-//! recording`. "streaming" holds the Recording phase with
-//! `overlay.streaming_indicator` enabled, to preview the live-capture
-//! waveform look instead of the default pulse. Pass a style name
-//! (badge/minimal/pill/blob/border/half-circle) as a third argument to preview
-//! one of the other `overlay.style` looks, e.g. `cargo run --example
+//! recording`. "waveform" holds the Recording phase with
+//! `overlay.live_waveform` enabled, to preview the live microphone waveform
+//! look instead of the default pulsing dot. Pass a style name
+//! (badge/minimal/pill/blob/border/half-circle/long-pill) as a third argument
+//! to preview one of the other `overlay.style` looks, e.g. `cargo run --example
 //! overlay_preview -- top-right recording blob`. The `border` style ignores
 //! `position`: it is a full-screen frame that hugs every screen edge. The
 //! `half-circle` style also ignores `position`: it is a semicircle resting on
@@ -20,6 +20,11 @@
 //! (`all`/`active` for every screen, or a monitor name like `DP-1` to pin one)
 //! to preview the scoping, e.g. `cargo run --example overlay_preview --
 //! top-right recording badge DP-1`.
+//!
+//! Recording states need a live microphone to react to; with no recorder
+//! running this example publishes a synthesized voice-like level (soft bursts
+//! separated by quiet gaps) so the waveform/pulse reactivity is visible in the
+//! preview.
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -42,7 +47,7 @@ fn main() {
         enabled: true,
         position,
         monitor,
-        streaming_indicator: false,
+        live_waveform: false,
         style,
     };
 
@@ -51,13 +56,32 @@ fn main() {
         std::process::exit(1);
     }
 
+    // The overlay actor reads the process-global live microphone level
+    // (`audio::latest_level`), which no recorder publishes here. Feed it a
+    // synthetic voice envelope on a background thread so the recording
+    // animations visibly react during the preview.
+    std::thread::spawn(|| {
+        use std::f32::consts::TAU;
+        let start = std::time::Instant::now();
+        loop {
+            let seconds = start.elapsed().as_secs_f32();
+            // Speech bursts (~1.6s of a 2.6s cycle) shaped by a few syllable
+            // pulses, with real quiet gaps between them.
+            let burst = (seconds % 2.6 < 1.6) as u8 as f32;
+            let syllable = 0.55 + 0.45 * (seconds * TAU * 2.7).sin();
+            let level = burst * syllable * (0.05 + 0.15 * (seconds * TAU * 0.7).cos().abs());
+            tonguetyped::audio::publish_level(level);
+            sleep(Duration::from_millis(16));
+        }
+    });
+
     let handle = OverlayHandle::new();
 
     if let Some(name) = hold {
         let event = match name.as_str() {
             "recording" => FeedbackEvent::Recording,
-            "streaming" => {
-                config.streaming_indicator = true;
+            "waveform" => {
+                config.live_waveform = true;
                 FeedbackEvent::Recording
             }
             "transcribing" => FeedbackEvent::Processing,

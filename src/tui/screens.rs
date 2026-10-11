@@ -657,10 +657,10 @@ impl TypingBackendScreen {
     }
 }
 
-/// The Overlay screen keeps the wizard's enabled/position/style/streaming
+/// The Overlay screen keeps the wizard's enabled/position/style/waveform
 /// choices on one screen: Disabled/Enabled always shown, the three
 /// configuration rows shown only while the overlay is enabled. Enter toggles
-/// an enable row and cycles position/style/streaming through their real
+/// an enable row and cycles position/style/waveform through their real
 /// config values.
 pub(super) struct OverlayScreen {
     pub selected: usize,
@@ -700,7 +700,7 @@ impl OverlayScreen {
                     next_value(&overlay::POSITION_VALUES, &config.overlay.position)
             }
             3 => config.overlay.style = next_value(&overlay::STYLE_VALUES, &config.overlay.style),
-            4 => config.overlay.streaming_indicator = !config.overlay.streaming_indicator,
+            4 => config.overlay.live_waveform = !config.overlay.live_waveform,
             _ => {}
         }
     }
@@ -716,11 +716,11 @@ impl OverlayScreen {
             ));
             rows.push(format!(
                 "{:<12}{}",
-                "Streaming",
-                if config.overlay.streaming_indicator {
-                    overlay::STREAMING_LABELS[1]
+                "Waveform",
+                if config.overlay.live_waveform {
+                    overlay::WAVEFORM_LABELS[1]
                 } else {
-                    overlay::STREAMING_LABELS[0]
+                    overlay::WAVEFORM_LABELS[0]
                 }
             ));
         }
@@ -1031,16 +1031,20 @@ mod tests {
     }
 
     #[test]
-    fn overlay_streaming_row_uses_the_shared_labels() {
+    fn overlay_waveform_row_uses_the_shared_labels() {
         let mut config = Config::default();
         let mut screen = OverlayScreen::new(&config);
         screen.selected = 4;
+        let labels = [overlay::WAVEFORM_LABELS[0], overlay::WAVEFORM_LABELS[1]];
+        let before = screen.rows(&config)[4].clone();
+        assert!(labels.iter().any(|label| before.contains(label)));
         screen.apply(&mut config);
-        let rows = screen.rows(&config);
-        assert!(rows[4].contains(overlay::STREAMING_LABELS[1]));
-        screen.apply(&mut config);
-        let rows = screen.rows(&config);
-        assert!(rows[4].contains(overlay::STREAMING_LABELS[0]));
+        let after = screen.rows(&config)[4].clone();
+        assert!(labels.iter().any(|label| after.contains(label)));
+        assert_ne!(
+            before, after,
+            "applying the row should toggle the waveform choice"
+        );
     }
 
     #[test]

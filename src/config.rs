@@ -380,25 +380,19 @@ pub struct OverlayConfig {
     // to pin the overlay to. See `overlay::target_for`.
     #[serde(default = "default_overlay_monitor")]
     pub monitor: String,
-    // Handy (github.com/cjpais/Handy) distinguishes a minimal recording pill
-    // from a busier "Live" panel with a reactive waveform once streaming
-    // transcription is active. TongueTyped has no streaming inference backend
-    // to drive real partial-transcript text (see AGENTS.md's inference
-    // section - `Session::run` is single-shot), so this is the feasible
-    // equivalent within the existing pixel-badge overlay: an opt-in, busier
-    // multi-bar animated treatment of the Recording phase in place of the
-    // plain pulsing dot, signaling "actively capturing" the same way Handy's
-    // live panel does, without implying live transcript text that doesn't
-    // exist here.
-    #[serde(default = "default_false")]
-    pub streaming_indicator: bool,
-    // The overlay looks reviewed as Superdesign mockups and approved by the
-    // captain (originally `badge`, `minimal`, `pill`; `blob` was added later
-    // as a captain-requested pulsating plasma look, `border` as a
-    // captain-requested full-screen edge glow that is strongest in the
-    // corners, and `half-circle` as a captain-requested glowing, pulsing
-    // semicircle resting on the top edge); `src/overlay.rs::style_for` parses
-    // this, falling back to `badge` for an unrecognized value exactly like
+    // Which recording glyph the overlay shows: the plain pulsing dot
+    // (`false`) or the live multi-bar microphone waveform (`true`, the
+    // default). Every style's recording animation is voice-reactive either
+    // way - this only picks the busier glyph, feeding the real microphone
+    // level through `audio::publish_level` to the overlay actor. Renamed from
+    // `streaming_indicator`, which described the old synthetic stand-in for
+    // Handy's streaming panel; the serde alias and `migrate_legacy_overlay_config`
+    // keep existing config files loading and rewrite the key on save.
+    #[serde(default = "default_true", alias = "streaming_indicator")]
+    pub live_waveform: bool,
+    // Which overlay look to show - the reviewed list lives in
+    // `overlay::STYLE_VALUES`. `src/overlay.rs::style_for` parses this,
+    // falling back to `badge` for an unrecognized value exactly like
     // `anchor_for` falls back on `position`.
     #[serde(default = "default_overlay_style")]
     pub style: String,
@@ -410,7 +404,7 @@ impl Default for OverlayConfig {
             enabled: true,
             position: default_overlay_position(),
             monitor: default_overlay_monitor(),
-            streaming_indicator: false,
+            live_waveform: true,
             style: default_overlay_style(),
         }
     }
@@ -613,6 +607,27 @@ fn migrate_legacy_activation_config(raw: &mut toml::Value) -> bool {
     true
 }
 
+/// Renames the legacy `[overlay] streaming_indicator` key to its current
+/// `live_waveform` name. The field kept its meaning when the waveform became
+/// truly microphone-reactive, so only the key changes; an explicit value is
+/// carried over untouched (a config that never had the key keeps the new
+/// default on the next save). Mutates `raw` in place and returns whether a
+/// migration happened.
+fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
+    let Some(overlay) = raw
+        .as_table_mut()
+        .and_then(|table| table.get_mut("overlay"))
+        .and_then(|overlay| overlay.as_table_mut())
+    else {
+        return false;
+    };
+    let Some(value) = overlay.remove("streaming_indicator") else {
+        return false;
+    };
+    overlay.entry("live_waveform".to_string()).or_insert(value);
+    true
+}
+
 impl Config {
     pub fn config_path() -> anyhow::Result<PathBuf> {
         let dir = directories::BaseDirs::new()
@@ -631,8 +646,9 @@ impl Config {
         }
         let content = fs::read_to_string(&path)?;
         let mut raw: toml::Value = toml::from_str(&content)?;
-        let migrated =
-            migrate_legacy_model_config(&mut raw) | migrate_legacy_activation_config(&mut raw);
+        let migrated = migrate_legacy_model_config(&mut raw)
+            | migrate_legacy_activation_config(&mut raw)
+            | migrate_legacy_overlay_config(&mut raw);
         let config: Config = raw.try_into()?;
         config.validate()?;
         if migrated {
@@ -650,6 +666,7 @@ impl Config {
         let mut raw: toml::Value = toml::from_str(&content)?;
         migrate_legacy_model_config(&mut raw);
         migrate_legacy_activation_config(&mut raw);
+        migrate_legacy_overlay_config(&mut raw);
         let config: Config = raw.try_into()?;
         config.validate()?;
         Ok(config)
@@ -1035,7 +1052,7 @@ mod tests {
     fn feedback_settings_default_the_overlay_on_and_sounds_off() {
         let mut config = Config::default();
         assert!(config.overlay.enabled);
-        assert!(!config.overlay.streaming_indicator);
+        assert!(config.overlay.live_waveform);
         assert!(!config.audio.feedback_sounds);
 
         config.audio.feedback_sounds = true;
@@ -1054,13 +1071,39 @@ mod tests {
     }
 
     #[test]
-    fn streaming_indicator_defaults_off_and_round_trips_through_toml() {
+    fn live_waveform_defaults_on_and_round_trips_through_toml() {
         let config: Config = toml::from_str("[overlay]\nenabled = true\n").unwrap();
-        assert!(!config.overlay.streaming_indicator);
+        assert!(config.overlay.live_waveform);
 
         let config: Config =
-            toml::from_str("[overlay]\nenabled = true\nstreaming_indicator = true\n").unwrap();
-        assert!(config.overlay.streaming_indicator);
+            toml::from_str("[overlay]\nenabled = true\nlive_waveform = false\n").unwrap();
+        assert!(!config.overlay.live_waveform);
+    }
+
+    #[test]
+    fn legacy_streaming_indicator_still_loads_and_migrates_to_live_waveform() {
+        // The serde alias keeps an un-migrated file readable even on paths
+        // that parse TOML directly.
+        let config: Config =
+            toml::from_str("[overlay]\nenabled = true\nstreaming_indicator = false\n").unwrap();
+        assert!(!config.overlay.live_waveform);
+
+        // The on-load migration renames the key and preserves its value.
+        let mut raw: toml::Value =
+            toml::from_str("[overlay]\nstreaming_indicator = false\n").unwrap();
+        assert!(migrate_legacy_overlay_config(&mut raw));
+        assert!(raw["overlay"].get("streaming_indicator").is_none());
+        assert_eq!(raw["overlay"]["live_waveform"].as_bool(), Some(false));
+
+        // No legacy key means no migration, and an explicit new key wins over a
+        // stale legacy one.
+        let mut untouched: toml::Value = toml::from_str("[overlay]\nstyle = \"pill\"\n").unwrap();
+        assert!(!migrate_legacy_overlay_config(&mut untouched));
+        let mut both: toml::Value =
+            toml::from_str("[overlay]\nstreaming_indicator = false\nlive_waveform = true\n")
+                .unwrap();
+        assert!(migrate_legacy_overlay_config(&mut both));
+        assert_eq!(both["overlay"]["live_waveform"].as_bool(), Some(true));
     }
 
     #[test]

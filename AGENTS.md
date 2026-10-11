@@ -260,7 +260,7 @@ microphone-preview stream (settle delay after rapid navigation, async stream-err
 routing, restart) for both `setup/console.rs`'s Microphone step and the dashboard's
 Microphone screen; `audio::level_to_ratio` is the one gauge mapping; the overlay
 position/style value lists (`overlay::POSITION_VALUES`/`STYLE_VALUES`/
-`STYLE_LABELS`/`STREAMING_LABELS`) and the activation/startup choice labels
+`STYLE_LABELS`/`WAVEFORM_LABELS`) and the activation/startup choice labels
 (`config::ACTIVATION_MODE_LABELS`/`STARTUP_LABELS`) are imported by both UIs. Add a
 new choice/value there, not as a second copy in either UI. The dashboard's Shortcut
 screen and the console's shortcut step have no editable key field: TongueTyped
@@ -316,7 +316,7 @@ that builds the actual ordered list of steps for the current conditional state
 (download queue, output backend, overlay enabled), rather than four separately
 hand-maintained arithmetic functions - add a new conditional step there, not as a
 fourth place to keep in sync. Overlay settings (enable/disable, position, style,
-streaming indicator) and the other settings areas now have their own dashboard
+waveform) and the other settings areas now have their own dashboard
 screens (`src/tui/screens.rs`), so the dashboard runs `setup::run_console()` only
 for the `setup` command itself, suspending its alternate screen
 (`App::run_setup_console`). The legacy
@@ -325,7 +325,7 @@ setup`, see `tests/setup_cli.rs`) has never prompted for overlay settings at all
 it leaves whatever `Config::reload()` loaded untouched - so it needed no changes
 when overlay got its console step.
 
-`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`) and `streaming_indicator`
+`OverlayConfig::style` (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`) and `live_waveform`
 (bool) follow `position`/`monitor`'s existing convention of plain, unvalidated
 strings/bools with a tolerant-fallback parser in `src/overlay.rs` (`style_for`,
 `anchor_for`) rather than a strict `serde` enum - an unrecognized `style` value
@@ -337,24 +337,38 @@ fraction while transcribing), and
 the captain reviewed it through `examples/overlay_style_png.rs` - an offline
 renderer (no compositor needed) that dumps every style/phase plus blob/border/
 half-circle animation frames to PNGs by calling the public
-`overlay::render_frame_pixels`.
+`overlay::render_frame_pixels` (which now also takes a level-history slice, so
+the example renders quiet-room and speaking-voice frames for every style).
 Use it for any future overlay look, and note the canvas is wl_shm Argb8888
 (little-endian BGRA), so the example swaps channels when writing PNG.
-`streaming_indicator` is a *synthetic* busier waveform animation (driven by the same
-elapsed-time fraction every other phase already animates from), not a real
-microphone-reactive one: there is no live audio-level feed wired from the
-coordinator's recording stream into the overlay actor, and wiring one would mean
-changing the `CoordinatorRuntime::record` trait signature - out of scope for what
-this is (the Handy dictation app's real streaming-transcription overlay inspired
-this - reviewed as Superdesign mockups and approved by the captain - and why a
-literal equivalent isn't buildable without a streaming inference backend this project
-doesn't have). Each `Style` can request a different Wayland surface size
-(`overlay::surface_size_for`; `Pill` widens and `Blob` enlarges). A layer
-surface's geometry and placement are fixed at creation, so the actor keeps the
-config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
+Every style's recording animation is voice-reactive: the coordinator's recording
+path publishes each captured block's RMS through the process-global
+`audio::publish_level` (the recorder and the overlay actor always live in the
+same daemon process, so a relaxed `AtomicU32` is enough), and the actor samples
+it once per `TICK` into a `LevelHistory` ring while recording (cleared when a new
+recording starts; `on_tick` appends, so a slow frame drops samples instead of
+queueing). `live_waveform` (renamed from `streaming_indicator`, default now
+`true`, serde alias plus `config::migrate_legacy_overlay_config` for old files)
+picks the busier glyph: `paint_live_waveform` draws `LevelHistory` as many thin
+centred bars, newest at the right, with `bar_height_fraction` leaving tiny dots
+at silence; with it off the badge/minimal/pill pulses still follow
+`recording_level`'s envelope, so silence is calm and loud speech a bigger
+response either way. The blob never draws bars (the captain removed them): its
+own body carries the reaction - `blob_edge` keeps the slow calm breath always
+present, then adds a level-scaled body swell and narrow radial spikes
+(`blob_spikes`) so voice peaks become sharp protrusions radiating from the body
+(loud = tall spikes, silence = a soft, round ball), and the halo brightens with
+the level; it therefore ignores `live_waveform` entirely. The border/half-circle
+sweeps also scale with `recording_level`. `HalfCircle`'s `half_circle_profile`
+and the bar geometry are unchanged; the level only scales their amplitudes. Each
+`Style` can request a different Wayland surface size (`overlay::surface_size_for`;
+`Pill` widens, `Blob` enlarges, `LongPill` is the reference's wide dark bar). A
+layer surface's geometry and placement are fixed at creation, so the actor keeps
+the config-derived `LayerSpec` (fullscreen-ness, requested size, `position`,
 `target`) and recreates the surfaces when it changes: an `overlay.style`,
-`position`, or `monitor` change applied via `tonguetyped reload` takes effect on
-the next event, with no daemon restart.
+`position`, `monitor`, or `live_waveform` change applied via `tonguetyped reload`
+(the latter is not part of `LayerSpec`, so it only affects the next paint) takes
+effect on the next event, with no daemon restart.
 `border` (the fifth style, captain-requested) is an exception to the
 small-anchored-badge model: it is a full-screen surface anchored to every edge
 with no margin and a zero requested size (the compositor stretches it to the
@@ -368,7 +382,7 @@ smoothly inward (two fixed-reach `smoothstep` ramps: a narrow line plus a
 the shorter side, so the falloff is monotonic with no core/glow band edge), with
 corners boosted brighter than the straight edges, in `bolden`ed phase hues (a
 saturation/value lift that keeps the shared palette rather than washing out to
-white); `streaming_indicator` adds a recording-only highlight sweep around the
+white); `live_waveform` adds a recording-only highlight sweep around the
 frame. Any overlay look is tuned by rendering `render_frame_pixels` output - the
 real per-pixel path - not an HTML/CSS-only mockup, since a CSS blur is not
 guaranteed reproducible in this Rust path (the soft glow here is an
@@ -387,10 +401,33 @@ side is the screen's top edge and the dome bulges downward, with a
 anchor it to `Anchor::TOP` (compositor-centres horizontally) with no margin, and
 `surface_size_for(HalfCircle)` is `BADGE*2` wide by `BADGE` tall (the size is a
 real requested size, unlike `border`'s representative-only `BORDER_PREVIEW`).
-`streaming_indicator` adds a recording-only bright bead travelling along the arc.
+`live_waveform` adds a recording-only bright bead travelling along the arc.
 Its per-phase pixel checks live in `src/overlay.rs` tests; `half-circle` is in
 `ALL_STYLES` and `inside_style_shape`, and the design/sign-off record is
 `data/tt-add-a-glowing-pulsing-half-circle-overla-6f/design-brief.md`.
+
+`long-pill` (the seventh style, captain-requested) is a wide 8:1 dark bar
+(`LONG_PILL_SURFACE` 384x48, the `#323232` `LONG_PILL_BACKGROUND`) holding one
+continuous squiggly light-grey trace plus a round phase status button at its
+right end (phase colour vivid via `bolden`; red with a white dot while
+recording, green with a checkmark on success, and the matching glyph for every
+other phase), built to the captain's reference look (the design record,
+including the ask and the not-committed reference capture, is
+`data/tt-pill-overlay-live-microphone-waveform-re-23/design-brief.md`).
+`paint_long_pill` derives all geometry from the bar height (button 0.752h,
+trace 0.066h thick, +/-0.27h excursions, trace from 0.039w to just short of the
+button). The trace rolls with the same `LevelHistory`: `long_pill_envelope`
+averages the levels over a short sliding window (the captain's round-2 review
+asked for a more uniform squiggle - the raw per-sample size left it jagged) and
+`long_pill_trace_sample` puts each smoothed size on a slow visual carrier
+(`WAVE_PERIOD_SAMPLES`), so the trace rises and falls evenly around the centre
+line like a wave whose size follows the voice, with a small floor keeping
+silence a gentle waver rather than a dead line. The bar stays open in every
+phase - only the status button's colour and glyph swap. It
+ignores `live_waveform` (the squiggle is the style's whole point), and unlike
+`border`/`half-circle` it honours `overlay.position` like the badge styles.
+Its per-phase pixel checks live in `src/overlay.rs` tests; `long-pill` is in
+`ALL_STYLES` and `inside_style_shape`.
 
 `tonguetyped daemon` (`src/cli.rs`'s `Commands::Daemon { command: Option<DaemonCommand> }`)
 keeps bare invocation meaning exactly what it always has (foreground start, used
