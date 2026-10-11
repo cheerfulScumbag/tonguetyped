@@ -7,7 +7,31 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const SHORTCUT_ID: &str = "activation";
+/// The id the desktop stores this app's activation shortcut under. It is part
+/// of the shortcut's *persisted identity*, not a value that is safe to reuse.
+///
+/// KDE's GlobalShortcuts portal keeps the `preferred_trigger` an action was
+/// first registered with forever, as the action's "Default shortcut", keyed by
+/// id. Its shortcut editor refuses to delete a default, so a user who changes
+/// the key ends up with the default *plus* the new binding. TongueTyped no
+/// longer sends a preferred trigger (see [`SHORTCUT_DESCRIPTION`]), but any
+/// install that once did still has `Meta+O` stored as the default for the old
+/// `"activation"` id.
+///
+/// Registering under a fresh id gives the desktop a brand-new action with no
+/// default: a new install starts truly unbound, and changing the key later
+/// replaces it instead of stacking. [`LEGACY_SHORTCUT_IDS`] names the ids older
+/// releases used so [`purge_legacy_shortcuts`] can drop them once.
+///
+/// Never change this id again without extending the migration, or every upgrade
+/// would leave another stale action behind that still grabs its old key.
+const SHORTCUT_ID: &str = "start-stop-dictation";
+
+/// Shortcut ids registered by earlier TongueTyped releases. The desktop stores
+/// these as real actions (including any old `Meta+O` default);
+/// [`purge_legacy_shortcuts`] removes them so nothing is imposed or lingering.
+const LEGACY_SHORTCUT_IDS: &[&str] = &["activation"];
+
 /// The human-readable action description the desktop shows in its shortcut
 /// settings. Per the XDG GlobalShortcuts portal spec a `preferred_trigger`
 /// is what the desktop stores as the action's "Default shortcut"; passing
@@ -70,17 +94,70 @@ async fn register_host_app() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Binds the "activation" shortcut on an already-created session with its
-/// id and human description only - no `preferred_trigger`. The return value
-/// is whatever trigger the desktop already has bound for the action (empty
-/// when none), never an app-chosen key. Shared by `listen()`,
-/// `test_shortcut_binding()`, and `reconfigure_shortcut()`, all three of
-/// which need a bound shortcut before they can listen for presses or open
-/// the native reconfigure dialog.
+/// The legacy shortcut ids the desktop currently knows about. Only ids the
+/// desktop actually lists are returned, so a fresh install purges nothing and
+/// never registers a legacy id just to remove it.
+fn present_legacy_ids(known: &[String]) -> Vec<&'static str> {
+    LEGACY_SHORTCUT_IDS
+        .iter()
+        .copied()
+        .filter(|legacy| known.iter().any(|id| id == legacy))
+        .collect()
+}
+
+/// Drops any activation shortcut left over from an older release.
+///
+/// The XDG GlobalShortcuts portal has no "unbind" call, but KDE's implementation
+/// forgets every action of this app that a session knows about and then fails to
+/// re-bind: binding a legacy id here marks it as ours, and the caller's
+/// following bind of only [`SHORTCUT_ID`] leaves it out, so the portal removes
+/// it (releasing its old key). Desktops whose implementation does not prune
+/// un-rebound ids simply keep the legacy action as it already was, so this is
+/// best-effort and never a reason to fail binding.
+async fn purge_legacy_shortcuts<'a>(
+    portal: &GlobalShortcuts<'a>,
+    session: &Session<'a, GlobalShortcuts<'a>>,
+) -> anyhow::Result<()> {
+    let known: Vec<String> = portal
+        .list_shortcuts(session)
+        .await?
+        .response()?
+        .shortcuts()
+        .iter()
+        .map(|shortcut| shortcut.id().to_string())
+        .collect();
+    let legacy = present_legacy_ids(&known);
+    if legacy.is_empty() {
+        return Ok(());
+    }
+    tracing::info!("removing leftover activation shortcut ids {legacy:?}");
+    let shortcuts: Vec<NewShortcut> = legacy
+        .iter()
+        .map(|id| NewShortcut::new(*id, SHORTCUT_DESCRIPTION))
+        .collect();
+    portal
+        .bind_shortcuts(session, &shortcuts, None)
+        .await?
+        .response()?;
+    Ok(())
+}
+
+/// Binds the activation shortcut on an already-created session with its id and
+/// human description only - no `preferred_trigger`. The return value is
+/// whatever trigger the desktop already has bound for the action (empty when
+/// none), never an app-chosen key. Any stale shortcut from an older release is
+/// purged first (see [`purge_legacy_shortcuts`]) so a user gets one action,
+/// unbound, with no leftover default. Shared by `listen()`,
+/// `test_shortcut_binding()`, and `reconfigure_shortcut()`, all three of which
+/// need a bound shortcut before they can listen for presses or open the native
+/// reconfigure dialog.
 async fn bind_activation_shortcut<'a>(
     portal: &GlobalShortcuts<'a>,
     session: &Session<'a, GlobalShortcuts<'a>>,
 ) -> anyhow::Result<String> {
+    if let Err(error) = purge_legacy_shortcuts(portal, session).await {
+        tracing::warn!("could not clear a leftover activation shortcut: {error}");
+    }
     let shortcut = NewShortcut::new(SHORTCUT_ID, SHORTCUT_DESCRIPTION);
     let response = portal
         .bind_shortcuts(session, &[shortcut], None)
@@ -325,6 +402,32 @@ mod tests {
         assert_eq!(keybind_label("Ctrl+Meta+Space"), "Ctrl+Super+Space");
         assert_eq!(keybind_label("Ctrl+Shift+Space"), "Ctrl+Shift+Space");
         assert_eq!(keybind_label(""), "");
+    }
+
+    #[test]
+    fn activation_shortcut_does_not_reuse_a_legacy_id() {
+        // A reused id would inherit KDE's persisted "default shortcut" and make
+        // a rebind stack old + new (see the `SHORTCUT_ID` doc comment).
+        assert!(!LEGACY_SHORTCUT_IDS.contains(&SHORTCUT_ID));
+        assert!(!SHORTCUT_ID.is_empty());
+    }
+
+    #[test]
+    fn only_legacy_ids_the_desktop_reports_are_purged() {
+        let known = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        assert_eq!(present_legacy_ids(&known(&[])), Vec::<&str>::new());
+        assert_eq!(
+            present_legacy_ids(&known(&[SHORTCUT_ID])),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            present_legacy_ids(&known(&["activation"])),
+            vec!["activation"]
+        );
+        assert_eq!(
+            present_legacy_ids(&known(&["activation", SHORTCUT_ID])),
+            vec!["activation"]
+        );
     }
 
     #[test]

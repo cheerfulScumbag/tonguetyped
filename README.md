@@ -68,6 +68,13 @@ Upgrade the profile package without changing the autostart setting:
 nix profile upgrade tonguetyped
 ```
 
+An older install may still have an app-chosen default key bound to the
+"Start or stop dictation" action, which made a later key change stack the new
+key on top of the old one. Upgrading replaces that lingering action with a fresh,
+unbound one on the next daemon start. If your desktop still shows a stale entry
+with the old key, remove that one entry once in the desktop's shortcut settings
+(System Settings -> Shortcuts on KDE).
+
 Autostart can be disabled and re-enabled without removing the package:
 
 ```sh
