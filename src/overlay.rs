@@ -1959,8 +1959,10 @@ fn long_pill_trace_sample(envelope: f32, i: usize) -> f32 {
 /// The halo brightens with the voice too. The `Transcribing` spinner glyph
 /// advances on the faster fraction `t` independently, so the silhouette keeps
 /// breathing slowly while the spinner turns. A white glyph carries the state
-/// for the terminal phases; those phases are simply static (`breath` is 0 once
-/// the animation stops), which is why the blob sits still for them.
+/// for the terminal phases; `t` and `breath` are both 0 there, so the
+/// silhouette stops animating, but it keeps the last recording's level, so a
+/// loud dictation freezes as a spiky blob rather than settling back to a calm,
+/// round ball.
 fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &LevelHistory) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
@@ -2231,11 +2233,12 @@ fn paint_half_circle(
 /// `Argb8888`, little-endian), for the offline design-preview example
 /// (`examples/overlay_style_png.rs`, which reorders it to PNG's RGBA). `style`
 /// and `phase` use the same string values the config and feedback events use
-/// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`; `recording`/
-/// `transcribing`/`success`/`no-speech`/`cancelled`/`error`), and `None` clears
-/// to fully transparent. `levels` is the live microphone history the recording
-/// animations follow, oldest first - an empty slice means silence, and a
-/// representative pattern is how the offline mockups show the speaking look.
+/// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`;
+/// `recording`/`transcribing`/`success`/`no-speech`/`cancelled`/`error`), and
+/// `None` clears to fully transparent. `levels` is the live microphone history
+/// the recording animations follow, oldest first - an empty slice means
+/// silence, and a representative pattern is how the offline mockups show the
+/// speaking look.
 /// Returns `(width, height, pixels)` with `width * height * 4` bytes. For the
 /// full-screen `border` style this is the representative `BORDER_PREVIEW` size,
 /// not a compositor-provided output size.
