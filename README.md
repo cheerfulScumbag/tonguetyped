@@ -42,7 +42,7 @@ an interactive dashboard for every setting.
   finished transcript is also written there as a plain-text file, independent of
   the focused app or the clipboard.
 - **Unobtrusive feedback.** A click-through overlay shows recording,
-  transcribing, success, and failure - six styles, on any number of screens.
+  transcribing, success, and failure - seven styles, on any number of screens.
 - **Terminal-native control.** Script it, or use the dashboard. Every command is
   a plain subcommand over a local Unix socket.
 - **Your transcripts stay yours.** History is a local SQLite database with

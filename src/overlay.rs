@@ -1334,7 +1334,7 @@ fn stroke_arc(
 /// semicircle resting flat on the top edge of the screen at top-centre, and
 /// `LongPill` is a wide dark bar holding one continuous squiggly waveform line
 /// plus a round phase status button at its right end (the captain's reference
-/// look). Every style reskins all five phases consistently, per the design
+/// look). Every style reskins all six phases consistently, per the design
 /// review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {

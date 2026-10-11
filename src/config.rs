@@ -390,13 +390,9 @@ pub struct OverlayConfig {
     // keep existing config files loading and rewrite the key on save.
     #[serde(default = "default_true", alias = "streaming_indicator")]
     pub live_waveform: bool,
-    // The overlay looks reviewed as Superdesign mockups and approved by the
-    // captain (originally `badge`, `minimal`, `pill`; `blob` was added later
-    // as a captain-requested pulsating plasma look, `border` as a
-    // captain-requested full-screen edge glow that is strongest in the
-    // corners, and `half-circle` as a captain-requested glowing, pulsing
-    // semicircle resting on the top edge); `src/overlay.rs::style_for` parses
-    // this, falling back to `badge` for an unrecognized value exactly like
+    // Which overlay look to show - the reviewed list lives in
+    // `overlay::STYLE_VALUES`. `src/overlay.rs::style_for` parses this,
+    // falling back to `badge` for an unrecognized value exactly like
     // `anchor_for` falls back on `position`.
     #[serde(default = "default_overlay_style")]
     pub style: String,
