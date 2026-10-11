@@ -340,7 +340,14 @@ half-circle animation frames to PNGs by calling the public
 `overlay::render_frame_pixels` (which now also takes a level-history slice, so
 the example renders quiet-room and speaking-voice frames for every style).
 Use it for any future overlay look, and note the canvas is wl_shm Argb8888
-(little-endian BGRA), so the example swaps channels when writing PNG.
+(little-endian BGRA) with **premultiplied** alpha - the Wayland contract
+`Canvas::blend` implements. Storing straight alpha made the compositor treat
+every faint glow pixel as full-brightness colour (the captain's "weird green
+tinge / red should just fade opacity" report), so the example unpremultiplies
+when writing PNGs, whose alpha is straight. Glow fades also keep the phase hue
+and only lose opacity: `paint_border`/`paint_half_circle` blend the phase
+colour itself at reduced coverage, and the blob's halo blends the phase colour
+rather than the near-white sheen.
 Every style's recording animation is voice-reactive: the coordinator's recording
 path publishes each captured block's RMS through the process-global
 `audio::publish_level` (the recorder and the overlay actor always live in the
