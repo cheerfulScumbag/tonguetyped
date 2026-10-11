@@ -1,8 +1,8 @@
 use crate::coordinator::Coordinator;
 use anyhow::Context;
-use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
+use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut, ShortcutsChanged};
 use ashpd::desktop::Session;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,7 +46,11 @@ const SHORTCUT_DESCRIPTION: &str = "Start or stop dictation";
 const SHORTCUT_PRESS_TIMEOUT: Duration = Duration::from_secs(15);
 // `ConfigureShortcuts` opens the desktop's own native dialog and hands
 // control to the user for as long as it takes them to press the new combo -
-// generous on purpose, unlike the single-keystroke timeout above.
+// generous on purpose, unlike the single-keystroke timeout above. Hitting it
+// is not a failure: a desktop that routes the call to its own settings window
+// (KDE opens System Settings) can be closed without changing anything, and no
+// `ShortcutsChanged` event ever arrives, so the wait settles on the unchanged
+// binding instead of reporting an error (see `ReconfigureOutcome::Unchanged`).
 const SHORTCUT_RECONFIGURE_TIMEOUT: Duration = Duration::from_secs(120);
 const INSTALLED_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped";
 const DEVELOPMENT_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped.Devel";
@@ -54,6 +58,28 @@ const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
     include_str!("../data/tonguetyped.desktop"),
     "NoDisplay=true\n"
 );
+
+/// The one runtime every one-shot portal call runs on, kept alive for the
+/// life of the process.
+///
+/// [`ashpd`] caches its `zbus::Connection` in a process-global `OnceLock`, and
+/// zbus's tokio backend spawns that connection's socket-reader task on
+/// whichever runtime first opened it. Building a fresh runtime per call (as
+/// the wizard's and dashboard's one-shot shortcut threads used to) tears that
+/// reader down the moment the call returns, so every later portal call -
+/// reopening the shortcut dialog, re-running the test - blocks forever inside
+/// [`GlobalShortcuts::new`] before it reaches D-Bus. Routing every such call
+/// through this shared runtime keeps the cached connection usable.
+pub(crate) fn portal_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("failed to build the shared portal runtime")
+    })
+}
 
 fn application_id() -> anyhow::Result<&'static str> {
     if !cfg!(debug_assertions) {
@@ -212,12 +238,20 @@ async fn test_shortcut_binding_inner() -> anyhow::Result<ShortcutTestOutcome> {
     }
 }
 
-pub struct ReconfigureOutcome {
-    /// The portal's human-readable description of whatever trigger is now
-    /// actually bound - not the string the user typed, which the desktop is
-    /// free to ignore once the shortcut has been bound once (see
-    /// `bind_activation_shortcut`'s doc comment).
-    pub trigger_description: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconfigureOutcome {
+    /// The desktop reported a new trigger for the activation action.
+    Changed { trigger_description: String },
+    /// No change was observed: the user kept the current binding, closed the
+    /// desktop's settings window without applying one, or the wait elapsed
+    /// first. `trigger_description` is whatever the desktop still reports, and
+    /// the caller must treat this as "nothing to apply", not a failure.
+    ///
+    /// KDE routes `ConfigureShortcuts` to System Settings rather than an
+    /// inline dialog and sends no signal when that window is closed, so this
+    /// is the only honest outcome for "closed without changing anything" -
+    /// distinct from a real error (portal unavailable, event stream closed).
+    Unchanged { trigger_description: String },
 }
 
 /// Opens the desktop's own native "press your new shortcut" dialog
@@ -226,20 +260,28 @@ pub struct ReconfigureOutcome {
 /// really bound afterwards. This is the mechanism for setting a key now that
 /// the registration ships no preferred/default trigger, and it works for the
 /// first-ever bind exactly as it does for a rebind.
-pub async fn reconfigure_shortcut() -> Result<ReconfigureOutcome, String> {
-    reconfigure_shortcut_inner()
+///
+/// `cancel` lets the caller stop waiting early - the caller's UI settles on
+/// the unchanged binding instead of the user being trapped until
+/// [`SHORTCUT_RECONFIGURE_TIMEOUT`].
+pub async fn reconfigure_shortcut(
+    cancel: tokio::sync::oneshot::Receiver<()>,
+) -> Result<ReconfigureOutcome, String> {
+    reconfigure_shortcut_inner(cancel)
         .await
         .map_err(|error| error.to_string())
 }
 
-async fn reconfigure_shortcut_inner() -> anyhow::Result<ReconfigureOutcome> {
+async fn reconfigure_shortcut_inner(
+    cancel: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<ReconfigureOutcome> {
     register_host_app().await?;
     let portal = GlobalShortcuts::new().await?;
     let session = portal.create_session().await?;
     // `ConfigureShortcuts` requires a session that has already bound at
     // least one shortcut - this is that bind. It carries no preferred
     // trigger, so the dialog below is the only thing that sets the trigger.
-    bind_activation_shortcut(&portal, &session).await?;
+    let bound = bind_activation_shortcut(&portal, &session).await?;
 
     // Subscribe before opening the dialog, not after: the dialog can close
     // (and emit ShortcutsChanged) at any point once ConfigureShortcuts is
@@ -248,22 +290,87 @@ async fn reconfigure_shortcut_inner() -> anyhow::Result<ReconfigureOutcome> {
     let mut changed = portal.receive_shortcuts_changed().await?;
     portal.configure_shortcuts(&session, None, None).await?;
 
+    let observed = await_shortcut_trigger(
+        &mut changed,
+        cancel,
+        SHORTCUT_RECONFIGURE_TIMEOUT,
+        shortcut_trigger,
+    )
+    .await?;
+
+    Ok(match observed {
+        Some(trigger_description) => ReconfigureOutcome::Changed {
+            trigger_description,
+        },
+        // No change was seen: report the freshest binding the desktop has, so
+        // the UI settles on reality rather than a stale baseline. Falling back
+        // to `bound` only if the read fails.
+        None => ReconfigureOutcome::Unchanged {
+            trigger_description: current_trigger(&portal, &session).await.unwrap_or(bound),
+        },
+    })
+}
+
+/// The activation action's new trigger from a `ShortcutsChanged` event, if the
+/// event names it. Events for other ids are ignored.
+fn shortcut_trigger(event: &ShortcutsChanged) -> Option<String> {
+    event
+        .shortcuts()
+        .iter()
+        .find(|shortcut| shortcut.id() == SHORTCUT_ID)
+        .map(|shortcut| shortcut.trigger_description().to_string())
+}
+
+/// Reads the trigger the desktop currently has bound for [`SHORTCUT_ID`],
+/// empty when it has none. Used to settle on the real binding when no
+/// `ShortcutsChanged` event was observed.
+async fn current_trigger<'a>(
+    portal: &GlobalShortcuts<'a>,
+    session: &Session<'a, GlobalShortcuts<'a>>,
+) -> anyhow::Result<String> {
+    let response = portal.list_shortcuts(session).await?.response()?;
+    Ok(response
+        .shortcuts()
+        .iter()
+        .find(|shortcut| shortcut.id() == SHORTCUT_ID)
+        .map(|shortcut| shortcut.trigger_description().to_string())
+        .unwrap_or_default())
+}
+
+/// Waits for a `ShortcutsChanged` event naming [`SHORTCUT_ID`] and returns its
+/// new trigger. Returns `Ok(None)` when `cancel` fires or `timeout` elapses
+/// with no change - both are "nothing to apply", never an error, so the caller
+/// can settle on the unchanged binding instead of reporting a failure.
+///
+/// Generic over the stream item and a `trigger` extractor so the wait/settle
+/// logic is unit-testable without a live portal.
+async fn await_shortcut_trigger<S, T, F>(
+    events: &mut S,
+    cancel: tokio::sync::oneshot::Receiver<()>,
+    timeout: Duration,
+    trigger: F,
+) -> anyhow::Result<Option<String>>
+where
+    S: Stream<Item = T> + Unpin,
+    F: Fn(&T) -> Option<String>,
+{
     let wait_for_change = async {
         loop {
-            let Some(event) = changed.next().await else {
+            let Some(event) = events.next().await else {
                 anyhow::bail!("global shortcuts event stream closed");
             };
-            if let Some(shortcut) = event.shortcuts().iter().find(|s| s.id() == SHORTCUT_ID) {
-                return Ok(shortcut.trigger_description().to_string());
+            if let Some(trigger) = trigger(&event) {
+                return Ok(trigger);
             }
         }
     };
-    let trigger_description = tokio::time::timeout(SHORTCUT_RECONFIGURE_TIMEOUT, wait_for_change)
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out waiting for the shortcut dialog"))??;
-    Ok(ReconfigureOutcome {
-        trigger_description,
-    })
+    tokio::select! {
+        result = tokio::time::timeout(timeout, wait_for_change) => match result {
+            Ok(inner) => inner.map(Some),
+            Err(_) => Ok(None),
+        },
+        _ = cancel => Ok(None),
+    }
 }
 
 /// Rewrites the portal's trigger description into TongueTyped's own wording
@@ -456,5 +563,85 @@ mod tests {
             order.push(std::time::Duration::from_millis(30), false),
             [false]
         );
+    }
+
+    /// A change event for another action is ignored; the one for this action
+    /// wins.
+    fn trigger_of(event: &Vec<(&'static str, &'static str)>) -> Option<String> {
+        event
+            .iter()
+            .find(|(id, _)| *id == SHORTCUT_ID)
+            .map(|(_, trigger)| trigger.to_string())
+    }
+
+    #[tokio::test]
+    async fn shortcut_change_reports_the_new_trigger() {
+        let mut events = futures_util::stream::iter(vec![
+            vec![("some-other-action", "Ctrl+B")],
+            vec![(SHORTCUT_ID, "Ctrl+Meta+K")],
+        ]);
+        let (_sender, cancel) = tokio::sync::oneshot::channel();
+
+        let observed =
+            await_shortcut_trigger(&mut events, cancel, Duration::from_secs(5), trigger_of)
+                .await
+                .unwrap();
+
+        assert_eq!(observed.as_deref(), Some("Ctrl+Meta+K"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_shortcut_wait_settles_with_no_change() {
+        let mut events = futures_util::stream::pending::<Vec<(&'static str, &'static str)>>();
+        let (sender, cancel) = tokio::sync::oneshot::channel();
+        sender.send(()).unwrap();
+
+        let observed =
+            await_shortcut_trigger(&mut events, cancel, Duration::from_secs(5), trigger_of)
+                .await
+                .unwrap();
+
+        assert_eq!(observed, None);
+    }
+
+    #[tokio::test]
+    async fn timed_out_shortcut_wait_settles_with_no_change() {
+        let mut events = futures_util::stream::pending::<Vec<(&'static str, &'static str)>>();
+        let (_sender, cancel) = tokio::sync::oneshot::channel();
+
+        let observed =
+            await_shortcut_trigger(&mut events, cancel, Duration::from_millis(20), trigger_of)
+                .await
+                .unwrap();
+
+        assert_eq!(observed, None);
+    }
+
+    #[tokio::test]
+    async fn closed_shortcut_event_stream_is_an_error() {
+        let mut events =
+            futures_util::stream::iter(Vec::<Vec<(&'static str, &'static str)>>::new());
+        let (_sender, cancel) = tokio::sync::oneshot::channel();
+
+        let result =
+            await_shortcut_trigger(&mut events, cancel, Duration::from_secs(5), trigger_of).await;
+
+        assert!(
+            result.is_err(),
+            "a closed stream is a real failure, not a no-change settle"
+        );
+    }
+
+    #[test]
+    fn reconfigure_outcome_distinguishes_changed_from_unchanged() {
+        let changed = ReconfigureOutcome::Changed {
+            trigger_description: "Ctrl+A".to_string(),
+        };
+        let unchanged = ReconfigureOutcome::Unchanged {
+            trigger_description: "Ctrl+A".to_string(),
+        };
+        assert!(matches!(changed, ReconfigureOutcome::Changed { .. }));
+        assert!(matches!(unchanged, ReconfigureOutcome::Unchanged { .. }));
+        assert_ne!(changed, unchanged);
     }
 }

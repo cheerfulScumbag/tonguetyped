@@ -429,12 +429,17 @@ impl App {
         }
     }
 
-    fn apply_shortcut_dialog_outcome(&mut self, outcome: Result<String, String>) {
+    fn apply_shortcut_dialog_outcome(
+        &mut self,
+        outcome: Result<activation::ReconfigureOutcome, String>,
+    ) {
         let Screen::Shortcut(screen) = &mut self.screen else {
             return;
         };
         match outcome {
-            Ok(trigger_description) => {
+            Ok(activation::ReconfigureOutcome::Changed {
+                trigger_description,
+            }) => {
                 self.config.activation.keybind = activation::keybind_label(&trigger_description);
                 screen.status = match self.config.save() {
                     Ok(()) => screens::ShortcutStatus::Message {
@@ -450,6 +455,19 @@ impl App {
                         ),
                         is_error: true,
                     },
+                };
+            }
+            // Not a failure: the user closed the desktop's settings window
+            // without applying anything, or kept the binding on purpose.
+            Ok(activation::ReconfigureOutcome::Unchanged {
+                trigger_description,
+            }) => {
+                screen.status = screens::ShortcutStatus::Message {
+                    text: format!(
+                        "No change was made - the shortcut is still {}",
+                        activation::keybind_display(&trigger_description)
+                    ),
+                    is_error: false,
                 };
             }
             Err(error) => {
@@ -765,17 +783,39 @@ impl App {
 
     /// The Shortcut screen has no editable text: the binding always comes
     /// from the desktop's own dialog, so the arrow keys, Enter, Ctrl+R,
-    /// Escape and `q` are the only commands, and everything is inert while
-    /// the portal test or native dialog is in flight except Escape.
+    /// Escape and `q` are the only commands. While the system dialog is in
+    /// flight, Escape leaves, Enter keeps the current binding, and Ctrl+R
+    /// reopens the dialog - so a window closed with no change is never a dead
+    /// end. While the portal test runs, only Escape does anything.
     fn handle_shortcut_key(&mut self, key: KeyEvent) {
-        let busy = matches!(&self.screen, Screen::Shortcut(screen) if screen.is_busy());
-        if busy {
-            if key.code == KeyCode::Esc {
-                self.shortcut_test = None;
-                self.shortcut_dialog = None;
-                self.screen = Screen::Home;
+        if let Screen::Shortcut(screen) = &self.screen {
+            match &screen.status {
+                screens::ShortcutStatus::DialogOpen => {
+                    match key.code {
+                        // Stop waiting and settle on whatever is bound now,
+                        // rather than blocking until the reconfigure timeout.
+                        KeyCode::Enter => self.keep_current_shortcut(),
+                        KeyCode::Esc => {
+                            self.cancel_shortcut_dialog();
+                            self.screen = Screen::Home;
+                        }
+                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.cancel_shortcut_dialog();
+                            self.start_shortcut_action(Some(0));
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                screens::ShortcutStatus::Testing => {
+                    if key.code == KeyCode::Esc {
+                        self.shortcut_test = None;
+                        self.screen = Screen::Home;
+                    }
+                    return;
+                }
+                _ => {}
             }
-            return;
         }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -796,6 +836,25 @@ impl App {
             KeyCode::Enter => self.start_shortcut_action(None),
             _ => {}
         }
+    }
+
+    /// Stops the in-flight reconfigure wait, if any. The background thread
+    /// settles on its own (`Unchanged`) once the cancellation lands; its late
+    /// result is never polled again.
+    fn cancel_shortcut_dialog(&mut self) {
+        if let Some(handle) = self.shortcut_dialog.take() {
+            handle.cancel();
+        }
+    }
+
+    /// The user kept the current binding after the desktop's settings window
+    /// was closed with no change: stop waiting and settle on it.
+    fn keep_current_shortcut(&mut self) {
+        self.cancel_shortcut_dialog();
+        let trigger_description = self.config.activation.keybind.clone();
+        self.apply_shortcut_dialog_outcome(Ok(activation::ReconfigureOutcome::Unchanged {
+            trigger_description,
+        }));
     }
 
     fn start_shortcut_action(&mut self, action: Option<usize>) {
@@ -1401,10 +1460,7 @@ impl App {
             )),
             chunks[0],
         );
-        frame.render_widget(
-            Paragraph::new("↑/↓ choose action  Enter run  Ctrl+R system dialog  Esc back"),
-            chunks[1],
-        );
+        frame.render_widget(Paragraph::new(screen.footer()), chunks[1]);
     }
 
     fn render_output(&self, frame: &mut Frame, area: Rect, screen: &screens::OutputScreen) {
@@ -1838,9 +1894,11 @@ mod tests {
         let mut app = App::new(config);
 
         app.open_setting(SettingId::Shortcut);
-        app.shortcut_dialog = Some(setup::ReconfigureHandle {
-            result: Arc::new(Mutex::new(Some(Ok("Meta+O".to_string())))),
-        });
+        app.shortcut_dialog = Some(setup::ReconfigureHandle::for_test(Arc::new(Mutex::new(
+            Some(Ok(activation::ReconfigureOutcome::Changed {
+                trigger_description: "Meta+O".to_string(),
+            })),
+        ))));
         app.poll_shortcut_handles();
 
         assert!(
@@ -1851,6 +1909,42 @@ mod tests {
             app.config.activation.keybind, "Super+O",
             "the dialog's report is stored in the app's own wording"
         );
+    }
+
+    #[test]
+    fn keeping_the_current_shortcut_settles_without_waiting_out_the_dialog() {
+        let mut config = Config::default();
+        config.activation.keybind = "Super+O".to_string();
+        let mut app = App::new(config);
+
+        app.open_setting(SettingId::Shortcut);
+        if let Screen::Shortcut(screen) = &mut app.screen {
+            screen.status = screens::ShortcutStatus::DialogOpen;
+        }
+        app.shortcut_dialog = Some(setup::ReconfigureHandle::for_test(Arc::new(Mutex::new(
+            None,
+        ))));
+
+        app.handle_shortcut_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            app.shortcut_dialog.is_none(),
+            "keeping the current binding must stop the wait"
+        );
+        assert_eq!(
+            app.config.activation.keybind, "Super+O",
+            "a no-change settle must not touch the binding"
+        );
+        let Screen::Shortcut(screen) = &app.screen else {
+            panic!("keeping the current binding stays on the Shortcut screen");
+        };
+        match &screen.status {
+            screens::ShortcutStatus::Message { text, is_error } => {
+                assert!(!*is_error, "no change is not a failure");
+                assert!(text.contains("No change was made"), "{text}");
+            }
+            _ => panic!("expected a settled no-change message"),
+        }
     }
 
     #[test]
