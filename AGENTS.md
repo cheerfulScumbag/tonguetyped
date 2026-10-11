@@ -117,17 +117,19 @@ probe-then-cache shape as the inference module's `backend_info`/
 `cached_backend_info` split above) and `feedback.rs` falls back to the
 existing Plasma OSD / notification / sound chain whenever it's absent (X11
 sessions, compositors that never added
-it). The layer surface is created lazily, on the first event and kept
-transparent-but-mapped between dictations rather than being torn down, so
-there's no per-dictation Wayland round trip on the stop-to-idle hot path.
-`examples/overlay_preview.rs` cycles or holds each semantic state for manual
-validation on a given compositor (`cargo run --example overlay_preview --
-top-right recording`); screenshotting it requires a compositor-native tool
-(`grim` needs wlr-screencopy, which KWin doesn't have - use `spectacle -b -f -n
--o out.png` there) and, on a multi-monitor KWin session, checking every
-output's corner, since `output: None` (config's `monitor = "active"`) places
-the surface on whichever output KWin currently considers focused, not
-necessarily the one at the top-left of the combined virtual screen.
+it). One layer surface is created per target output, lazily on the first event,
+and kept transparent-but-mapped between dictations rather than being torn down,
+so there's no per-dictation Wayland round trip on the stop-to-idle hot path.
+`overlay.monitor` (default now `"all"`) selects every connected output; the
+legacy `"active"` is folded into the same all-screens behavior, and a named
+monitor pins the overlay to that one output. The surface set reconciles on
+output add/remove/update, so hotplug is handled live without restarting the
+actor. `examples/overlay_preview.rs` cycles or holds each semantic state for
+manual validation on a given compositor (`cargo run --example overlay_preview --
+top-right recording`; a fourth arg is `overlay.monitor`); screenshotting it
+requires a compositor-native tool (`grim` needs wlr-screencopy, which KWin
+doesn't have - use `spectacle -b -f -n -o out.png` there), and on a
+multi-monitor KWin session every output's corner should show a surface at once.
 
 `config::OverlayConfig::enabled` defaults to `true` (changed from `false`): this is
 the only visual dictation feedback there is - `feedback.rs::DesktopFeedback::send`

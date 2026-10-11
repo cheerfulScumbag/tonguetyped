@@ -374,6 +374,10 @@ pub struct OverlayConfig {
     pub enabled: bool,
     #[serde(default = "default_overlay_position")]
     pub position: String,
+    // Which output(s) the overlay renders on: `"all"` (the default) shows it
+    // on every connected output at once, the legacy `"active"` is folded into
+    // the same all-screens behavior, and any other value names a single output
+    // to pin the overlay to. See `overlay::target_for`.
     #[serde(default = "default_overlay_monitor")]
     pub monitor: String,
     // Handy (github.com/cjpais/Handy) distinguishes a minimal recording pill
@@ -517,7 +521,7 @@ fn default_overlay_position() -> String {
 }
 
 fn default_overlay_monitor() -> String {
-    "active".to_string()
+    "all".to_string()
 }
 
 fn default_overlay_style() -> String {
@@ -1057,6 +1061,16 @@ mod tests {
         let config: Config =
             toml::from_str("[overlay]\nenabled = true\nstreaming_indicator = true\n").unwrap();
         assert!(config.overlay.streaming_indicator);
+    }
+
+    #[test]
+    fn overlay_monitor_defaults_to_all_and_round_trips_through_toml() {
+        let config = Config::default();
+        assert_eq!(config.overlay.monitor, "all");
+
+        let config: Config =
+            toml::from_str("[overlay]\nenabled = true\nmonitor = \"HDMI-A-1\"\n").unwrap();
+        assert_eq!(config.overlay.monitor, "HDMI-A-1");
     }
 
     #[test]
