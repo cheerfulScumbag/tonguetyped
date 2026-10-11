@@ -67,9 +67,11 @@ tonguetyped setup
 tonguetyped autostart enable
 ```
 
-`tonguetyped setup` does not choose a dictation key for you. It registers the
-"Start or stop dictation" action with your desktop and opens the desktop's own
-shortcut dialog; you press the key you want there. See
+`tonguetyped setup` does not choose a dictation key for you. The "Start or stop
+dictation" action is registered with your desktop by the daemon, and the wizard's
+Shortcut step only opens the desktop's own shortcut dialog when you press Ctrl+R
+there - the dashboard's Shortcut screen offers an explicit action to open that
+same dialog. If you skip it, setup finishes with no key bound. See
 [the desktop shortcut](#the-desktop-shortcut) for why.
 
 Sign out and back in after the first install so your desktop's portal discovers
@@ -195,7 +197,7 @@ TongueTyped registers the action **"Start or stop dictation"** with your
 desktop's global-shortcuts portal but deliberately never chooses a key for it.
 The binding belongs to the desktop, so you set it in your own shortcut dialog -
 KDE's System Settings, GNOME's Keyboard settings, and so on. The dashboard's
-Shortcut screen opens that dialog for you.
+Shortcut screen offers an explicit action to open that dialog for you.
 
 This means a fresh install starts **unbound**: nothing responds until you assign
 a key. `tonguetyped shortcut-test` binds the action and waits up to 15 seconds
