@@ -1506,8 +1506,15 @@ fn paint(
 
 /// The 0..1 level envelope the non-waveform recording animations follow while
 /// `Phase::Recording`: the newest samples' peak, so the pulse/breath tracks
-/// the voice but does not flicker on every quiet intra-word gap.
-fn recording_level(levels: &LevelHistory) -> f32 {
+/// the voice but does not flicker on every quiet intra-word gap. Outside
+/// `Phase::Recording` it is 0.0: `LevelHistory` is only cleared when a new
+/// recording starts, so the frozen last-recording envelope would otherwise
+/// keep driving the blob's spikes and the border/half-circle glow through the
+/// terminal phases instead of letting them sit still.
+fn recording_level(phase: Phase, levels: &LevelHistory) -> f32 {
+    if phase != Phase::Recording {
+        return 0.0;
+    }
     level_fraction(levels.recent_peak(5))
 }
 
@@ -1522,7 +1529,7 @@ fn paint_badge(
     let cy = canvas.height as f32 / 2.0;
     let disc_radius = canvas.width.min(canvas.height) as f32 * 0.42;
     let color = phase_color(phase);
-    let lf = recording_level(levels);
+    let lf = recording_level(phase, levels);
 
     match phase {
         Phase::Recording if live_waveform => {
@@ -1620,7 +1627,7 @@ fn paint_minimal(
     let ring_radius = canvas.width.min(canvas.height) as f32 * 0.34;
     let ring_thickness = ring_radius * 0.14;
     let color = phase_color(phase);
-    let lf = recording_level(levels);
+    let lf = recording_level(phase, levels);
     stroke_arc(
         canvas,
         cx,
@@ -1715,7 +1722,7 @@ fn paint_pill(
     let half_width = canvas.width as f32 * 0.46;
     let half_height = canvas.height as f32 * 0.42;
     let color = phase_color(phase);
-    let lf = recording_level(levels);
+    let lf = recording_level(phase, levels);
     fill_capsule(canvas, cx, cy, half_width, half_height, color);
 
     match phase {
@@ -1959,7 +1966,7 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
     let cy = canvas.height as f32 / 2.0;
     let radius = canvas.width.min(canvas.height) as f32 * 0.26;
     let color = phase_color(phase);
-    let lf = recording_level(levels);
+    let lf = recording_level(phase, levels);
     // A bright body with an even brighter inner glow and a near-white sheen,
     // so the blob stays luminous rather than turning dark and silvered.
     let body = scale_color(lighten(color, 0.1), 0.88);
@@ -2109,7 +2116,7 @@ fn paint_border(
     // with only a light lift on the core so the hue never washes out to white.
     let color = bolden(phase_color(phase));
     let hot = lighten(color, 0.28);
-    let lf = recording_level(levels);
+    let lf = recording_level(phase, levels);
     let carrier = 0.5 + 0.5 * (t * TAU).sin();
     let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
     let head = t * TAU - PI;
@@ -2183,7 +2190,7 @@ fn paint_half_circle(
     let glow = height * HALF_CIRCLE_GLOW_FRACTION;
     let color = phase_color(phase);
     let hot = lighten(color, 0.22);
-    let lf = recording_level(levels);
+    let lf = recording_level(phase, levels);
     let carrier = 0.5 + 0.5 * (t * TAU).sin();
     let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
     // The sweep is a recording-only "actively capturing" cue, matching every
@@ -3385,6 +3392,52 @@ mod tests {
                     response(style, &speaking),
                     response(style, &quiet)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_phases_ignore_the_frozen_recording_level() {
+        // `LevelHistory` is only cleared when a new recording starts, so a loud
+        // dictation leaves its loud envelope behind through the terminal
+        // phases. Those phases must render identically no matter how loud that
+        // stale envelope is, or the blob keeps sprouting voice spikes and the
+        // border/half-circle keep their glow scaled by the last recording.
+        // LongPill is excluded: its squiggle is intentionally live in every
+        // phase, and its trace is not the phase's pulse.
+        for style in ALL_STYLES
+            .into_iter()
+            .filter(|style| *style != Style::LongPill)
+        {
+            for phase in [
+                Phase::Transcribing,
+                Phase::Success,
+                Phase::NoSpeech,
+                Phase::Cancelled,
+                Phase::Error,
+            ] {
+                for live_waveform in [false, true] {
+                    let quiet = paint_to_pixels_with_levels(
+                        Some(phase),
+                        0.0,
+                        0.0,
+                        live_waveform,
+                        style,
+                        &quiet_history(),
+                    );
+                    let loud = paint_to_pixels_with_levels(
+                        Some(phase),
+                        0.0,
+                        0.0,
+                        live_waveform,
+                        style,
+                        &speaking_history(),
+                    );
+                    assert_eq!(
+                        quiet, loud,
+                        "{style:?}/{phase:?} (live_waveform={live_waveform}) should ignore the stale recording level"
+                    );
+                }
             }
         }
     }
