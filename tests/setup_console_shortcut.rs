@@ -216,13 +216,12 @@ impl Session {
     }
 
     fn wait_for(&self, needle: &str, timeout: Duration) -> String {
-        self.try_wait_for(needle, timeout)
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out waiting for {needle:?}; current screen:\n{}",
-                    self.visible_text()
-                )
-            })
+        self.try_wait_for(needle, timeout).unwrap_or_else(|| {
+            panic!(
+                "timed out waiting for {needle:?}; current screen:\n{}",
+                self.visible_text()
+            )
+        })
     }
 
     fn try_wait_for(&self, needle: &str, timeout: Duration) -> Option<String> {
@@ -257,10 +256,7 @@ fn advance_to_step(session: &mut Session, next: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         session.send(KEY_ENTER);
-        if session
-            .try_wait_for(next, Duration::from_secs(1))
-            .is_some()
-        {
+        if session.try_wait_for(next, Duration::from_secs(1)).is_some() {
             return;
         }
         if Instant::now() >= deadline {
