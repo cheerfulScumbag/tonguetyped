@@ -1,334 +1,433 @@
-# TongueTyped
+<div align="center">
+<pre>
+████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗
+╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗
+   ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║
+   ██║   ██║   ██║██║╚██╗██║██║   ██║██║   ██║██╔══╝     ██║     ╚██╔╝  ██╔═══╝ ██╔══╝  ██║  ██║
+   ██║   ╚██████╔╝██║ ╚████║╚██████╔╝╚██████╔╝███████╗   ██║      ██║   ██║     ███████╗██████╔╝
+   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚═╝     ╚══════╝╚═════╝
+</pre>
+<strong>S P E A K . &nbsp; T Y P E . &nbsp; R E P E A T .</strong>
+</div>
 
-TongueTyped is a Linux dictation application controlled from the terminal or a
-desktop-wide keyboard shortcut. It records microphone audio, transcribes it
-locally with [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
-(GGUF models, CPU or an accelerator), and can type the result into the focused
-application.
+<p align="center">
+  <a href="https://github.com/cheerfulScumbag/tonguetyped/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platform-Linux-informational.svg" alt="Platform: Linux">
+  <img src="https://img.shields.io/badge/rust-2021-orange.svg?logo=rust" alt="Rust 2021">
+  <img src="https://img.shields.io/badge/offline--first-success.svg" alt="Offline-first">
+</p>
 
-## Requirements
+**TongueTyped** is a privacy-focused offline dictation app for Linux. Speak, and
+your words are transcribed on your own machine and typed into whichever
+application already has focus - or written straight to text files. There is no
+account, no cloud, and no audio ever leaves the computer.
 
-TongueTyped requires Linux and an ALSA-compatible input device. Desktop shortcut
-activation also requires an XDG Global Shortcuts portal; terminal IPC commands
-remain available without one. Building from source requires Rust, CMake,
-libclang, OpenSSL, pkg-config, ALSA development files, libxdo development
-files, and Wayland client development files (for the optional layer-shell
-overlay described under [Desktop feedback](#desktop-feedback); the daemon
-still runs without a Wayland session, falling back as described there). The
-Nix flake provides these build dependencies:
+It is built for the terminal: one daemon owns the microphone and the speech
+model, a small CLI drives it, and running `tonguetyped` with no arguments opens
+an interactive dashboard for every setting.
+
+---
+
+## Highlights
+
+- **Fully local inference.** Speech recognition runs through
+  [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) on GGUF
+  models - CPU by default, or Vulkan, CUDA, ROCm, or Metal when you build them
+  in. Nothing is uploaded.
+- **Keyboard-first.** Bind "Start or stop dictation" once in your desktop's
+  shortcut dialog. Hold to talk, or press once to start and once to stop.
+- **Types where you are.** The transcript is typed into the focused app through
+  `wtype`, `dotool`, or `enigo` - whichever actually works on your compositor.
+- **Dictate into files.** Point `transcript_folder` at a directory and every
+  finished transcript is also written there as a plain-text file, independent of
+  the focused app or the clipboard.
+- **Unobtrusive feedback.** A click-through overlay shows recording,
+  transcribing, success, and failure - six styles, on any number of screens.
+- **Terminal-native control.** Script it, or use the dashboard. Every command is
+  a plain subcommand over a local Unix socket.
+- **Your transcripts stay yours.** History is a local SQLite database with
+  retention you control, plus an optional plain-text export folder.
+
+---
+
+## Quick start
+
+Install through whichever channel matches your system, then run the two setup
+commands:
 
 ```sh
-nix develop
-cargo build --release
+# 1. Install - pick one (every channel is detailed under Installation):
+paru -S tonguetyped-bin                                 # Arch Linux (AUR)
+nix profile install github:cheerfulScumbag/tonguetyped  # Nix
+sudo apt install ./tonguetyped_*.deb                    # Debian / Ubuntu
+cargo build --release                                   # build from source
+
+# 2. Configure and start on login:
+tonguetyped setup
+tonguetyped autostart enable
 ```
 
-Typing into the focused application uses one of three backends: `wtype`,
-`enigo` in an X11 session, or `dotool`. Automatic backend selection tries
-them in that order, and only a backend that actually works is ever used.
-`wtype` types through the Wayland virtual-keyboard protocol, which only
-wlroots-based compositors (sway, Hyprland, niri) implement; KDE's KWin and
-other Wayland compositors do not, so `wtype` can never type there. `dotool`
-works on any compositor by typing through `/dev/uinput`, which needs write
-access to that device - membership in the `input` group or a matching udev
-rule - and is not granted by default, so a present `dotool` that cannot open
-`/dev/uinput` is treated as unavailable. The packaged installs carry the
-helpers with them: the Nix package bundles `wtype`, `dotool`, and
-`wl-clipboard` into its wrapper and the Arch package depends on all three, so
-a normal install can type out of the box and has the Wayland clipboard tools
-available; the .deb recommends `wtype` and `wl-clipboard` only - Debian does
-not package `dotool`, so a KDE Wayland user installing from the .deb must
-build `dotool` from source (`go build` from its upstream repository) to type
-on KWin. When no typing helper is available, the dashboard and the
-setup wizard say so and name what to install for this compositor (`dotool` on
-KDE and other non-wlroots compositors, `wtype` on wlroots) instead of hiding
-the typing options. TongueTyped never uses the clipboard as a typing fallback.
+`tonguetyped setup` does not choose a dictation key for you. It registers the
+"Start or stop dictation" action with your desktop and opens the desktop's own
+shortcut dialog; you press the key you want there. See
+[the desktop shortcut](#the-desktop-shortcut) for why.
+
+Sign out and back in after the first install so your desktop's portal discovers
+the new application entry, then press your key and speak.
+
+---
 
 ## Installation
 
-Install the Nix package into your user profile:
+TongueTyped targets Linux desktops. Pick the channel that matches your system.
+
+### Nix (flakes)
 
 ```sh
-nix profile add .
-tonguetyped autostart enable
-```
+# Install a user-profile package (Vulkan-accelerated by default):
+nix profile install github:cheerfulScumbag/tonguetyped
 
-The package installs the binary and the
-`io.github.cheerfulScumbag.tonguetyped.desktop` application entry.
-The second command installs that same entry in your user autostart directory, so
-KDE starts TongueTyped when you next sign in. Sign out and back in after the
-first installation so the desktop portal discovers the Nix profile application
-entry. TongueTyped registers the "Start or stop dictation" action with your
-desktop but does not choose a shortcut for it: set the key from your desktop's
-own shortcut dialog (or the dashboard's Shortcut screen, which opens it for
-you).
-
-Upgrade the profile package without changing the autostart setting:
-
-```sh
+# Upgrade in place:
 nix profile upgrade tonguetyped
+
+# Try without installing:
+nix run github:cheerfulScumbag/tonguetyped -- daemon
 ```
 
-An older install may still have an app-chosen default key bound to the
-"Start or stop dictation" action, which made a later key change stack the new
-key on top of the old one. Upgrading replaces that lingering action with a fresh,
-unbound one on the next daemon start. This clears any dictation key you had
-already set, including a custom one, so you must assign it again afterwards from
-your desktop's own shortcut dialog (the dashboard's Shortcut screen opens it).
-If your desktop still shows a stale entry with the old key, remove that one entry
-once in the desktop's shortcut settings (System Settings -> Shortcuts on KDE).
+From a local checkout, use `nix profile install .` instead of the flake URL. The
+package ships the `tonguetyped` binary and the
+`io.github.cheerfulScumbag.tonguetyped.desktop` entry, and wraps the binary with
+the `wtype`, `dotool`, `wl-clipboard`, and `canberra-gtk-play` helpers it needs.
 
-Autostart can be disabled and re-enabled without removing the package:
+### Arch Linux (AUR)
 
 ```sh
-tonguetyped autostart disable
-tonguetyped autostart enable
+paru -S tonguetyped-bin   # or: yay -S tonguetyped-bin
 ```
 
-Disable autostart before uninstalling so KDE does not retain a stale entry:
+`tonguetyped-bin` repackages the prebuilt Linux binary and depends on `wtype`,
+`dotool`, `wl-clipboard`, and `xdotool`, so typing works out of the box.
+
+### Debian / Ubuntu (.deb)
+
+Download the `.deb` for your variant from the
+[latest release](https://github.com/cheerfulScumbag/tonguetyped/releases/latest)
+and install it:
 
 ```sh
-tonguetyped autostart disable
-nix profile remove tonguetyped
+sudo apt install ./tonguetyped_*.deb   # or the tonguetyped-gpu-*.deb variant
 ```
 
-Uninstalling leaves configuration, downloaded models, and transcription history
-in the XDG config and data directories. Remove those directories separately only
-if their contents are no longer needed.
+The `.deb` recommends `wtype` and `wl-clipboard`. Debian does not package
+`dotool`, so KDE Wayland users must build it from source (see
+[platform notes](#platform-notes)).
 
-## First run
+### Build from source
 
-Configure the microphone, model, shortcut, typing output, overlay, and autostart
-behavior:
+You need Rust, CMake, libclang, OpenSSL, pkg-config, ALSA development files,
+libxdo development files, and Wayland client development files:
 
 ```sh
-tonguetyped setup
+cargo build --release
+./target/release/tonguetyped setup
+./target/release/tonguetyped daemon
 ```
 
-The setup flow discovers microphones, typing backends, and inference backends
-before presenting choices.
-When both stdin and stdout are a terminal, `setup` opens an interactive Ratatui
-console: arrow keys or `j`/`k` move the selection, `Enter` confirms a step, `Esc`
-returns to the previous one, and `q` quits without saving. The microphone step
-shows a live input level meter for whichever microphone is currently
-highlighted after navigation settles, so you can compare devices without
-restarting audio capture for every keypress. The shortcut step has no key to
-type: TongueTyped registers the dictation action with your desktop and never
-picks a key, so press `Ctrl+R` to set or change it in the desktop's own native
-"press your new shortcut" dialog. After the model step, the
-console fetches the selected GGUF model file if it isn't already installed,
-with progress shown before continuing - the same file every backend (CPU or
-an accelerator) requests, so there is only ever one model to fetch. It then
-offers the inference backend step, listing the backends this build and host
-can use; a backend that can't run here is shown with its reason instead of
-being selectable, except a configured backend that has become unusable, which
-stays in the list marked unavailable so stepping through the step can't
-silently replace it.
-Piped or non-interactive stdin/stdout (scripts, tests, CI) falls back to the
-original line-based prompts, reading newline-separated answers from stdin
-and leaving model downloads to the daemon or `tonguetyped model install`.
+The Nix flake provides the whole toolchain: `nix develop` then `cargo build
+--release`. On NixOS, run build commands through `nix develop -c`.
 
-Either flow validates the complete configuration before replacing
-`$XDG_CONFIG_HOME/tonguetyped/config.toml`. Enabling autostart installs
-`$XDG_CONFIG_HOME/autostart/tonguetyped.desktop`; disabling it removes that entry.
-Cancelling (`q`/`Esc` in the console, or `q` at any line-based prompt) leaves the
-configuration and autostart entry unchanged.
+### GPU acceleration
 
-For development outside the installed package, start the daemon from a graphical
-desktop session:
+A plain `cargo build` links transcribe.cpp CPU-only. Enable one accelerator at
+a time with a Cargo feature:
 
 ```sh
-cargo run -- daemon
+cargo build --release --features gpu-vulkan  # or gpu-cuda, gpu-rocm, gpu-metal
 ```
 
-Debug builds install or update the hidden
-`$XDG_DATA_HOME/applications/io.github.cheerfulScumbag.tonguetyped.Devel.desktop`
-entry before requesting shortcut authorization so the desktop portal can
-identify the source build. Starting the daemon downloads the selected GGUF
-model to `$XDG_DATA_HOME/tonguetyped/models` if needed. If the corresponding XDG
-variables are unset, the standard user config and data directories are used. The
-desktop portal may ask you to approve the "Start or stop dictation" action; it
-ships with no default key, so set your own in the desktop's shortcut dialog (the
-dashboard's Shortcut screen opens it).
+`model.preferred_backend` (`auto` by default) controls which backend the engine
+loads at runtime. `auto` tries CUDA, ROCm, Vulkan, then Metal before always
+falling back to CPU; setting any single name (`cpu`, `vulkan`, `cuda`, `rocm`,
+`metal`) pins the engine to it and fails loudly instead of silently switching.
 
-The default output method is `none`, so transcription does not type or copy
-anything. Retrieve the latest result with:
+---
+
+## Using TongueTyped
+
+### The dashboard
+
+Run `tonguetyped` with no subcommand:
 
 ```sh
-cargo run -- last-result
+tonguetyped
 ```
 
-Run `tonguetyped setup` and choose `Type into the focused application` to type
-transcripts directly. To test typing explicitly, focus a disposable text field
-and run `cargo run -- doctor --test-type`. The regular `doctor` command checks
-the compositor, microphone, model, and typing backends without injecting text
-or requesting shortcut authorization. Run `cargo run -- shortcut-test`
-explicitly, then press the shortcut you have bound; the command waits up to 15
-seconds and reports whether the press was actually detected.
+The dashboard opens on a settings overview - one row each for Model, Inference
+backend, Microphone, Activation, Shortcut, Transcript output, Typing backend,
+Transcript folder, History retention, Startup, and Overlay - above a list of the
+remaining commands. Selecting a row opens a screen that edits just that area,
+with the same live microphone preview and shortcut dialog the setup wizard uses.
 
-## Desktop feedback
+### Commands
 
-Visual feedback (the overlay) is enabled by default; sound feedback is not.
-Disable the overlay or enable sound in `config.toml` without changing the
-terminal workflow:
+| Command | What it does |
+| --- | --- |
+| `tonguetyped` | Open the interactive dashboard |
+| `tonguetyped setup` | Configure everything interactively |
+| `tonguetyped daemon` | Start the daemon (foreground) |
+| `tonguetyped daemon stop` / `restart` | Gracefully stop, or stop and start fresh |
+| `tonguetyped start` / `stop` / `toggle` | Control recording |
+| `tonguetyped cancel` | Cancel recording or discard in-flight processing |
+| `tonguetyped status` | Show daemon state, activation mode, and shortcut health |
+| `tonguetyped reload` | Validate and reload the configuration |
+| `tonguetyped last-result` | Print the most recent transcription |
+| `tonguetyped doctor` | Check runtime dependencies, mic, model, and backends |
+| `tonguetyped shortcut-test` | Bind the shortcut and wait for you to press it |
+| `tonguetyped autostart enable` / `disable` | Toggle desktop-session autostart |
+| `tonguetyped model list` / `install` / `use` / `remove` | Manage GGUF models |
+
+The daemon listens on `$XDG_RUNTIME_DIR/tonguetyped/control.sock` and refuses to
+start a second instance.
+
+### The desktop shortcut
+
+TongueTyped registers the action **"Start or stop dictation"** with your
+desktop's global-shortcuts portal but deliberately never chooses a key for it.
+The binding belongs to the desktop, so you set it in your own shortcut dialog -
+KDE's System Settings, GNOME's Keyboard settings, and so on. The dashboard's
+Shortcut screen opens that dialog for you.
+
+This means a fresh install starts **unbound**: nothing responds until you assign
+a key. `tonguetyped shortcut-test` binds the action and waits up to 15 seconds
+for you to press whatever key you have bound, reporting whether the press was
+actually detected.
+
+Activation comes in two modes, set from the dashboard or `config.toml`:
+
+- **Hold** (default) - record while the key is held, stop when released.
+- **Toggle** - press once to start, press again to stop.
+
+### Window managers
+
+On a wlroots compositor you can skip the desktop portal entirely and bind a key
+to the CLI, which talks to the daemon over its local socket. Every recording
+command is a valid bind target:
+
+- `tonguetyped toggle` - start or stop on one key (best for a single binding)
+- `tonguetyped start` / `tonguetyped stop` - explicit start and stop
+- `tonguetyped cancel` - abort the current recording or in-flight processing
+- `tonguetyped last-result` - print the latest transcript
+
+Bind your key to `tonguetyped toggle`:
+
+```ini
+# Hyprland (hyprland.conf)
+bind = SUPER, S, exec, tonguetyped toggle
+
+# Sway
+bindsym $mod+s exec tonguetyped toggle
+
+# mango / mangowc
+bind=SUPER,s,spawn,tonguetyped toggle
+```
+
+Because the key runs the command directly, this is effectively
+press-to-toggle regardless of the `activation.mode` setting; the portal's
+hold/toggle distinction only applies to the desktop shortcut above.
+
+### Overlay
+
+Visual feedback is on by default and never takes keyboard focus or pointer
+input. It identifies listening, transcribing, success, cancellation, failure,
+and a no-speech outcome (an empty capture). `overlay.style` picks the look:
+
+| Style | Description |
+| --- | --- |
+| `badge` | The default small rounded badge with an icon and phase colour |
+| `minimal` | A bare dot, no chrome |
+| `pill` | A wider pill-shaped badge |
+| `blob` | A bright, glowing orb that slowly breathes |
+| `half-circle` | A gleaming semicircle docked to the top-centre edge |
+| `border` | A full-screen frame that glows along every edge, brightest in the corners |
+
+`border` and `half-circle` ignore `overlay.position`; the other styles honour
+`overlay.position` (`top-left`, `top-right`, `bottom-left`, `bottom-right`,
+`top`, `bottom`, or `center`).
+
+By default the overlay draws on **every connected screen**: `overlay.monitor`
+is `all` (the legacy `active` is an alias for it). Set a specific output name
+from `tonguetyped doctor` to pin it to one monitor. Hotplugging outputs is
+handled without restarting the daemon.
+
+The overlay is a `wlr-layer-shell` surface, which is available on wlroots-based
+compositors (sway, Hyprland, niri) and on modern KWin (validated on KDE Plasma
+6.7+), but not on X11 or older compositors. Where it is unavailable, TongueTyped
+falls back to Plasma's native OSD on KDE, then to a transient freedesktop
+notification - in that fallback tier your desktop controls placement, so
+`overlay.position` and `overlay.monitor` no longer apply. Run `tonguetyped
+doctor` to see which tier is active.
+
+`overlay.streaming_indicator` (`false` by default) adds a busier animation
+during recording. Enable sound feedback separately:
 
 ```toml
 [overlay]
-enabled = false
+enabled = true
+style = "blob"
+streaming_indicator = false
 
 [audio]
 feedback_sounds = true
 feedback_volume = 0.7
-feedback_device = "default"
 ```
 
-The visual feedback identifies listening, transcription, completion,
-cancellation, failure, and a no-speech outcome (an empty capture that produced
-no text) without taking keyboard focus or accepting pointer input. It draws a
-small, click-through `wlr-layer-shell` overlay badge on every connected screen
-by default: `overlay.monitor` is `all` (the legacy `active` is an alias for it),
-or set a specific output name from `tonguetyped doctor` to pin it to one screen.
-`overlay.position` (`top-left`, `top-right`, `bottom-left`,
-`bottom-right`, `top`, `bottom`, or `center`) positions each badge.
-`overlay.style`
-(`badge`, `minimal`, `pill`, `blob`, `border`, or `half-circle`) picks the
-overlay's look: `border` is a full-screen frame that glows along every screen
-edge, brightest in the corners, and `half-circle` is a glowing, pulsing
-semicircle resting on the top edge at top-centre; both ignore
-`overlay.position`. `overlay.streaming_indicator`
-(`false` by default) swaps the plain pulsing dot for a busier multi-bar
-animation during recording. `tonguetyped setup`
-prompts for enabling the overlay and its position, style, and streaming
-indicator, but not for the monitor. `zwlr_layer_shell_v1` is a
-wlroots-originated protocol; it is available on wlroots-based compositors
-(code-reviewed against Mango, but not live-validated) and on modern KWin
-(validated against KDE Plasma 6.7+), but not on X11 sessions or older/other
-compositors that never advertise it. Where it is unavailable, TongueTyped
-falls back to Plasma's native OSD on KDE, then a transient freedesktop
-notification - in that fallback tier, the desktop environment controls
-placement and monitor selection, so `overlay.position`/`overlay.monitor` have
-no effect. Run `tonguetyped doctor` to see which tier is active.
+### Transcript output
 
-Sound feedback uses the desktop sound theme through `canberra-gtk-play` and
-accepts a volume from `0.0` through `1.0`. The Nix package includes this helper;
-source and development builds require it on `PATH`. A non-default
-`feedback_device` is passed as `PULSE_SINK`, which works with PulseAudio and
-PipeWire's PulseAudio compatibility service. A missing sound helper disables
-only sound feedback. Visual feedback is unavailable only when neither the
-layer-shell overlay, Plasma's OSD, nor a desktop notification service can be
-reached. Recording and terminal commands continue to work. TongueTyped does
-not inject text or move focus when it reports state.
+`output.method` defaults to `none`, so a fresh install transcribes and stores
+but types nothing - a safe default while you test. Choose **Type into the
+focused application** in the dashboard (or set `output.method = "type"`) to type
+transcripts into whatever has focus. `output.auto_submit` presses Enter after
+typing, useful for chat boxes and prompts. TongueTyped never uses the clipboard
+as a typing fallback.
 
-## Dashboard
+### History and the transcript folder
 
-Running `tonguetyped` with no subcommand opens an interactive terminal dashboard.
-Its home screen is a settings overview - one row each for Model, Inference
-backend, Microphone, Activation, Shortcut, Transcript output, Typing backend,
-Transcript folder, History retention, Startup, and Overlay, showing the current
-value - above a list of the remaining commands below.
-Selecting a settings row opens a screen that edits just that area, with the same
-live microphone preview and shortcut test/native dialog as `tonguetyped setup`.
-The Model screen also selects the inference backend (`Tab` switches between the
-model catalog and the backend list), and the Inference backend row opens that
-same backend picker on its own, saving the choice and reloading a running daemon
-exactly like the Model screen. `start` and `stop` are
-omitted from the dashboard's list in favor of `toggle` and `cancel` for recording
-control, but every subcommand remains directly invocable on its own, and
-`tonguetyped --help` still lists them all.
-
-## Commands
-
-The CLI provides these commands:
-
-```text
-tonguetyped daemon         Start the daemon
-tonguetyped daemon stop    Gracefully stop the running daemon
-tonguetyped daemon restart Stop the running daemon, then start a fresh one
-tonguetyped setup          Configure TongueTyped interactively
-tonguetyped start          Start recording
-tonguetyped stop           Stop and transcribe the recording
-tonguetyped toggle         Start or stop recording
-tonguetyped cancel         Cancel recording or discard in-flight processing
-tonguetyped status         Show daemon state, activation mode, and shortcut health
-tonguetyped reload         Validate and reload the config
-tonguetyped last-result    Print the latest transcription
-tonguetyped doctor         Check runtime dependencies
-tonguetyped shortcut-test  Bind the desktop shortcut and wait for you to press it
-tonguetyped autostart      Enable or disable desktop-session autostart
-tonguetyped model          Manage the GGUF speech model catalog
-```
-
-The daemon listens on `$XDG_RUNTIME_DIR/tonguetyped/control.sock` and refuses to
-start a second instance. Recordings stop at `transcription.max_recording_seconds`
-even if no stop command arrives. Voice activity detection trims retained audio;
-it does not stop a recording automatically.
-
-When history is enabled, TongueTyped stores transcript text in
-`$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Disable
-`history.enabled` to keep only the current daemon's latest result in memory.
-
-Two retention limits are always applied whenever a transcript is written, and
-neither depends on the output method. `history.max_entries` caps how many rows
-are kept (default `100`); `history.max_age_days` drops rows older than that
-many days (default `30`). Set either to `0` for no limit on that dimension.
-TongueTyped never stores audio.
+When history is enabled, transcripts are stored in
+`$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Two
+retention limits are applied on every write, independently of the output method:
 
 ```toml
 [history]
 enabled = true
-max_entries = 100
-max_age_days = 30
+max_entries = 100          # 0 = no entry limit
+max_age_days = 30          # 0 = no age limit
 transcript_folder = ""     # e.g. "/home/you/Documents/tonguetyped"
 ```
 
-Setting `transcript_folder` to a path also writes each finished transcript into
-that folder as a plain-text file, independently of `history.enabled` - it keeps
-exporting even when the database is off. Each file is stamped with the date and
-time (one file per dictation, written `0600`, a leading `~/` expands to your
-home directory).
-These files are write-once: TongueTyped never reads, monitors, or prunes them,
-so they persist indefinitely regardless of the database retention above. Both
-settings are editable from the dashboard's Settings panel and the setup
-wizard.
+Setting `transcript_folder` also writes each finished transcript to that folder
+as a plain-text file stamped with the date and time (one file per dictation,
+written `0600`, `~/` expanded). Those files are write-once - TongueTyped never
+reads, monitors, or prunes them, so they outlive the database retention.
+TongueTyped never stores audio.
 
-## Latency diagnostics
+### Models
 
-`tonguetyped doctor` reports the selected model ID, the configured backend
-preference, and the detected inference backend and device. It also prints its
-own build identifier - the git commit it
-was built from - and compares it with the build the running daemon reports,
-flagging a daemon left running from an older build. `tonguetyped --version`
-prints this binary's identifier, and `tonguetyped status` the daemon's. The
-daemon logs the same inference configuration at startup.
+Models are GGUF files managed from a reviewed catalog:
 
-After each dictation finishes or is cancelled, the daemon writes one structured
-`tonguetyped::latency` event at the `info` level. The event identifies the model,
-backend, device, outcome, and whether model loading was cold. It reports separate
-durations for audio finalization, VAD, model loading, inference, output, and
-history, plus the total time from the earliest stop boundary until the daemon is
-idle. For hold-mode activation, the total begins when the key is released, while
-audio finalization begins when TongueTyped sends the stop signal after its
-50-millisecond auto-repeat check. Disabled or unreached phases are zero. Latency
-events contain no transcript text or audio.
-
-A load is cold on the daemon's first dictation, and again whenever the model has
-been unloaded from memory since the last one. By default the daemon unloads the
-model after 15 minutes of inactivity, so the next dictation after a quiet period
-pays that cold-load cost again:
-
-```toml
-[model.idle_unload]
-policy = "after_idle"       # "never", "after_transcription", or "after_idle"
-timeout_minutes = 15
+```sh
+tonguetyped model list                          # catalog + install status
+tonguetyped model install whisper-small-q5_k_m  # resumable, SHA-256-verified
+tonguetyped model install whisper-tiny-q5_k_m --use
+tonguetyped model use whisper-small-q5_k_m
+tonguetyped model remove whisper-small-q5_k_m   # delete a non-active install
 ```
 
-Set `policy` to `"after_transcription"` to free the memory after every dictation,
-or `"never"` to keep the model loaded for the daemon's entire lifetime.
-`timeout_minutes` only applies to `"after_idle"`.
+Downloads resume from a partial file when the server supports HTTP range
+requests, and are re-verified against a pinned SHA-256 before going live; a
+corrupt download is deleted, not kept. The active model lives in
+`model.active_model` and is used by every backend alike - there is no separate
+CPU or GPU model.
 
-## Transcription benchmark
+---
 
-Measure cold model loading and repeated warm inference with a 16 kHz mono WAV
-file:
+## Platform notes
+
+Typing into the focused application uses one of three backends. Automatic
+selection tries `wtype`, then `enigo` on X11, then `dotool`, and only ever uses
+a backend that actually works.
+
+| Session | Typing helper | Notes |
+| --- | --- | --- |
+| wlroots Wayland (sway, Hyprland, niri) | `wtype` | Types through the Wayland virtual-keyboard protocol |
+| X11 | `enigo` / `xdotool` | Built in; `xdotool` provides the X11 backend |
+| KDE KWin and other Wayland compositors | `dotool` | `wtype` cannot type here; `dotool` writes through `/dev/uinput` |
+
+`dotool` needs write access to `/dev/uinput`, which is not granted by default.
+Add your user to the `input` group or install a matching udev rule; a present
+`dotool` that cannot open the device is treated as unavailable. **Debian has no
+`dotool` package** - KDE Wayland users installing from the `.deb` must build
+`dotool` from source (`go build` from its upstream repository) to type on KWin.
+
+The Nix package and the AUR package both carry the helpers, so a normal install
+works out of the box. When no helper is available, the dashboard and the setup
+wizard say so and name what to install for your compositor, and refuse to save a
+typing method that could never work.
+
+### Other requirements
+
+An ALSA-compatible input device is required for recording. Desktop-shortcut
+activation requires an XDG Global Shortcuts portal; every terminal command keeps
+working without one.
+
+---
+
+## Diagnostics
+
+`tonguetyped doctor` checks the compositor, microphone, model, and typing
+backends without injecting text or requesting shortcut authorization. It reports
+the selected model, the configured backend preference, the backend and device
+actually in use, and its own build identifier - the git commit it was built from
+- comparing it against the running daemon so a stale daemon is flagged.
+
+After each dictation, the daemon logs one structured `tonguetyped::latency`
+event at `info` level with separate durations for audio finalization, VAD, model
+loading, inference, output, and history. Latency events contain no transcript
+text and no audio.
+
+---
+
+## Configuration
+
+TongueTyped reads `$XDG_CONFIG_HOME/tonguetyped/config.toml`. Almost everything
+is editable from `tonguetyped setup` and the dashboard; the file is there when
+you want to script it. A representative slice:
+
+```toml
+[activation]
+mode = "hold"              # "hold" or "toggle"
+
+[model]
+active_model = "whisper-small-q5_k_m"
+preferred_backend = "auto"
+
+[model.idle_unload]
+policy = "after_idle"      # "never", "after_transcription", or "after_idle"
+timeout_minutes = 15
+
+[output]
+method = "type"            # "none" or "type"
+typing_backend = "auto"    # "auto", "wtype", "enigo", or "dotool"
+auto_submit = false
+
+[overlay]
+enabled = true
+position = "top-right"
+style = "badge"
+monitor = "all"
+```
+
+By default the model unloads after 15 minutes of inactivity to free memory; the
+next dictation then pays a cold-load cost. Set `policy = "never"` to keep it
+resident, or `"after_transcription"` to free it after every dictation.
+
+---
+
+<details>
+<summary><strong>Under the hood</strong> - inference, models, and benchmarking</summary>
+
+**One engine, every backend.** A single module, `src/inference.rs`, handles CPU,
+Vulkan, CUDA, ROCm, and Metal through one Rust binding for transcribe.cpp (the
+`transcribe-cpp` crate). `InferenceEngine::load` always requests an explicit
+backend and never lets the library auto-select, so a fallback never silently
+substitutes a different model or family.
+
+**A curated catalog.** `src/catalog.rs` tracks every reviewed `family =
+"whisper"` GGUF model published by
+[handy-computer](https://huggingface.co/handy-computer), each pinned to a commit
+with an expected byte size and SHA-256.
+
+**Benchmarking.** `examples/transcribe_benchmark.rs` measures cold load and warm
+inference on a 16 kHz mono WAV:
 
 ```sh
 cargo run --release --example transcribe_benchmark -- \
@@ -336,110 +435,17 @@ cargo run --release --example transcribe_benchmark -- \
   recording.wav --runs 5
 ```
 
-Pass `--vad-model PATH` to include production VAD before each inference run.
-Pass `--backend NAME` (`auto`, `cpu`, `vulkan`, `cuda`, `rocm`, or `metal`;
-default `auto`) to force one inference backend. The
-benchmark writes one JSON record containing raw runs, median, p95, model and
-audio SHA-256 hashes, host CPU, thread count, backend, device, and a competing
-load warning. It does not print transcript text. Compare builds with the same
-model, WAV, release profile, and otherwise idle machine. Do not use a result as
-a release threshold when `competing_load_warning` is non-null.
+Pass `--vad-model PATH` to include production VAD, and `--backend NAME` to force
+one backend. It writes a JSON record with raw runs, medians, p95, hashes, host
+CPU, and device - never transcript text.
 
-A recovery run on an AMD Ryzen 7 9700X (8 physical cores, 16 logical CPUs) used
-the default `whisper-small-q5_k_m` model. Its 8.597-second synthetic speech WAV
-was generated with FFmpeg's `flite` source:
+See `data/tt-transcribe-cpp-1/report.md` for the CPU/Vulkan/CUDA consolidation
+evidence and `data/tt-model-catalog-19/report.md` for the catalog derivation.
 
-```sh
-ffmpeg -f lavfi \
-  -i "flite=text='Today I am testing local speech recognition. The microphone records my voice and the computer converts each sentence into written text.'" \
-  -ar 16000 -ac 1 recording.wav
-```
+</details>
 
-See `data/tt-transcribe-cpp-1/report.md` for the historical
-whisper.cpp/transcribe-rs CPU baseline this project started from, and for
-this consolidation's own before/after evidence (dual-path reproduction, then
-the single transcribe.cpp module on CPU, Vulkan, and CUDA, all producing the
-exact same transcript from the exact same GGUF file).
+---
 
-## Inference backends
+## License
 
-One module, `src/inference.rs`, handles every backend - CPU, Vulkan, CUDA,
-ROCm, and Metal - through a single Rust binding for
-[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) (the
-`transcribe-cpp` crate). A plain `cargo build` links transcribe.cpp with no
-accelerator compiled in (CPU only); four optional Cargo features additionally
-compile in one accelerator each:
-
-```sh
-cargo build --release --features gpu-vulkan   # or gpu-cuda, gpu-rocm, gpu-metal
-```
-
-`InferenceEngine::load` always requests an explicit backend (never letting the
-library auto-select). By default (`model.preferred_backend = "auto"`), it tries
-accelerators in a fixed priority order (CUDA, ROCm, Vulkan, Metal) before an
-unconditional, always-available explicit CPU request. Set any other value -
-`cpu`, `vulkan`, `cuda`, `rocm`, or `metal` - to pin `load` to that one backend
-instead: if it can't run here (the feature wasn't compiled in, or no usable
-device or driver was found), the load fails with a named error rather than
-quietly running on a different backend. `tonguetyped setup`, the dashboard's
-Inference backend screen, and the Model screen's backend panel all offer this
-choice, showing any backend this build and host
-can't use as unavailable. Every attempt loads the exact same configured
-GGUF file, so a fallback never substitutes a different model or model family.
-The flake's `packages.default` enables `gpu-vulkan`, which gives `nix build` and
-`nix profile install` accelerated inference on Vulkan-capable systems while
-keeping the tested CPU fallback on systems without a usable GPU or an
-installed GGUF model. Building `gpu-cuda` on NixOS additionally needs
-`cudaPackages.cudatoolkit` and the driver's `/run/opengl-driver/lib` on the
-link path; the flake's devShell and `build.rs` set this up automatically.
-
-If the configured model's GGUF file is missing, or the backend in play fails to
-load or run it, `InferenceEngine::load` returns an error (no silent partial
-success). `tonguetyped doctor` reports the configured preference and whichever
-backend actually ended up active (`transcribe.cpp/cpu`,
-`transcribe.cpp/vulkan`, `transcribe.cpp/cuda`, `transcribe.cpp/rocm`, or
-`transcribe.cpp/metal`) and its device - read directly off the loaded model,
-not guessed from which Cargo features were compiled in. With no model loaded,
-doctor and the daemon's startup log report the pinned backend, or the `auto`
-chain's capability probe. `doctor` separately lists every backend kind this
-build and host can use (CUDA, ROCm, Vulkan,
-Metal, CPU) in inference priority order, so a compiled-in accelerator with no
-usable device shows as unavailable next to the always-available CPU fallback.
-`daemon.rs::prepare_dependencies` fetches the configured model synchronously
-at startup if it is missing, matching the historical CPU path's zero-config
-behavior (now also covering
-every accelerator, since they all share the one file). Provision it ahead of
-time with `tonguetyped model install <id>` to avoid that first-launch wait,
-or let `tonguetyped setup` fetch it as part of the interactive flow.
-
-### GGUF model catalog (`tonguetyped model`)
-
-`src/catalog.rs` holds a reviewed catalog of every `family = "whisper"` GGUF
-model published by [handy-computer](https://huggingface.co/handy-computer),
-derived from transcribe.cpp's release `catalog.db` and cross-verified against
-HuggingFace's own metadata for each file (see
-`data/tt-model-catalog-19/report.md` for the original derivation, and
-`data/tt-transcribe-cpp-1/report.md` for why other catalog.db families -
-canary, parakeet, voxtral, moonshine, sortformer diarization, and so on -
-remain left out even though the CPU path can now load any of them too: their
-output/chunking semantics have not been integration-tested against this
-project's single-shot usage). Every entry is pinned to a specific commit (not
-`main`) with an expected byte size and SHA-256, so what actually downloads
-can't drift from what was reviewed.
-
-```sh
-tonguetyped model list                          # catalog + install status
-tonguetyped model install whisper-tiny-q5_k_m   # resumable, verified download
-tonguetyped model install whisper-tiny-q5_k_m --use   # and select it
-tonguetyped model use whisper-tiny-q5_k_m       # switch the active model
-tonguetyped model remove whisper-tiny-q5_k_m    # delete a non-active install
-```
-
-`install` resumes an interrupted download from its partial `.download` file
-when the server supports HTTP range requests, and always re-verifies the full
-file's SHA-256 before making it live - a corrupt or mismatched download is
-deleted rather than left in place. The selected model is stored in
-`model.active_model` in `config.toml` and used by every backend alike - there
-is no separate CPU or GPU model anymore. A config written by an older version
-(`model.selected`/`model.gpu_model`) is migrated to `active_model`
-automatically the first time it loads, with no edits required.
+MIT - see [LICENSE](LICENSE).
