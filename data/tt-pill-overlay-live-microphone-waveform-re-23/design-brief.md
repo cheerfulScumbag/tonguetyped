@@ -16,6 +16,8 @@ newest audio at the right. Later rounds added:
 - "it needs to still have the loading and transcribe and stuff like those icons
   for it as well ... It just keeps the long pill open and then changes the
   icon."
+- "maybe just putting a bit of opacity on the background ... just a tiny little
+  bit." (the bar fill only; the trace and button stay fully opaque)
 
 The captain's reference image is a private screen capture and is intentionally
 **not** committed to this repository. This note is the tracked, in-repo record
@@ -38,7 +40,10 @@ Voice-reactive recording feedback built on a real microphone level feed
 ## The look
 
 - A wide 8:1 dark bar (`LONG_PILL_SURFACE` 384x48, `#323232`
-  `LONG_PILL_BACKGROUND`).
+  `LONG_PILL_BACKGROUND`), only faintly translucent
+  (`LONG_PILL_BACKGROUND_OPACITY`, 0.85): the fill reads as a soft dark bar
+  rather than a hard block, while the trace and status button stay fully opaque
+  on top.
 - One continuous squiggly light-grey trace (`LONG_PILL_LINE`, `#C8C8C8`) from
   near the bar's left end to just short of the status button, centred
   vertically, whose overall size follows the smoothed live level on a slow
