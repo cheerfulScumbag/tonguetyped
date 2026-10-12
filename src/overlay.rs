@@ -70,6 +70,11 @@ const LONG_PILL_SURFACE: (u32, u32) = (384, 48);
 /// independent of the phase colour - only the status button and the trace
 /// carry the state.
 const LONG_PILL_BACKGROUND: (u8, u8, u8) = (0x32, 0x32, 0x32);
+/// How opaque the long pill's dark bar fill is: just under solid, so the bar
+/// reads as faintly translucent rather than a hard block while the trace and
+/// button stay fully opaque on top of it (the captain's ask - a tiny bit of
+/// opacity on the background only).
+const LONG_PILL_BACKGROUND_OPACITY: f32 = 0.85;
 /// The long pill's squiggle trace colour: the reference's light neutral grey.
 const LONG_PILL_LINE: (u8, u8, u8) = (0xC8, 0xC8, 0xC8);
 /// The `HalfCircle` style's surface: twice the badge width by the badge height,
@@ -1088,7 +1093,9 @@ fn fill_circle(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, rgb: (u8, u8,
 /// the upright muted-mic body. Degenerates to a circle when the two are equal,
 /// via the same "distance from the nearest point on a line segment" trick
 /// `stroke_line` uses, but filled solid within that radius of the segment
-/// rather than stroked.
+/// rather than stroked. `opacity` scales the fill's overall coverage (1.0 is a
+/// solid shape, less makes it faintly translucent) while leaving the edge
+/// anti-aliasing shape unchanged.
 fn fill_capsule(
     canvas: &mut Canvas,
     cx: f32,
@@ -1096,6 +1103,7 @@ fn fill_capsule(
     half_width: f32,
     half_height: f32,
     rgb: (u8, u8, u8),
+    opacity: f32,
 ) {
     let radius = half_width.min(half_height);
     let half_segment_x = (half_width - radius).max(0.0);
@@ -1113,7 +1121,7 @@ fn fill_capsule(
             let proj_x = px.clamp(x0, x1);
             let proj_y = py.clamp(y0, y1);
             let dist = ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt();
-            let coverage = (radius + 0.5 - dist).clamp(0.0, 1.0);
+            let coverage = (radius + 0.5 - dist).clamp(0.0, 1.0) * opacity;
             canvas.blend(x, y, rgb, coverage);
         }
     }
@@ -1454,7 +1462,7 @@ fn glyph_muted_mic(
 ) {
     // Mic body: an upright capsule, sitting slightly above center to leave room
     // for its cradle and stem.
-    fill_capsule(canvas, cx, cy - s * 0.35, s * 0.34, s * 0.5, rgb);
+    fill_capsule(canvas, cx, cy - s * 0.35, s * 0.34, s * 0.5, rgb, 1.0);
     // Cradle: an upward-opening arc (a U) hugging the lower half of the body.
     stroke_arc(
         canvas,
@@ -1731,7 +1739,7 @@ fn paint_pill(
     let half_height = canvas.height as f32 * 0.42;
     let color = phase_color(phase);
     let lf = recording_level(levels);
-    fill_capsule(canvas, cx, cy, half_width, half_height, color);
+    fill_capsule(canvas, cx, cy, half_width, half_height, color, 1.0);
 
     match phase {
         Phase::Recording if live_waveform => {
@@ -1807,8 +1815,9 @@ fn paint_pill(
 /// phase status button at its right end - the `LongPill` style, built to the
 /// captain's reference (see the design record at
 /// `data/tt-pill-overlay-live-microphone-waveform-re-23/design-brief.md`): the
-/// bar is a neutral #323232 capsule (the phase
-/// colour lives in the button, not the bar), the trace is a smooth light-grey
+/// bar is a neutral #323232 capsule, only faintly translucent
+/// (`LONG_PILL_BACKGROUND_OPACITY`); the phase colour lives in the button, not
+/// the bar. The trace is a smooth light-grey
 /// line that rolls with the live `LevelHistory`, and the button is the phase
 /// colour made vivid with `bolden` (red with a white dot while recording, green
 /// with a checkmark after success, and the matching glyph for every other
@@ -1824,6 +1833,7 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
         width / 2.0,
         height / 2.0,
         LONG_PILL_BACKGROUND,
+        LONG_PILL_BACKGROUND_OPACITY,
     );
 
     // Button geometry from the reference: a circle 0.752 of the bar height,
@@ -2617,6 +2627,18 @@ mod tests {
             paint(&mut canvas, phase, t, breath, live_waveform, style, levels);
         }
         pixels
+    }
+
+    /// The long pill's bar as it lands in the premultiplied buffer: its
+    /// `LONG_PILL_BACKGROUND` colour scaled by `LONG_PILL_BACKGROUND_OPACITY`
+    /// and stored at that same opacity, blended source-over onto the
+    /// transparent surface (see `Canvas::blend`). Its three colour channels are
+    /// equal, so the BGRA bytes differ only in alpha from a solid fill.
+    fn long_pill_bar_pixel() -> [u8; 4] {
+        let channel = (LONG_PILL_BACKGROUND.0 as f32 / 255.0 * LONG_PILL_BACKGROUND_OPACITY * 255.0)
+            .round() as u8;
+        let alpha = (LONG_PILL_BACKGROUND_OPACITY * 255.0).round() as u8;
+        [channel, channel, channel, alpha]
     }
 
     #[test]
@@ -3463,17 +3485,14 @@ mod tests {
                     .filter(|pixel| *pixel == &[255, 255, 255, 255])
                     .count() as u64
             } else if style == Style::LongPill {
-                // BGRA: any channel differing from the dark #323232 fill means
-                // trace or button paint.
+                // BGRA: any pixel whose colour differs from the bar's faint
+                // translucent fill means trace or button paint.
+                let bar = long_pill_bar_pixel();
                 pixels
                     .as_chunks::<4>()
                     .0
                     .iter()
-                    .filter(|pixel| {
-                        pixel[0] != LONG_PILL_BACKGROUND.2
-                            || pixel[1] != LONG_PILL_BACKGROUND.1
-                            || pixel[2] != LONG_PILL_BACKGROUND.0
-                    })
+                    .filter(|pixel| pixel[..3] != bar[..3])
                     .count() as u64
             } else {
                 pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum()
@@ -3521,13 +3540,8 @@ mod tests {
         let fill = ((4 * width + width / 8) * 4) as usize;
         assert_eq!(
             &recording[fill..fill + 4],
-            &[
-                LONG_PILL_BACKGROUND.2,
-                LONG_PILL_BACKGROUND.1,
-                LONG_PILL_BACKGROUND.0,
-                255
-            ],
-            "the long pill's bar should be the reference's dark neutral fill"
+            &long_pill_bar_pixel(),
+            "the long pill's bar should be the reference's dark neutral fill, faintly translucent"
         );
         // Its corners are transparent - the bar is a capsule, not a rectangle.
         assert_eq!(recording[3], 0, "top-left corner should be transparent");
