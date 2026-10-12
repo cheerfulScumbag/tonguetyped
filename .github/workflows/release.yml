@@ -16,11 +16,22 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  # libsamplerate-sys (a transcribe/vad dependency) still declares
+  # cmake_minimum_required(VERSION 2.8). CMake 4.x removed compatibility with
+  # minimums below 3.5 and hard-errors on it (the macOS runners ship CMake 4),
+  # so allow the old minimum to keep configuring. Same value the flake sets.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   linux:
     name: Linux ${{ matrix.variant }}
-    runs-on: ubuntu-22.04
+    # 24.04, not 22.04: ort/onnxruntime's prebuilt static library (pulled in by
+    # vad-rs) is compiled against glibc 2.38+ and references the __isoc23_*
+    # symbols, so linking it on a glibc 2.35 host fails with "undefined symbol:
+    # __isoc23_strtoll". 24.04 also ships glslc (absent from 22.04), which the
+    # Vulkan backend's CMake build needs. The CI workflow already builds the
+    # default crate on ubuntu-latest (24.04) this way.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -71,10 +82,13 @@ jobs:
       - name: Install ROCm development toolchain
         if: matrix.feature == 'gpu-rocm'
         run: |
-          wget -q https://repo.radeon.com/amdgpu-install/6.4/ubuntu/jammy/amdgpu-install_6.4.60400-1_all.deb
+          wget -q https://repo.radeon.com/amdgpu-install/6.4/ubuntu/noble/amdgpu-install_6.4.60400-1_all.deb
           sudo apt-get install -y ./amdgpu-install_6.4.60400-1_all.deb
           sudo apt-get update
-          sudo apt-get install -y rocm-dev rocm-llvm-dev
+          # hipblas-dev/rocblas-dev carry the hipblasConfig.cmake/rocblasConfig.cmake
+          # that ggml-hip's `find_package(hipblas REQUIRED)` (and rocblas) needs;
+          # rocm-dev alone does not pull the math libraries in.
+          sudo apt-get install -y rocm-dev rocm-llvm-dev hipblas-dev rocblas-dev
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"
           echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
