@@ -63,7 +63,10 @@ jobs:
           sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev pkg-config
       - name: Install Vulkan build dependencies
         if: matrix.feature == 'gpu-vulkan'
-        run: sudo apt-get install -y glslc libvulkan-dev
+        # glslc: ggml-vulkan's `find_package(Vulkan COMPONENTS glslc REQUIRED)`.
+        # spirv-headers: its `find_package(SPIRV-Headers CONFIG REQUIRED)` (the
+        # Ubuntu package ships /usr/share/cmake/SPIRV-Headers/*.cmake).
+        run: sudo apt-get install -y glslc libvulkan-dev spirv-headers
       - name: Install CUDA toolkit
         if: matrix.feature == 'gpu-cuda'
         uses: Jimver/cuda-toolkit@v0.2.27
