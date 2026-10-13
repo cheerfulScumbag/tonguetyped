@@ -20,15 +20,6 @@ recommends = "wtype, wl-clipboard"
 section = "utils"
 priority = "optional"
 
-[package.metadata.deb.variants.gpu-vulkan]
-name = "tonguetyped-gpu-vulkan"
-
-[package.metadata.deb.variants.gpu-cuda]
-name = "tonguetyped-gpu-cuda"
-
-[package.metadata.deb.variants.gpu-rocm]
-name = "tonguetyped-gpu-rocm"
-
 [[bin]]
 name = "tonguetyped"
 path = "src/main.rs"
