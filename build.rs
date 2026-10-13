@@ -89,8 +89,6 @@ fn link_cuda() {
     if let Ok(cuda_root) = std::env::var("CUDAToolkit_ROOT") {
         println!("cargo:rustc-link-search=native={cuda_root}/lib");
     }
-    println!("cargo:rustc-link-lib=cudart");
-    println!("cargo:rustc-link-lib=cublas");
 
     // libcuda.so (the driver API) ships with the NVIDIA driver, not the CUDA
     // toolkit; /run/opengl-driver/lib is NixOS's stable path to whichever
@@ -102,6 +100,12 @@ fn link_cuda() {
     if let Ok(cuda_root) = std::env::var("CUDAToolkit_ROOT") {
         println!("cargo:rustc-link-search=native={cuda_root}/lib/stubs");
     }
-    println!("cargo:rustc-link-lib=cuda");
+    // Passed as link args rather than `rustc-link-lib`: in the crate's own
+    // test binaries a `rustc-link-lib` lands before transcribe-cpp-sys's
+    // static archive that uses it, so `--as-needed` drops it as unused.
+    // Link args go after every archive on the command line.
+    println!(
+        "cargo:rustc-link-arg=-Wl,--push-state,--no-as-needed,-lcudart,-lcublas,-lcuda,--pop-state"
+    );
     println!("cargo:rustc-link-arg=-Wl,-rpath,/run/opengl-driver/lib");
 }
