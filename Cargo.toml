@@ -8,6 +8,10 @@ license = "MIT"
 
 [package.metadata.deb]
 maintainer = "cheerfulScumbag <164391367+cheerfulScumbag@users.noreply.github.com>"
+extended-description = """\
+Privacy-focused offline dictation for Linux. Speech is transcribed on this
+machine with transcribe.cpp and typed into the focused application or written
+to text files. No account, no cloud, and no audio leaves the computer."""
 depends = "$auto"
 # wtype types through the Wayland virtual-keyboard protocol (wlroots
 # compositors only) and wl-clipboard provides the Wayland clipboard tools.
