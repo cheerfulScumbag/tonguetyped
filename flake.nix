@@ -41,6 +41,7 @@
             feature,
             extraNativeBuildInputs ? [ ],
             extraBuildInputs ? [ ],
+            extraPostFixup ? "",
             extraAttrs ? { },
           }:
           pkgs.rustPlatform.buildRustPackage (
@@ -117,7 +118,8 @@
                       pkgs.wl-clipboard
                     ]
                   }
-              '';
+              ''
+              + extraPostFixup;
 
               doInstallCheck = true;
               installCheckPhase = ''
@@ -149,7 +151,16 @@
         };
         cudaPackage = mkPackage {
           feature = "gpu-cuda";
+          # Prepends /run/opengl-driver/lib (the host's libcuda.so.1) to RUNPATH.
+          extraNativeBuildInputs = [ pkgs.autoAddDriverRunpath ];
           extraBuildInputs = [ pkgs.cudaPackages.cudatoolkit ];
+          # The sandbox links libcuda against the toolkit's stub (see build.rs),
+          # which the linker wrapper records in RUNPATH; drop it so the real
+          # driver is the only libcuda.so.1 the binary can load.
+          extraPostFixup = ''
+            elf=$out/bin/.tonguetyped-wrapped
+            patchelf --set-rpath "$(patchelf --print-rpath $elf | tr ':' '\n' | grep -v '/lib/stubs$' | paste -sd:)" $elf
+          '';
           extraAttrs = {
             CUDAToolkit_ROOT = "${pkgs.cudaPackages.cudatoolkit}";
             CUDACXX = "${pkgs.cudaPackages.cudatoolkit}/bin/nvcc";
