@@ -4,12 +4,12 @@
 # project's current version for local reference only; `.github/workflows/
 # release.yml`'s `arch` job resolves `pkgver`/`sha256sums` for the actual
 # release tag and pushes the resolved file to AUR, it does not push this
-# copy verbatim. Repackages the prebuilt default-variant Linux release
+# copy verbatim. Repackages the prebuilt Vulkan Linux release
 # binary (the same one `cargo-deb` repackages for the .deb, see
 # `[package.metadata.deb]` in Cargo.toml) rather than rebuilding from
 # source, matching the common AUR "-bin" convention for Rust CLI tools.
 pkgname=tonguetyped-bin
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc="Local Linux dictation controlled from the terminal or a desktop-wide keyboard shortcut"
 arch=('x86_64')
@@ -32,9 +32,9 @@ depends=('alsa-lib' 'openssl' 'xdotool' 'wtype' 'dotool' 'wl-clipboard')
 optdepends=(
   'wayland: desktop overlay feedback while recording'
 )
-source=("https://github.com/cheerfulScumbag/tonguetyped/releases/download/v${pkgver}/tonguetyped-v${pkgver}-linux-x86_64")
+source=("https://github.com/cheerfulScumbag/tonguetyped/releases/download/v${pkgver}/tonguetyped-v${pkgver}-linux-x86_64-gpu-vulkan")
 sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 
 package() {
-  install -Dm755 "${srcdir}/tonguetyped-v${pkgver}-linux-x86_64" "${pkgdir}/usr/bin/tonguetyped"
+  install -Dm755 "${srcdir}/tonguetyped-v${pkgver}-linux-x86_64-gpu-vulkan" "${pkgdir}/usr/bin/tonguetyped"
 }

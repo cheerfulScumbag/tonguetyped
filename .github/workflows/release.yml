@@ -22,10 +22,20 @@ env:
 
 jobs:
   linux:
-    name: Linux bundled
+    name: Linux ${{ matrix.variant }}
     # ort/onnxruntime's prebuilt static library needs glibc 2.38 or newer.
     # Ubuntu 24.04 also provides glslc for the Vulkan backend.
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: gpu-vulkan
+            feature: gpu-vulkan
+          - variant: gpu-cuda
+            feature: gpu-cuda
+          - variant: gpu-rocm
+            feature: gpu-rocm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,12 +44,17 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake glslc libasound2-dev libclang-dev libssl-dev libvulkan-dev libwayland-dev libxdo-dev pkg-config spirv-headers
+          sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev pkg-config
+      - name: Install Vulkan build dependencies
+        if: matrix.feature == 'gpu-vulkan'
+        run: sudo apt-get install -y glslc libvulkan-dev spirv-headers
       - name: Install CUDA toolkit
+        if: matrix.feature == 'gpu-cuda'
         uses: Jimver/cuda-toolkit@v0.2.27
         with:
           cuda: 12.6.3
       - name: Configure CUDA linker paths
+        if: matrix.feature == 'gpu-cuda'
         run: |
           cuda_root="${CUDA_PATH:-/usr/local/cuda}"
           if [ ! -e "$cuda_root/lib" ]; then
@@ -49,6 +64,7 @@ jobs:
           sudo ln -sfn "$cuda_root/targets/x86_64-linux/lib/stubs/libcuda.so" /run/opengl-driver/lib/libcuda.so
           echo "CUDAToolkit_ROOT=$cuda_root" >> "$GITHUB_ENV"
       - name: Install ROCm development toolchain
+        if: matrix.feature == 'gpu-rocm'
         run: |
           wget -q https://repo.radeon.com/amdgpu-install/6.4/ubuntu/noble/amdgpu-install_6.4.60400-1_all.deb
           sudo apt-get install -y ./amdgpu-install_6.4.60400-1_all.deb
@@ -61,18 +77,18 @@ jobs:
         run: cargo install cargo-deb --locked
       - name: Build release binary
         env:
-          TRANSCRIBE_CMAKE_ARGS: -DAMDGPU_TARGETS=gfx803;gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1201
-        run: cargo build --locked --release --features gpu-vulkan,gpu-cuda,gpu-rocm
+          TRANSCRIBE_CMAKE_ARGS: ${{ matrix.feature == 'gpu-rocm' && '-DAMDGPU_TARGETS=gfx803;gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1201' || '' }}
+        run: cargo build --locked --release --features "${{ matrix.feature }}"
       - name: Package Debian archive and binary
         run: |
           version="${RELEASE_TAG#v}"
           mkdir -p release-assets
-          cargo deb --locked --no-build --deb-version "$version"
+          cargo deb --locked --no-build --variant "${{ matrix.variant }}" --deb-version "$version"
           cp target/debian/*.deb release-assets/
-          cp target/release/tonguetyped "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64"
+          cp target/release/tonguetyped "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64-${{ matrix.variant }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux-bundled
+          name: release-linux-${{ matrix.variant }}
           path: release-assets/
           if-no-files-found: error
 
@@ -93,12 +109,12 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v4
         with:
-          name: release-linux-bundled
+          name: release-linux-gpu-vulkan
           path: linux-release
       - name: Resolve PKGBUILD for this release
         run: |
           version="${RELEASE_TAG#v}"
-          binary="linux-release/tonguetyped-${RELEASE_TAG}-linux-x86_64"
+          binary="linux-release/tonguetyped-${RELEASE_TAG}-linux-x86_64-gpu-vulkan"
           test -f "$binary"
           mkdir -p build
           cp PKGBUILD build/PKGBUILD
@@ -109,7 +125,7 @@ jobs:
           # array expects, so makepkg verifies the checksum locally instead
           # of downloading from the GitHub release - which doesn't exist yet
           # at this point in the workflow.
-          cp "$binary" "build/tonguetyped-v${version}-linux-x86_64"
+          cp "$binary" "build/tonguetyped-v${version}-linux-x86_64-gpu-vulkan"
           chown -R builder:builder build
       - name: Build package with makepkg
         run: su builder -c 'cd build && makepkg --noconfirm --nodeps'
