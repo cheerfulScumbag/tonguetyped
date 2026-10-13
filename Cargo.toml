@@ -1,6 +1,6 @@
 [package]
 name = "tonguetyped"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Local Linux dictation controlled from the terminal or a desktop-wide keyboard shortcut"
 repository = "https://github.com/cheerfulScumbag/tonguetyped"

@@ -9,7 +9,7 @@
 # `[package.metadata.deb]` in Cargo.toml) rather than rebuilding from
 # source, matching the common AUR "-bin" convention for Rust CLI tools.
 pkgname=tonguetyped-bin
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Local Linux dictation controlled from the terminal or a desktop-wide keyboard shortcut"
 arch=('x86_64')
