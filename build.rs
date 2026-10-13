@@ -96,7 +96,12 @@ fn link_cuda() {
     // toolkit; /run/opengl-driver/lib is NixOS's stable path to whichever
     // driver is active. Also rpath it into the binary so a built binary
     // doesn't additionally need LD_LIBRARY_PATH set at run time.
+    // A Nix build sandbox can't see /run/opengl-driver, so fall back to the
+    // toolkit's link-only stub; the rpath still resolves the real driver.
     println!("cargo:rustc-link-search=native=/run/opengl-driver/lib");
+    if let Ok(cuda_root) = std::env::var("CUDAToolkit_ROOT") {
+        println!("cargo:rustc-link-search=native={cuda_root}/lib/stubs");
+    }
     println!("cargo:rustc-link-lib=cuda");
     println!("cargo:rustc-link-arg=-Wl,-rpath,/run/opengl-driver/lib");
 }
