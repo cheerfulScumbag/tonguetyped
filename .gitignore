@@ -1,3 +1,10 @@
 /target
-/.superdesign/tmp
 /result
+
+# Local agent docs and work artifacts (kept on disk, not committed)
+/AGENTS.md
+/CLAUDE.md
+/.superdesign/
+/data/*
+# Build input read by include_str!/include_bytes! and flake.nix - stays tracked.
+!/data/tonguetyped.desktop
