@@ -588,7 +588,7 @@ fn accumulate_chunks(
     let mut chunks: Vec<Transcription> = Vec::new();
     let mut truncated = false;
     let mut produced = false;
-    for result in results {
+    for (index, result) in results.into_iter().enumerate() {
         match result {
             Ok(chunk) => {
                 produced |= !chunk.text.trim().is_empty();
@@ -597,6 +597,9 @@ fn accumulate_chunks(
             }
             Err(error) => {
                 if produced {
+                    tracing::error!(
+                        "chunk {index} failed after an earlier chunk produced text; keeping the partial transcript: {error:#}"
+                    );
                     truncated = true;
                     break;
                 }
