@@ -962,7 +962,14 @@ fn pty_transcript_output_configures_paste_and_enter() {
     sandbox.install_typing_helper("wl-copy");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
-    for _ in 0..5 {
+    // Locate the row from `SETTING_LABELS` rather than assuming a fixed
+    // offset: the list grows when the base branch adds Settings areas, and
+    // this test runs against the merged tree.
+    let output_row = SETTING_LABELS
+        .iter()
+        .position(|label| *label == "Transcript output")
+        .expect("Transcript output must be a Settings row");
+    for _ in 0..output_row {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Transcript output", Duration::from_secs(3));
