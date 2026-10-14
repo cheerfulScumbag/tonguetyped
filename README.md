@@ -550,14 +550,19 @@ CPU or GPU model.
 
 A single live recording is capped by `transcription.max_recording_seconds`
 (600 s by default). Decoding is bounded separately: audio longer than
-`transcription.chunk_seconds` (30 s by default, Whisper's native window) is
-transcribed in back-to-back chunks that each fit that window, with each chunk
-boundary snapped back to the quietest point before its limit so a split lands
-in a pause rather than through a word. This keeps memory and latency bounded
-for a long dictation instead of sending one unbounded buffer through the
-decoder. Set `chunk_seconds = 0` to decode the whole buffer in one call; a
-hard-capped model (canary, cohere) is still split into windows within its
-per-call limit, so the whole file never reaches it in one request.
+`transcription.chunk_seconds` (30 s by default) is transcribed in back-to-back
+chunks that each fit that window, with each chunk boundary snapped back to the
+quietest point before its limit so a split lands in a pause rather than through
+a word. This keeps memory and latency bounded for a long dictation instead of
+sending one unbounded buffer through the decoder.
+
+The window is model-aware. A model that advertises an audio limit is decoded in
+windows at most half that limit, so its own ceiling is never overrun: Moonshine's
+cap is on its *output* (a 194-token decoder budget, roughly 48 s of English), so
+it is chunked at about 24 s rather than the configured 30 s. A hard-capped model
+(canary, cohere) is likewise split into windows within its per-call limit. Set
+`chunk_seconds = 0` to decode the whole buffer in one call for a model with no
+practical limit; a model that advertises one is still bounded.
 
 The same inference path transcribes an existing audio file:
 
