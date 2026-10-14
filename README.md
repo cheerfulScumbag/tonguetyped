@@ -681,8 +681,9 @@ that it was cut short), and canary and
 cohere reject input past about 400 s, so `InferenceEngine::transcribe` always
 keeps each call within the active model's cap - splitting a hard-capped model's
 input into windows at most that limit even when `chunk_seconds = 0` - and
-`Config::validate` additionally refuses a configured recording limit that
-exceeds it.
+`Config::validate` additionally refuses a config whose per-call buffer
+(`min(max_recording_seconds, chunk_seconds)`, or just `max_recording_seconds`
+with chunking off) would exceed it.
 
 **Benchmarking.** `examples/transcribe_benchmark.rs` measures cold load and warm
 inference on a 16 kHz mono WAV:

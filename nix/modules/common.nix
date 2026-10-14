@@ -142,7 +142,7 @@ in
             language = setting types.str "Spoken language code, or `auto` to detect it.";
             trailing_space = setting types.bool "Append a space after each transcript.";
             max_recording_seconds = setting types.ints.positive "Longest single recording.";
-            chunk_seconds = setting types.ints.unsigned "Decode window; audio longer than this is transcribed in chunks. 0 sends the whole buffer in one call.";
+            chunk_seconds = setting types.ints.unsigned "Decode window; audio longer than this is transcribed in chunks. 0 sends the whole buffer in one call, except a hard-capped model (canary, cohere), which is still split to stay within its limit.";
           };
           history = section "The `[history]` table." {
             enabled = setting types.bool "Keep transcripts in the local history database.";
