@@ -382,6 +382,7 @@ impl Phase {
             FeedbackEvent::Copied => Phase::Copied,
             FeedbackEvent::ClipboardFallback => Phase::ClipboardFallback,
             FeedbackEvent::SubmitFailed => Phase::SubmitFailed,
+            FeedbackEvent::Truncated => Phase::SubmitFailed,
             FeedbackEvent::Cancelled => Phase::Cancelled,
             FeedbackEvent::Error => Phase::Error,
         }

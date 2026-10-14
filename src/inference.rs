@@ -474,18 +474,32 @@ fn quietest_boundary(samples: &[f32], low: usize, high: usize) -> usize {
     best_at
 }
 
-/// Maps a `Session::run` result to the text `transcribe` returns. The binding
-/// reports a decode that hit its generation budget before end-of-stream as
-/// [`transcribe_cpp::Error::OutputTruncated`] carrying the partial transcript,
-/// not as `Ok`. That is not a hard failure: the partial text is surfaced and
-/// the truncation logged, so a model with a soft window (moonshine) yields the
-/// short transcript the catalog documents instead of losing the dictation.
-/// Every other error stays a failure.
+/// One decode's text plus whether the model's generation budget cut it short
+/// before end-of-stream. `truncated` is true only for a run the binding reports
+/// as [`transcribe_cpp::Error::OutputTruncated`], so a caller can tell a
+/// partial transcript from a complete one and cue the user accordingly.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Transcription {
+    pub text: String,
+    pub truncated: bool,
+}
+
+/// Maps a `Session::run` result to the [`Transcription`] `transcribe` returns.
+/// The binding reports a decode that hit its generation budget before
+/// end-of-stream as [`transcribe_cpp::Error::OutputTruncated`] carrying the
+/// partial transcript, not as `Ok`. That is not a hard failure: the partial
+/// text is surfaced with `truncated` set and the truncation logged, so a model
+/// with a soft window (moonshine) yields the short transcript the catalog
+/// documents instead of losing the dictation. Every other error stays a
+/// failure.
 fn run_result(
     result: transcribe_cpp::Result<transcribe_cpp::Transcript>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Transcription> {
     match result {
-        Ok(transcript) => Ok(transcript.text),
+        Ok(transcript) => Ok(Transcription {
+            text: transcript.text,
+            truncated: false,
+        }),
         Err(transcribe_cpp::Error::OutputTruncated { partial, .. }) => {
             let text = partial
                 .map(|transcript| transcript.text)
@@ -494,7 +508,10 @@ fn run_result(
                 "transcription reached the model's decode limit and was truncated; keeping the {}-character partial transcript",
                 text.chars().count()
             );
-            Ok(text)
+            Ok(Transcription {
+                text,
+                truncated: true,
+            })
         }
         Err(error) => Err(anyhow::Error::new(error).context("transcription failed")),
     }
@@ -640,7 +657,7 @@ impl InferenceEngine {
         &mut self,
         audio: &[f32],
         config: &crate::config::TranscriptionConfig,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<Transcription> {
         let loaded = self.session.as_mut().context("engine not loaded")?;
         if !loaded.warned_unsupported {
             loaded.warned_unsupported = loaded.decode_support.warn_unsupported(config);
@@ -650,14 +667,19 @@ impl InferenceEngine {
         match chunk_window_samples(config) {
             Some(window) if audio.len() > window => {
                 let mut parts: Vec<String> = Vec::new();
+                let mut truncated = false;
                 for range in split_chunks(audio, window) {
-                    let text = run_result(session.run(&audio[range], &options))?;
-                    let text = text.trim();
+                    let decoded = run_result(session.run(&audio[range], &options))?;
+                    truncated |= decoded.truncated;
+                    let text = decoded.text.trim();
                     if !text.is_empty() {
                         parts.push(text.to_string());
                     }
                 }
-                Ok(parts.join(" "))
+                Ok(Transcription {
+                    text: parts.join(" "),
+                    truncated,
+                })
             }
             _ => run_result(session.run(audio, &options)),
         }
@@ -857,17 +879,21 @@ mod tests {
                 text: "the first half of the dictation".to_string(),
                 ..Default::default()
             })),
-        }));
-        assert_eq!(result.unwrap(), "the first half of the dictation");
+        }))
+        .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.text, "the first half of the dictation");
     }
 
     #[test]
-    fn a_successful_run_returns_its_transcript_text() {
+    fn a_successful_run_returns_its_transcript_text_untruncated() {
         let result = run_result(Ok(transcribe_cpp::Transcript {
             text: "hello world".to_string(),
             ..Default::default()
-        }));
-        assert_eq!(result.unwrap(), "hello world");
+        }))
+        .unwrap();
+        assert!(!result.truncated);
+        assert_eq!(result.text, "hello world");
     }
 
     #[test]

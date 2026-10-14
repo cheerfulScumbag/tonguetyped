@@ -674,7 +674,8 @@ pipeline (whisper, parakeet, moonshine, canary, and cohere), published by
 a commit with an expected byte size and SHA-256, and `tonguetyped model list`
 labels it with its family and language coverage. Families differ in how much
 audio one call accepts: whisper and parakeet take any length, moonshine can
-truncate output past about 48 s (keeping the partial transcript), and canary and
+truncate output past about 48 s (keeping the partial transcript and reporting
+that it was cut short), and canary and
 cohere reject input past about 400 s, so `Config::validate` keeps
 `max_recording_seconds` within the active model's limit.
 

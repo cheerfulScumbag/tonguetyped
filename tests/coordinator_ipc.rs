@@ -23,6 +23,7 @@ struct TestRuntime {
     transcription_started: AtomicBool,
     cancel_stops_transcription: AtomicBool,
     empty_transcript: AtomicBool,
+    truncated_transcript: AtomicBool,
     transcription_error: AtomicBool,
     output_error: AtomicBool,
     /// What a successful `output` reports; `None` means `Delivery::Inserted`.
@@ -236,6 +237,7 @@ impl CoordinatorRuntime for TestRuntime {
         };
         TranscriptionAttempt {
             result,
+            truncated: self.truncated_transcript.load(Ordering::SeqCst),
             timings: TranscriptionTimings::default(),
         }
     }
@@ -475,6 +477,7 @@ async fn latency_records_terminal_outcomes_once() {
         ("success", None),
         ("empty", Some("empty")),
         ("transcription_error", Some("transcription_error")),
+        ("truncated", Some("truncated")),
         ("output_error", Some("output_error")),
         ("copied", Some("copied")),
         ("clipboard_fallback", Some("clipboard_fallback")),
@@ -486,6 +489,7 @@ async fn latency_records_terminal_outcomes_once() {
             Some("transcription_error") => {
                 runtime.transcription_error.store(true, Ordering::SeqCst)
             }
+            Some("truncated") => runtime.truncated_transcript.store(true, Ordering::SeqCst),
             Some("output_error") => runtime.output_error.store(true, Ordering::SeqCst),
             Some("copied") => *runtime.delivery.lock().unwrap() = Some(Delivery::Copied),
             Some("clipboard_fallback") => {
@@ -734,6 +738,24 @@ async fn empty_transcript_reports_a_no_speech_cue_instead_of_success() {
             FeedbackEvent::Processing,
             FeedbackEvent::NoSpeech,
         ]
+    );
+}
+
+#[tokio::test]
+async fn truncated_transcript_still_delivers_but_reports_a_cut_short_cue() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.truncated_transcript.store(true, Ordering::SeqCst);
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime.clone(), feedback.clone());
+
+    stop_and_wait(&coordinator).await;
+
+    // The partial transcript is still typed, but the user must not be told it
+    // was a clean success: the decode was cut off and words are missing.
+    assert_eq!(*runtime.outputs.lock().unwrap(), vec!["test transcript "]);
+    assert_eq!(
+        feedback.events.lock().unwrap().last(),
+        Some(&FeedbackEvent::Truncated)
     );
 }
 

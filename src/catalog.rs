@@ -17,8 +17,9 @@
 //! - whisper and parakeet window or encode internally and accept any length
 //!   ([`LongForm::Unbounded`]).
 //! - moonshine accepts any length but can truncate its output past roughly 48
-//!   seconds ([`LongForm::SoftWindow`]); the partial transcript is kept and the
-//!   truncation logged (`src/inference.rs`), rather than the dictation failing.
+//!   seconds ([`LongForm::SoftWindow`]); the partial transcript is kept and
+//!   reported as cut short (`src/inference.rs`), rather than the dictation
+//!   failing.
 //! - canary and cohere reject input past their encoder table (about 400
 //!   seconds) before decoding ([`LongForm::HardCap`]), so
 //!   [`crate::config::Config::validate`] refuses a `max_recording_seconds`

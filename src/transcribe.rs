@@ -81,7 +81,7 @@ pub fn transcribe_file(path: &Path, config: &Config) -> anyhow::Result<String> {
         BackendPreference::parse(&config.model.preferred_backend)?,
     );
     engine.load()?;
-    engine.transcribe(&samples, &config.transcription)
+    Ok(engine.transcribe(&samples, &config.transcription)?.text)
 }
 
 #[cfg(test)]

@@ -74,6 +74,7 @@ impl CoordinatorRuntime for StubRuntime {
     fn transcribe(&self, _samples: &[f32], _config: &Config) -> TranscriptionAttempt {
         TranscriptionAttempt {
             result: Ok(self.transcript.clone()),
+            truncated: false,
             timings: TranscriptionTimings::default(),
         }
     }
