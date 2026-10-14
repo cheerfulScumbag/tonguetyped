@@ -956,6 +956,66 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
 }
 
 #[test]
+fn pty_transcript_output_configures_paste_and_enter() {
+    let sandbox = Sandbox::new("output-paste");
+    sandbox.install_typing_helper("wtype");
+    sandbox.install_typing_helper("wl-copy");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+    for _ in 0..5 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Paste into the focused application", Duration::from_secs(3));
+
+    // Choosing paste reveals its two options.
+    for _ in 0..3 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for(
+        "> Paste into the focused application",
+        Duration::from_secs(3),
+    );
+    session.send(KEY_ENTER);
+    let screen = session.wait_for(
+        "Paste into the focused application (current)",
+        Duration::from_secs(3),
+    );
+    assert!(screen.contains("After text    nothing"), "{screen}");
+    assert!(
+        screen.contains("Paste keys    Ctrl+V (most applications)"),
+        "{screen}"
+    );
+
+    // Enter on each option row toggles Enter-after and cycles the keys.
+    session.send(KEY_DOWN);
+    session.wait_for(">   After text", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("After text    press Enter", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.wait_for(">   Paste keys", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    let screen = session.wait_for("Shift+Insert (terminals)", Duration::from_secs(3));
+    assert!(
+        screen.contains("Paste into the focused application (current)"),
+        "the saved method stays marked while the cursor is on an option:\n{screen}"
+    );
+    let config = sandbox.config_contents();
+    assert!(config.contains("method = \"paste\""), "{config}");
+    assert!(config.contains("auto_submit = true"), "{config}");
+    assert!(config.contains("paste_keys = \"shift-insert\""), "{config}");
+
+    // The Settings panel summarizes the whole choice.
+    session.send(KEY_ESC);
+    session.wait_for(
+        "paste into the focused application with Shift+Insert, then Enter",
+        Duration::from_secs(3),
+    );
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     // The sandbox PATH has no typing helper and the session is pinned to
     // Wayland + KDE, so this is the exact "no helper installed" state the
@@ -971,11 +1031,17 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     session.wait_for("> Transcript output", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
-    // The type choice stays listed and the warning names what to install.
+    // The type choice stays listed, and highlighting it shows the warning
+    // naming what to install.
     let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
     assert!(
         screen.contains("Keep transcripts in TongueTyped"),
         "the type choice must not be dropped silently:\n{screen}"
+    );
+    session.send(KEY_DOWN);
+    let screen = session.wait_for(
+        "> Type into the focused application",
+        Duration::from_secs(3),
     );
     assert!(
         screen.contains("install dotool"),
@@ -984,11 +1050,6 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
 
     // Choosing it is refused with an explanation, nothing is saved, and the
     // install warning stays visible above the refusal.
-    session.send(KEY_DOWN);
-    session.wait_for(
-        "> Type into the focused application",
-        Duration::from_secs(3),
-    );
     session.send(KEY_ENTER);
     let refused = session.wait_for("Cannot apply", Duration::from_secs(3));
     assert!(

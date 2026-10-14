@@ -10,6 +10,7 @@ use tonguetyped::daemon::dispatch;
 use tonguetyped::feedback::{Feedback, FeedbackEvent};
 use tonguetyped::ipc::{Request, Response};
 use tonguetyped::latency::{Clock, LatencyRecord, LatencySink, MonotonicClock};
+use tonguetyped::output::Delivery;
 
 #[derive(Default)]
 struct TestRuntime {
@@ -24,6 +25,8 @@ struct TestRuntime {
     empty_transcript: AtomicBool,
     transcription_error: AtomicBool,
     output_error: AtomicBool,
+    /// What a successful `output` reports; `None` means `Delivery::Inserted`.
+    delivery: Mutex<Option<Delivery>>,
     recording_finalization_ms: AtomicUsize,
     block_recording_finalization: AtomicBool,
     recording_finalization_started: AtomicBool,
@@ -227,12 +230,17 @@ impl CoordinatorRuntime for TestRuntime {
         }
     }
 
-    fn output(&self, text: &str, _config: &Config) -> anyhow::Result<()> {
+    fn output(&self, text: &str, _config: &Config) -> anyhow::Result<Delivery> {
         if self.output_error.load(Ordering::SeqCst) {
             anyhow::bail!("simulated output failure");
         }
         self.outputs.lock().unwrap().push(text.to_string());
-        Ok(())
+        Ok(self
+            .delivery
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Delivery::Inserted))
     }
 
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
@@ -446,6 +454,8 @@ async fn latency_records_terminal_outcomes_once() {
         ("empty", Some("empty")),
         ("transcription_error", Some("transcription_error")),
         ("output_error", Some("output_error")),
+        ("copied", Some("copied")),
+        ("clipboard_fallback", Some("clipboard_fallback")),
     ] {
         let runtime = Arc::new(TestRuntime::default());
         match configure {
@@ -454,6 +464,12 @@ async fn latency_records_terminal_outcomes_once() {
                 runtime.transcription_error.store(true, Ordering::SeqCst)
             }
             Some("output_error") => runtime.output_error.store(true, Ordering::SeqCst),
+            Some("copied") => *runtime.delivery.lock().unwrap() = Some(Delivery::Copied),
+            Some("clipboard_fallback") => {
+                *runtime.delivery.lock().unwrap() = Some(Delivery::CopiedAfterFailure(
+                    "dotool failed with exit status: 1".to_string(),
+                ))
+            }
             _ => {}
         }
         let latency = Arc::new(RecordingLatencySink::default());
@@ -690,6 +706,53 @@ async fn empty_transcript_reports_a_no_speech_cue_instead_of_success() {
             FeedbackEvent::Processing,
             FeedbackEvent::NoSpeech,
         ]
+    );
+}
+
+#[tokio::test]
+async fn typing_fallback_to_the_clipboard_is_a_success_with_its_own_cue() {
+    let runtime = Arc::new(TestRuntime::default());
+    *runtime.delivery.lock().unwrap() = Some(Delivery::CopiedAfterFailure(
+        "dotool failed with exit status: 1".to_string(),
+    ));
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime.clone(), feedback.clone());
+
+    stop_and_wait(&coordinator).await;
+
+    // The transcript reached the clipboard, so this is not an error: status
+    // stays clean, and the cue tells the user to paste it themselves rather
+    // than flashing a plain success as if it had been typed.
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![
+            FeedbackEvent::Recording,
+            FeedbackEvent::Processing,
+            FeedbackEvent::ClipboardFallback,
+        ]
+    );
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            operation_error: None,
+            ..
+        }
+    ));
+    assert_eq!(*runtime.outputs.lock().unwrap(), vec!["test transcript "]);
+}
+
+#[tokio::test]
+async fn clipboard_mode_reports_a_copied_cue() {
+    let runtime = Arc::new(TestRuntime::default());
+    *runtime.delivery.lock().unwrap() = Some(Delivery::Copied);
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime, feedback.clone());
+
+    stop_and_wait(&coordinator).await;
+
+    assert_eq!(
+        feedback.events.lock().unwrap().last(),
+        Some(&FeedbackEvent::Copied)
     );
 }
 

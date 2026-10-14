@@ -428,13 +428,24 @@ pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
         }
     )));
     lines.push(line(format!(
-        "output method:  {}",
-        if report.output_method_available {
-            "available"
+        "clipboard:      {} {}",
+        report.clipboard_helper,
+        if report.clipboard_available {
+            "found"
         } else {
-            "unavailable (none mode only)"
+            "not found"
         }
     )));
+    match &report.output_method_problem {
+        None => lines.push(line(format!(
+            "output method:  {} (available)",
+            report.output_method
+        ))),
+        Some(problem) => lines.push(error_line(format!(
+            "output method:  {} unavailable - {problem}",
+            report.output_method
+        ))),
+    }
     lines.push(line(format!(
         "shortcut portal: {}",
         match report.shortcut_status {

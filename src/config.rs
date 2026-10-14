@@ -185,10 +185,13 @@ pub struct OutputConfig {
     pub method: OutputMethod,
     #[serde(default = "default_typing_backend")]
     pub typing_backend: String,
+    /// Press Enter after the transcript is typed or pasted, submitting it in
+    /// chat boxes and terminals. Only `type` and `paste` insert text, so
+    /// `validate` rejects it for the other methods.
     #[serde(default = "default_false")]
     pub auto_submit: bool,
     #[serde(default)]
-    pub paste: PasteConfig,
+    pub paste_keys: PasteKeys,
 }
 
 impl Default for OutputConfig {
@@ -197,17 +200,35 @@ impl Default for OutputConfig {
             method: OutputMethod::None,
             typing_backend: default_typing_backend(),
             auto_submit: false,
-            paste: PasteConfig::default(),
+            paste_keys: PasteKeys::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+/// Where a finished transcript goes. Every method also records it in history
+/// and `last-result`; `type` and `paste` fall back to leaving it on the
+/// clipboard when the typing helper fails, so a transcript is never lost.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputMethod {
+    /// Keep the transcript in TongueTyped only.
     #[default]
     None,
+    /// Type the transcript into the focused application.
     Type,
+    /// Copy the transcript to the clipboard without typing anything.
+    Clipboard,
+    /// Copy the transcript to the clipboard, then press the paste keys.
+    Paste,
+}
+
+impl OutputMethod {
+    /// Whether this method inserts text into the focused application, the
+    /// only case where pressing Enter afterwards (`auto_submit`) means
+    /// anything.
+    pub fn inserts_text(self) -> bool {
+        matches!(self, OutputMethod::Type | OutputMethod::Paste)
+    }
 }
 
 impl std::fmt::Display for OutputMethod {
@@ -215,30 +236,32 @@ impl std::fmt::Display for OutputMethod {
         match self {
             OutputMethod::None => write!(f, "none"),
             OutputMethod::Type => write!(f, "type"),
+            OutputMethod::Clipboard => write!(f, "clipboard"),
+            OutputMethod::Paste => write!(f, "paste"),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PasteConfig {
-    #[serde(default = "default_paste_shortcut")]
-    pub shortcut: String,
-    #[serde(default = "default_true")]
-    pub restore_clipboard: bool,
-    #[serde(default = "default_50")]
-    pub delay_before_ms: u64,
-    #[serde(default = "default_300")]
-    pub delay_after_ms: u64,
+/// The key combination `paste` mode presses after copying. Ctrl+V pastes in
+/// most applications; terminals bind it to something else and paste the
+/// clipboard on Shift+Insert instead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasteKeys {
+    #[default]
+    CtrlV,
+    ShiftInsert,
 }
 
-impl Default for PasteConfig {
-    fn default() -> Self {
-        Self {
-            shortcut: default_paste_shortcut(),
-            restore_clipboard: true,
-            delay_before_ms: default_50(),
-            delay_after_ms: default_300(),
+impl PasteKeys {
+    pub const ALL: [PasteKeys; 2] = [PasteKeys::CtrlV, PasteKeys::ShiftInsert];
+}
+
+impl std::fmt::Display for PasteKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PasteKeys::CtrlV => write!(f, "Ctrl+V"),
+            PasteKeys::ShiftInsert => write!(f, "Shift+Insert"),
         }
     }
 }
@@ -470,18 +493,6 @@ fn default_typing_backend() -> String {
     "auto".to_string()
 }
 
-fn default_paste_shortcut() -> String {
-    "ctrl+shift+v".to_string()
-}
-
-fn default_50() -> u64 {
-    50
-}
-
-fn default_300() -> u64 {
-    300
-}
-
 fn default_language() -> String {
     "auto".to_string()
 }
@@ -628,6 +639,26 @@ fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
     true
 }
 
+/// Drops the legacy `[output.paste]` table. It held a paste shortcut, a
+/// restore-clipboard switch, and two delays that no code ever read; the
+/// `paste` output method that replaced it needs only `output.paste_keys`, so
+/// none of the old values carry over. Mutates `raw` in place and returns
+/// whether a migration happened.
+fn migrate_legacy_output_config(raw: &mut toml::Value) -> bool {
+    let Some(output) = raw
+        .as_table_mut()
+        .and_then(|table| table.get_mut("output"))
+        .and_then(|output| output.as_table_mut())
+    else {
+        return false;
+    };
+    if !output.get("paste").is_some_and(toml::Value::is_table) {
+        return false;
+    }
+    output.remove("paste");
+    true
+}
+
 impl Config {
     pub fn config_path() -> anyhow::Result<PathBuf> {
         let dir = directories::BaseDirs::new()
@@ -648,7 +679,8 @@ impl Config {
         let mut raw: toml::Value = toml::from_str(&content)?;
         let migrated = migrate_legacy_model_config(&mut raw)
             | migrate_legacy_activation_config(&mut raw)
-            | migrate_legacy_overlay_config(&mut raw);
+            | migrate_legacy_overlay_config(&mut raw)
+            | migrate_legacy_output_config(&mut raw);
         let config: Config = raw.try_into()?;
         config.validate()?;
         if migrated {
@@ -667,6 +699,7 @@ impl Config {
         migrate_legacy_model_config(&mut raw);
         migrate_legacy_activation_config(&mut raw);
         migrate_legacy_overlay_config(&mut raw);
+        migrate_legacy_output_config(&mut raw);
         let config: Config = raw.try_into()?;
         config.validate()?;
         Ok(config)
@@ -711,8 +744,11 @@ impl Config {
         }
 
         crate::inference::BackendPreference::parse(&self.model.preferred_backend)?;
-        if self.output.method == OutputMethod::None && self.output.auto_submit {
-            anyhow::bail!("auto_submit cannot be true when output.method is 'none'");
+        if self.output.auto_submit && !self.output.method.inserts_text() {
+            anyhow::bail!(
+                "auto_submit cannot be true when output.method is '{}'",
+                self.output.method
+            );
         }
         if !matches!(
             self.output.typing_backend.as_str(),
@@ -1104,6 +1140,61 @@ mod tests {
                 .unwrap();
         assert!(migrate_legacy_overlay_config(&mut both));
         assert_eq!(both["overlay"]["live_waveform"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn legacy_paste_table_is_dropped_so_old_configs_still_load() {
+        // Every config saved before the paste output method carried a dead
+        // `[output.paste]` table; with `deny_unknown_fields` it must be
+        // migrated away or those configs would stop loading.
+        let mut raw: toml::Value = toml::from_str(
+            "[output]\nmethod = \"type\"\n\n[output.paste]\nshortcut = \"ctrl+shift+v\"\n\
+             restore_clipboard = true\ndelay_before_ms = 50\ndelay_after_ms = 300\n",
+        )
+        .unwrap();
+        assert!(migrate_legacy_output_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.output.method, OutputMethod::Type);
+        assert_eq!(config.output.paste_keys, PasteKeys::CtrlV);
+
+        let mut untouched: toml::Value = toml::from_str("[output]\nmethod = \"paste\"\n").unwrap();
+        assert!(!migrate_legacy_output_config(&mut untouched));
+    }
+
+    #[test]
+    fn output_methods_and_paste_keys_round_trip_through_toml() {
+        for (name, method) in [
+            ("none", OutputMethod::None),
+            ("type", OutputMethod::Type),
+            ("clipboard", OutputMethod::Clipboard),
+            ("paste", OutputMethod::Paste),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[output]\nmethod = \"{name}\"\n")).unwrap();
+            assert_eq!(config.output.method, method);
+            assert_eq!(method.to_string(), name);
+        }
+        let config: Config =
+            toml::from_str("[output]\nmethod = \"paste\"\npaste_keys = \"shift-insert\"\n")
+                .unwrap();
+        assert_eq!(config.output.paste_keys, PasteKeys::ShiftInsert);
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(saved.contains("paste_keys = \"shift-insert\""), "{saved}");
+    }
+
+    #[test]
+    fn auto_submit_is_only_valid_for_methods_that_insert_text() {
+        let mut config = Config::default();
+        config.output.auto_submit = true;
+        for (method, valid) in [
+            (OutputMethod::None, false),
+            (OutputMethod::Clipboard, false),
+            (OutputMethod::Type, true),
+            (OutputMethod::Paste, true),
+        ] {
+            config.output.method = method;
+            assert_eq!(config.validate().is_ok(), valid, "{method}");
+        }
     }
 
     #[test]

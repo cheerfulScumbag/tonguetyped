@@ -669,12 +669,12 @@ impl App {
             KeyCode::Esc => self.screen = Screen::Home,
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Screen::TranscriptOutput(screen) = &mut self.screen {
-                    screen.move_selection(-1);
+                    screen.move_selection(-1, &self.config);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Screen::TranscriptOutput(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(1, &self.config);
                 }
             }
             KeyCode::Enter => {
@@ -1210,10 +1210,22 @@ impl App {
                 .microphone_label(&self.config.audio.microphone),
             SettingId::Activation => self.config.activation.mode.to_string(),
             SettingId::Shortcut => activation::keybind_display(&self.config.activation.keybind),
-            SettingId::TranscriptOutput => match self.config.output.method {
-                OutputMethod::None => "keep in TongueTyped".to_string(),
-                OutputMethod::Type => "type into the focused application".to_string(),
-            },
+            SettingId::TranscriptOutput => {
+                let method = match self.config.output.method {
+                    OutputMethod::None => "keep in TongueTyped",
+                    OutputMethod::Type => "type into the focused application",
+                    OutputMethod::Clipboard => "copy to the clipboard",
+                    OutputMethod::Paste => "paste into the focused application",
+                };
+                let mut value = method.to_string();
+                if self.config.output.method == OutputMethod::Paste {
+                    value.push_str(&format!(" with {}", self.config.output.paste_keys));
+                }
+                if self.config.output.auto_submit && self.config.output.method.inserts_text() {
+                    value.push_str(", then Enter");
+                }
+                value
+            }
             SettingId::TypingBackend => self.config.output.typing_backend.clone(),
             SettingId::TranscriptFolder => {
                 let folder = self.config.history.transcript_folder.trim();
@@ -1473,7 +1485,7 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(screen.list_widget(&self.config), chunks[0]);
         frame.render_widget(Paragraph::new(screen.warning_line()), chunks[1]);
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
         frame.render_widget(

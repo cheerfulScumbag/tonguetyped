@@ -61,7 +61,9 @@ fn setup_writes_a_complete_configuration_without_color() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let output = run_setup(&root, "\n\n2\n2\n2\n2\n\n", Some(&bin), "KDE");
+    // Model, microphone, toggle, type, wtype, leave the text, autostart,
+    // confirm.
+    let output = run_setup(&root, "\n\n2\n2\n2\n\n2\n\n", Some(&bin), "KDE");
     assert!(
         output.status.success(),
         "{}",
@@ -93,7 +95,7 @@ fn setup_writes_a_complete_configuration_without_color() {
         include_str!("../data/tonguetyped.desktop")
     );
 
-    let output = run_setup(&root, "\n\n\n\n\n1\n\n", Some(&bin), "KDE");
+    let output = run_setup(&root, "\n\n\n\n\n\n1\n\n", Some(&bin), "KDE");
     assert!(
         output.status.success(),
         "{}",
@@ -144,6 +146,74 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
         config.output.method,
         tonguetyped::config::OutputMethod::None,
         "a refused type choice must not be saved"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn setup_configures_paste_and_enter_with_the_chosen_keys() {
+    let root = root("paste");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for helper in ["wtype", "wl-copy"] {
+        let path = bin.join(helper);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    // Model, microphone, hold, paste, automatic backend, Shift+Insert,
+    // press Enter, manual start, confirm.
+    let output = run_setup(&root, "\n\n\n4\n\n2\n2\n\n\n", Some(&bin), "sway");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Output:      paste (Shift+Insert, then Enter)"),
+        "{stdout}"
+    );
+
+    let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert_eq!(
+        config.output.method,
+        tonguetyped::config::OutputMethod::Paste
+    );
+    assert_eq!(
+        config.output.paste_keys,
+        tonguetyped::config::PasteKeys::ShiftInsert
+    );
+    assert!(config.output.auto_submit);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn setup_refuses_the_clipboard_without_wl_copy_and_says_what_to_install() {
+    let root = root("no-clipboard");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+
+    // Answer 3 (clipboard) with no wl-copy on PATH: refused with the remedy,
+    // then 1 (keep in TongueTyped) is accepted.
+    let output = run_setup(&root, "\n\n\n3\n1\n\n\n", Some(&bin), "KDE");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("install wl-clipboard"), "{stderr}");
+    let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert_eq!(
+        config.output.method,
+        tonguetyped::config::OutputMethod::None
     );
     std::fs::remove_dir_all(root).unwrap();
 }

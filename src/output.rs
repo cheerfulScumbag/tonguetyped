@@ -1,36 +1,116 @@
-use crate::config::OutputMethod;
+use crate::config::{OutputConfig, OutputMethod, PasteKeys};
 use anyhow::Context;
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::Duration;
 
-pub fn output_text(
-    text: &str,
-    method: &OutputMethod,
-    backend: &str,
-    auto_submit: bool,
-) -> anyhow::Result<()> {
-    match method {
+/// How long `paste` mode waits between pressing the paste keys and pressing
+/// Enter. Applications read the clipboard asynchronously after the paste
+/// keys, so an Enter sent straight away can submit before the text arrives.
+const PASTE_SETTLE: Duration = Duration::from_millis(200);
+
+/// Where a transcript ended up. Every variant except an `Err` from
+/// `output_text` means the user can still reach the text outside
+/// TongueTyped's own history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// `none` mode: the transcript stays in TongueTyped only.
+    Kept,
+    /// Typed or pasted into the focused application.
+    Inserted,
+    /// `clipboard` mode: copied, as configured.
+    Copied,
+    /// Typing or pasting failed with this error, and the transcript was left
+    /// on the clipboard instead so it is not lost.
+    CopiedAfterFailure(String),
+}
+
+pub fn output_text(text: &str, config: &OutputConfig) -> anyhow::Result<Delivery> {
+    deliver(
+        text,
+        config,
+        &SystemDesktop {
+            backend: &config.typing_backend,
+        },
+    )
+}
+
+/// The three desktop actions output needs, split out so the mode and
+/// fallback decisions in `deliver` are testable without a session.
+trait Desktop {
+    fn type_text(&self, text: &str, auto_submit: bool) -> anyhow::Result<()>;
+    fn press_paste(&self, keys: PasteKeys, auto_submit: bool) -> anyhow::Result<()>;
+    fn copy(&self, text: &str) -> anyhow::Result<()>;
+}
+
+fn deliver(text: &str, config: &OutputConfig, desktop: &impl Desktop) -> anyhow::Result<Delivery> {
+    match config.method {
         OutputMethod::None => {
             tracing::debug!(
                 "output method 'none': skipping output of {} chars",
                 text.len()
             );
+            Ok(Delivery::Kept)
         }
-        OutputMethod::Type => {
-            type_text(text, backend, auto_submit)?;
+        OutputMethod::Type => match desktop.type_text(text, config.auto_submit) {
+            Ok(()) => Ok(Delivery::Inserted),
+            Err(typing) => match desktop.copy(text) {
+                Ok(()) => Ok(Delivery::CopiedAfterFailure(format!("{typing:#}"))),
+                Err(copy) => {
+                    Err(typing.context(format!("the clipboard fallback also failed: {copy:#}")))
+                }
+            },
+        },
+        OutputMethod::Clipboard => {
+            desktop.copy(text)?;
+            Ok(Delivery::Copied)
+        }
+        // The copy comes first, so a failed key press still leaves the
+        // transcript on the clipboard with nothing more to do.
+        OutputMethod::Paste => {
+            desktop.copy(text)?;
+            match desktop.press_paste(config.paste_keys, config.auto_submit) {
+                Ok(()) => Ok(Delivery::Inserted),
+                Err(paste) => Ok(Delivery::CopiedAfterFailure(format!("{paste:#}"))),
+            }
         }
     }
-    Ok(())
+}
+
+struct SystemDesktop<'a> {
+    backend: &'a str,
+}
+
+impl SystemDesktop<'_> {
+    fn resolved_backend(&self) -> anyhow::Result<String> {
+        let backend = if self.backend == "auto" {
+            cached_auto_backend()
+        } else {
+            self.backend.to_string()
+        };
+        if backend == "none" {
+            anyhow::bail!("no typing helper is available: {}", typing_helper_warning());
+        }
+        Ok(backend)
+    }
+}
+
+impl Desktop for SystemDesktop<'_> {
+    fn type_text(&self, text: &str, auto_submit: bool) -> anyhow::Result<()> {
+        type_text(text, &self.resolved_backend()?, auto_submit)
+    }
+
+    fn press_paste(&self, keys: PasteKeys, auto_submit: bool) -> anyhow::Result<()> {
+        press_paste(keys, &self.resolved_backend()?, auto_submit)
+    }
+
+    fn copy(&self, text: &str) -> anyhow::Result<()> {
+        copy_to_clipboard(text)
+    }
 }
 
 fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()> {
-    let backend = if backend == "auto" {
-        cached_auto_backend()
-    } else {
-        backend.to_string()
-    };
-
-    match backend.as_str() {
+    match backend {
         "wtype" => {
             let mut child = Command::new("wtype")
                 .args(["-"])
@@ -73,6 +153,172 @@ fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()>
     }
 
     Ok(())
+}
+
+/// Presses `keys` through the typing helper, then Enter after
+/// `PASTE_SETTLE` when `auto_submit` is set.
+fn press_paste(keys: PasteKeys, backend: &str, auto_submit: bool) -> anyhow::Result<()> {
+    match backend {
+        "wtype" => {
+            let status = Command::new("wtype")
+                .args(wtype_paste_args(keys, auto_submit))
+                .status()
+                .context("failed to spawn wtype")?;
+            require_success("wtype", status)?;
+        }
+        "enigo" => {
+            use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+            let mut enigo = Enigo::new(&Settings::default())?;
+            let (modifier, key) = match keys {
+                PasteKeys::CtrlV => (Key::Control, Key::Unicode('v')),
+                PasteKeys::ShiftInsert => (Key::Shift, Key::Insert),
+            };
+            enigo.key(modifier, Direction::Press)?;
+            let pressed = enigo.key(key, Direction::Click);
+            enigo.key(modifier, Direction::Release)?;
+            pressed?;
+            if auto_submit {
+                std::thread::sleep(PASTE_SETTLE);
+                enigo.key(Key::Return, Direction::Click)?;
+            }
+        }
+        "dotool" => {
+            use std::io::Write;
+            let mut child = Command::new("dotool")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to spawn dotool")?;
+            if let Some(mut stdin) = child.stdin.take() {
+                // dotool runs each line as it arrives, so the pause between
+                // the two writes reaches the keyboard as a real pause.
+                writeln!(stdin, "key {}", dotool_paste_keys(keys))?;
+                stdin.flush()?;
+                if auto_submit {
+                    std::thread::sleep(PASTE_SETTLE);
+                    writeln!(stdin, "key enter")?;
+                }
+            }
+            require_success("dotool", child.wait()?)?;
+        }
+        _ => {
+            anyhow::bail!("unsupported typing backend: {}", backend);
+        }
+    }
+    Ok(())
+}
+
+fn wtype_paste_args(keys: PasteKeys, auto_submit: bool) -> Vec<String> {
+    let (modifier, key) = match keys {
+        PasteKeys::CtrlV => ("ctrl", "v"),
+        PasteKeys::ShiftInsert => ("shift", "Insert"),
+    };
+    let mut args: Vec<String> = ["-M", modifier, "-k", key, "-m", modifier]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if auto_submit {
+        args.extend([
+            "-s".to_string(),
+            PASTE_SETTLE.as_millis().to_string(),
+            "-k".to_string(),
+            "Return".to_string(),
+        ]);
+    }
+    args
+}
+
+fn dotool_paste_keys(keys: PasteKeys) -> &'static str {
+    match keys {
+        PasteKeys::CtrlV => "ctrl+v",
+        PasteKeys::ShiftInsert => "shift+insert",
+    }
+}
+
+/// Copies `text` to the clipboard with the session's clipboard helper. Both
+/// helpers fork a background process that keeps serving the selection after
+/// this call returns, so stdout and stderr are discarded: a pipe held open by
+/// that process would make `wait` block until the next copy.
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let (program, args) = clipboard_command(clipboard_uses_wayland());
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn {program}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    require_success(program, child.wait()?)
+}
+
+/// The clipboard helper and its arguments: `wl-copy` (from `wl-clipboard`)
+/// on Wayland, `xclip` on X11.
+fn clipboard_command(wayland: bool) -> (&'static str, &'static [&'static str]) {
+    if wayland {
+        ("wl-copy", &[])
+    } else {
+        ("xclip", &["-selection", "clipboard"])
+    }
+}
+
+/// A daemon started by a systemd user unit can see `WAYLAND_DISPLAY` without
+/// `XDG_SESSION_TYPE`, and `wl-copy` only needs the former.
+fn clipboard_uses_wayland() -> bool {
+    session_is_wayland() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+/// The clipboard helper this session copies with.
+pub fn clipboard_helper() -> &'static str {
+    clipboard_command(clipboard_uses_wayland()).0
+}
+
+/// Whether the clipboard helper is installed. This is a PATH lookup, never a
+/// trial copy, so probing cannot overwrite what the user has copied.
+pub fn clipboard_available() -> bool {
+    binary_on_path(clipboard_helper(), std::env::var_os("PATH").as_deref())
+}
+
+/// The warning shown when `clipboard_available` is false, naming the package
+/// to install for this session. The helper runs fresh on every copy, so no
+/// restart is needed once it is installed.
+pub fn clipboard_helper_warning() -> &'static str {
+    clipboard_warning_for(clipboard_uses_wayland())
+}
+
+fn clipboard_warning_for(wayland: bool) -> &'static str {
+    if wayland {
+        "No clipboard helper found - install wl-clipboard (it provides wl-copy)."
+    } else {
+        "No clipboard helper found - install xclip."
+    }
+}
+
+/// Why `method` cannot work here, as the warning that names the remedy, or
+/// `None` when it can. `type` needs a typing helper; `clipboard` needs the
+/// clipboard helper; `paste` needs both, because it copies first and then
+/// presses the paste keys through the typing helper.
+pub fn method_unavailable_reason(
+    method: OutputMethod,
+    has_typing_helper: bool,
+    has_clipboard: bool,
+) -> Option<&'static str> {
+    match method {
+        OutputMethod::None => None,
+        OutputMethod::Type => (!has_typing_helper).then(typing_helper_warning),
+        OutputMethod::Clipboard => (!has_clipboard).then(clipboard_helper_warning),
+        OutputMethod::Paste => {
+            if !has_clipboard {
+                Some(clipboard_helper_warning())
+            } else if !has_typing_helper {
+                Some(typing_helper_warning())
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Memoized `probe_type_backend()`: which typing helper is actually installed
@@ -290,7 +536,7 @@ fn write_dotool_commands(
 
 fn require_success(backend: &str, status: std::process::ExitStatus) -> anyhow::Result<()> {
     if !status.success() {
-        anyhow::bail!("{} exited with status {}", backend, status);
+        anyhow::bail!("{backend} failed with {status}");
     }
     Ok(())
 }
@@ -314,8 +560,234 @@ mod tests {
 
     #[test]
     fn test_none_output() {
-        let result = output_text("test", &OutputMethod::None, "auto", false);
-        assert!(result.is_ok());
+        let result = output_text("test", &OutputConfig::default());
+        assert_eq!(result.unwrap(), Delivery::Kept);
+    }
+
+    /// Records every desktop action and fails the ones it is told to.
+    #[derive(Default)]
+    struct FakeDesktop {
+        fail_typing: bool,
+        fail_paste: bool,
+        fail_copy: bool,
+        actions: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Desktop for FakeDesktop {
+        fn type_text(&self, text: &str, auto_submit: bool) -> anyhow::Result<()> {
+            self.actions
+                .borrow_mut()
+                .push(format!("type {text:?} submit={auto_submit}"));
+            if self.fail_typing {
+                anyhow::bail!("dotool failed with exit status: 1");
+            }
+            Ok(())
+        }
+
+        fn press_paste(&self, keys: PasteKeys, auto_submit: bool) -> anyhow::Result<()> {
+            self.actions
+                .borrow_mut()
+                .push(format!("paste {keys} submit={auto_submit}"));
+            if self.fail_paste {
+                anyhow::bail!("no typing helper is available");
+            }
+            Ok(())
+        }
+
+        fn copy(&self, text: &str) -> anyhow::Result<()> {
+            self.actions.borrow_mut().push(format!("copy {text:?}"));
+            if self.fail_copy {
+                anyhow::bail!("failed to spawn wl-copy");
+            }
+            Ok(())
+        }
+    }
+
+    fn output_config(method: OutputMethod) -> OutputConfig {
+        OutputConfig {
+            method,
+            ..OutputConfig::default()
+        }
+    }
+
+    #[test]
+    fn each_method_performs_only_its_own_actions() {
+        let cases = [
+            (OutputMethod::None, Delivery::Kept, vec![]),
+            (
+                OutputMethod::Type,
+                Delivery::Inserted,
+                vec!["type \"hi\" submit=false"],
+            ),
+            (
+                OutputMethod::Clipboard,
+                Delivery::Copied,
+                vec!["copy \"hi\""],
+            ),
+            (
+                OutputMethod::Paste,
+                Delivery::Inserted,
+                vec!["copy \"hi\"", "paste Ctrl+V submit=false"],
+            ),
+        ];
+        for (method, delivery, actions) in cases {
+            let desktop = FakeDesktop::default();
+            assert_eq!(
+                deliver("hi", &output_config(method), &desktop).unwrap(),
+                delivery,
+                "{method}"
+            );
+            assert_eq!(*desktop.actions.borrow(), actions, "{method}");
+        }
+    }
+
+    #[test]
+    fn paste_and_enter_passes_the_configured_keys_and_submit() {
+        let desktop = FakeDesktop::default();
+        let config = OutputConfig {
+            method: OutputMethod::Paste,
+            auto_submit: true,
+            paste_keys: PasteKeys::ShiftInsert,
+            ..OutputConfig::default()
+        };
+        assert_eq!(
+            deliver("hi", &config, &desktop).unwrap(),
+            Delivery::Inserted
+        );
+        assert_eq!(
+            *desktop.actions.borrow(),
+            vec!["copy \"hi\"", "paste Shift+Insert submit=true"]
+        );
+    }
+
+    #[test]
+    fn failed_typing_falls_back_to_the_clipboard() {
+        let desktop = FakeDesktop {
+            fail_typing: true,
+            ..FakeDesktop::default()
+        };
+        let config = OutputConfig {
+            method: OutputMethod::Type,
+            auto_submit: true,
+            ..OutputConfig::default()
+        };
+        let delivery = deliver("hi", &config, &desktop).unwrap();
+        assert_eq!(
+            delivery,
+            Delivery::CopiedAfterFailure("dotool failed with exit status: 1".to_string())
+        );
+        assert_eq!(
+            *desktop.actions.borrow(),
+            vec!["type \"hi\" submit=true", "copy \"hi\""],
+            "the fallback copies the same text and presses nothing"
+        );
+    }
+
+    #[test]
+    fn failed_paste_keys_leave_the_already_copied_text() {
+        let desktop = FakeDesktop {
+            fail_paste: true,
+            ..FakeDesktop::default()
+        };
+        let delivery = deliver("hi", &output_config(OutputMethod::Paste), &desktop).unwrap();
+        assert!(matches!(delivery, Delivery::CopiedAfterFailure(_)));
+        assert_eq!(
+            *desktop.actions.borrow(),
+            vec!["copy \"hi\"", "paste Ctrl+V submit=false"],
+            "the text is on the clipboard already, so nothing is copied twice"
+        );
+    }
+
+    #[test]
+    fn typing_and_clipboard_both_failing_is_an_error_naming_both() {
+        let desktop = FakeDesktop {
+            fail_typing: true,
+            fail_copy: true,
+            ..FakeDesktop::default()
+        };
+        let error = deliver("hi", &output_config(OutputMethod::Type), &desktop).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("dotool failed"), "{message}");
+        assert!(message.contains("wl-copy"), "{message}");
+    }
+
+    #[test]
+    fn clipboard_and_paste_fail_when_the_copy_fails() {
+        for method in [OutputMethod::Clipboard, OutputMethod::Paste] {
+            let desktop = FakeDesktop {
+                fail_copy: true,
+                ..FakeDesktop::default()
+            };
+            assert!(deliver("hi", &output_config(method), &desktop).is_err());
+            assert_eq!(
+                desktop.actions.borrow().len(),
+                1,
+                "{method}: no paste after a failed copy"
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_methods_name_the_missing_helper() {
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::None, false, false),
+            None
+        );
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::Type, true, false),
+            None
+        );
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::Clipboard, false, true),
+            None
+        );
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::Paste, true, true),
+            None
+        );
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::Type, false, true),
+            Some(typing_helper_warning())
+        );
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::Clipboard, true, false),
+            Some(clipboard_helper_warning())
+        );
+        // Paste needs both: the clipboard to hold the text, the typing
+        // helper to press the keys.
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::Paste, true, false),
+            Some(clipboard_helper_warning())
+        );
+        assert_eq!(
+            method_unavailable_reason(OutputMethod::Paste, false, true),
+            Some(typing_helper_warning())
+        );
+    }
+
+    #[test]
+    fn clipboard_helper_matches_the_session() {
+        assert_eq!(clipboard_command(true).0, "wl-copy");
+        assert_eq!(
+            clipboard_command(false),
+            ("xclip", &["-selection", "clipboard"][..])
+        );
+        assert!(clipboard_warning_for(true).contains("wl-clipboard"));
+        assert!(clipboard_warning_for(false).contains("xclip"));
+    }
+
+    #[test]
+    fn paste_keys_reach_each_helper_in_its_own_syntax() {
+        assert_eq!(
+            wtype_paste_args(PasteKeys::CtrlV, false),
+            ["-M", "ctrl", "-k", "v", "-m", "ctrl"]
+        );
+        assert_eq!(
+            wtype_paste_args(PasteKeys::ShiftInsert, true),
+            ["-M", "shift", "-k", "Insert", "-m", "shift", "-s", "200", "-k", "Return"]
+        );
+        assert_eq!(dotool_paste_keys(PasteKeys::CtrlV), "ctrl+v");
+        assert_eq!(dotool_paste_keys(PasteKeys::ShiftInsert), "shift+insert");
     }
 
     #[test]

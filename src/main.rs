@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Doctor { test_type }) => {
             if test_type {
                 let config = config::Config::load()?;
-                doctor::typing_test(&config)?;
+                println!("{}", doctor::typing_test(&config)?);
             } else {
                 let config = config::Config::load()?;
                 let report = doctor::run_doctor(&config).await?;

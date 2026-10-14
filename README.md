@@ -36,8 +36,9 @@ an interactive dashboard for every setting.
   in. Nothing is uploaded.
 - **Keyboard-first.** Bind "Start or stop dictation" once in your desktop's
   shortcut dialog. Hold to talk, or press once to start and once to stop.
-- **Types where you are.** The transcript is typed into the focused app through
-  `wtype`, `dotool`, or `enigo` - whichever actually works on your compositor.
+- **Types where you are.** The transcript is typed or pasted into the focused
+  app through `wtype`, `dotool`, or `enigo` - whichever actually works on your
+  compositor. When typing fails, the transcript is left on the clipboard.
 - **Dictate into files.** Point `transcript_folder` at a directory and every
   finished transcript is also written there as a plain-text file, independent of
   the focused app or the clipboard.
@@ -197,8 +198,8 @@ backend. The same three builds are attached as plain binaries
 (`tonguetyped-<tag>-linux-x86_64-gpu-<backend>`).
 
 The `.deb` recommends `wtype` and `wl-clipboard`. Debian does not package
-`dotool`, so KDE Wayland users must build it from source (see
-[platform notes](#platform-notes)).
+`dotool`, so KDE Wayland users must build it from source to type (see
+[platform notes](#platform-notes)) or use the `clipboard` output method.
 
 ### Build from source
 
@@ -373,11 +374,26 @@ feedback_volume = 0.7
 ### Transcript output
 
 `output.method` defaults to `none`, so a fresh install transcribes and stores
-but types nothing - a safe default while you test. Choose **Type into the
-focused application** in the dashboard (or set `output.method = "type"`) to type
-transcripts into whatever has focus. `output.auto_submit` presses Enter after
-typing, useful for chat boxes and prompts. TongueTyped never uses the clipboard
-as a typing fallback.
+but types nothing - a safe default while you test. Pick another method in the
+dashboard's **Transcript output** screen or in `tonguetyped setup`:
+
+| `output.method` | What happens to the transcript |
+| --- | --- |
+| `none` | Kept in TongueTyped only (history and `last-result`) |
+| `type` | Typed into the focused application |
+| `clipboard` | Copied to the clipboard; nothing is typed |
+| `paste` | Copied to the clipboard, then pasted with `output.paste_keys` |
+
+`output.paste_keys` is `"ctrl-v"` (most applications) or `"shift-insert"`
+(terminals, which bind Ctrl+V to something else). `output.auto_submit` presses
+Enter after the text is typed or pasted, useful for chat boxes and prompts; it
+applies to `type` and `paste` only.
+
+If the typing helper fails during `type` or `paste`, the transcript is left on
+the clipboard instead and the overlay shows "Typing failed, copied to
+clipboard", so you can paste it yourself. The clipboard helper is `wl-copy` from
+`wl-clipboard` on Wayland and `xclip` on X11. `tonguetyped doctor --test-type`
+sends a test line through the configured method and says where it went.
 
 ### History and the transcript folder
 
@@ -436,11 +452,14 @@ Add your user to the `input` group or install a matching udev rule; a present
 `dotool` that cannot open the device is treated as unavailable. **Debian has no
 `dotool` package** - KDE Wayland users installing from the `.deb` must build
 `dotool` from source (`go build` from its upstream repository) to type on KWin.
+Without it, the `clipboard` output method still works, and `type` falls back to
+leaving the transcript on the clipboard.
 
 The Nix package and the AUR package both carry the helpers, so a normal install
-works out of the box. When no helper is available, the dashboard and the setup
-wizard say so and name what to install for your compositor, and refuse to save a
-typing method that could never work.
+works out of the box. When a method's helper is missing, the dashboard and the
+setup wizard say so and name what to install for your compositor, and refuse to
+save an output method that could never work. `paste` needs both the clipboard
+helper and a typing helper, which presses the paste keys.
 
 ### Other requirements
 
@@ -452,8 +471,9 @@ working without one.
 
 ## Diagnostics
 
-`tonguetyped doctor` checks the compositor, microphone, model, and typing
-backends without injecting text or requesting shortcut authorization. It reports
+`tonguetyped doctor` checks the compositor, microphone, model, typing backends,
+clipboard helper, and whether the configured output method can work, without
+injecting text or requesting shortcut authorization. It reports
 the selected model, the configured backend preference, the backend and device
 actually in use, and its own build identifier - the git commit it was built from
 - comparing it against the running daemon so a stale daemon is flagged.
@@ -484,9 +504,10 @@ policy = "after_idle"      # "never", "after_transcription", or "after_idle"
 timeout_minutes = 15
 
 [output]
-method = "type"            # "none" or "type"
+method = "type"            # "none", "type", "clipboard", or "paste"
 typing_backend = "auto"    # "auto", "wtype", "enigo", or "dotool"
-auto_submit = false
+auto_submit = false        # press Enter after "type" or "paste"
+paste_keys = "ctrl-v"      # "ctrl-v" or "shift-insert", for "paste"
 
 [overlay]
 enabled = true

@@ -116,6 +116,7 @@
                       pkgs.wtype
                       pkgs.dotool
                       pkgs.wl-clipboard
+                      pkgs.xclip
                     ]
                   }
               ''

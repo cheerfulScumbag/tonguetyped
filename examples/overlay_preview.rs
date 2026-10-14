@@ -4,8 +4,8 @@
 //! a screenshot script) can confirm placement and appearance on a given
 //! compositor, without needing a microphone or a downloaded Whisper model.
 //! Run with `cargo run --example overlay_preview -- top-left`.
-//! Pass a state name (recording/transcribing/success/no-speech/cancelled/error/
-//! waveform) as a second argument to hold on just that one state for 30s,
+//! Pass a state name (recording/transcribing/success/no-speech/copied/
+//! clipboard-fallback/cancelled/error/waveform) as a second argument to hold on just that one state for 30s,
 //! e.g. for screenshotting: `cargo run --example overlay_preview -- top-right
 //! recording`. "waveform" holds the Recording phase with
 //! `overlay.live_waveform` enabled, to preview the live microphone waveform
@@ -87,6 +87,8 @@ fn main() {
             "transcribing" => FeedbackEvent::Processing,
             "success" => FeedbackEvent::Success,
             "no-speech" => FeedbackEvent::NoSpeech,
+            "copied" => FeedbackEvent::Copied,
+            "clipboard-fallback" => FeedbackEvent::ClipboardFallback,
             "cancelled" => FeedbackEvent::Cancelled,
             "error" => FeedbackEvent::Error,
             other => {
@@ -111,6 +113,12 @@ fn main() {
             Duration::from_secs(2),
         ),
         ("success", FeedbackEvent::Success, Duration::from_secs(2)),
+        ("copied", FeedbackEvent::Copied, Duration::from_secs(2)),
+        (
+            "clipboard fallback",
+            FeedbackEvent::ClipboardFallback,
+            Duration::from_secs(3),
+        ),
         (
             "recording (again)",
             FeedbackEvent::Recording,
