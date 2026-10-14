@@ -619,8 +619,10 @@ pub struct InferenceEngine {
     preference: BackendPreference,
     cancel: CancelToken,
     /// The loaded model's input-length contract, recovered from the catalog by
-    /// `model_path`. A hard-capped family (canary, cohere) is always decoded
-    /// in windows at most its cap, so no call can exceed the limit even when
+    /// `model_path` and combined with the session's own advertised ceiling in
+    /// `decode_window_samples`. A hard-capped family (canary, cohere) is
+    /// decoded in windows at most its cap and any model that advertises a
+    /// limit at most half it, so no call can exceed the limit even when
     /// `transcription.chunk_seconds` is `0`.
     long_form: crate::catalog::LongForm,
 }
@@ -1401,7 +1403,9 @@ mod tests {
         // "success", and a leading silently-empty chunk does not count as text.
         assert!(accumulate_chunks(vec![
             transcribed("   "),
-            run_result(Err(transcribe_cpp::Error::InputTooLong("too long".to_string()))),
+            run_result(Err(transcribe_cpp::Error::InputTooLong(
+                "too long".to_string()
+            ))),
         ])
         .is_err());
     }

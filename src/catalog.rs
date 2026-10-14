@@ -16,16 +16,17 @@
 //!
 //! - whisper and parakeet window or encode internally and accept any length
 //!   ([`LongForm::Unbounded`]).
-//! - moonshine accepts any length but can truncate its output past roughly 48
-//!   seconds ([`LongForm::SoftWindow`]); the partial transcript is kept and
-//!   reported as cut short (`src/inference.rs`), rather than the dictation
-//!   failing.
+//! - moonshine accepts any length but its decoder has a fixed output budget
+//!   (roughly 48 seconds of English), so the engine keeps each run under it by
+//!   chunking into shorter windows ([`LongForm::SoftWindow`]); if a single run
+//!   still hits the budget, the partial transcript is kept and reported as cut
+//!   short (`src/inference.rs`) rather than the dictation failing.
 //! - canary and cohere reject input past their encoder table (about 400
 //!   seconds) before decoding ([`LongForm::HardCap`]), so
-//!   `InferenceEngine::transcribe` always splits a hard-capped model's input
-//!   into windows at most the cap - even when `chunk_seconds` is `0` - and
+//!   `InferenceEngine::transcribe` always splits a model that advertises a
+//!   limit into windows within it - even when `chunk_seconds` is `0` - and
 //!   [`crate::config::Config::validate`] additionally refuses a config whose
-//!   live recording limit would exceed it.
+//!   live recording limit would exceed a hard cap.
 //!
 //! Diarization (`sortformer`) and streaming-only families stay out: neither
 //! produces a single offline transcript through `Session::run`.
