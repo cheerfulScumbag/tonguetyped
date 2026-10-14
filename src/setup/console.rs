@@ -1,7 +1,10 @@
-use super::{Capabilities, ModelRequirement, ProvisionHandle, ReconfigureHandle, SetupOutcome};
+use super::{
+    output_summary, paste_keys_labels, Capabilities, ModelRequirement, ProvisionHandle,
+    ReconfigureHandle, SetupOutcome, AUTO_SUBMIT_LABELS, OUTPUT_METHODS,
+};
 use crate::activation::ReconfigureOutcome;
 use crate::audio::{self, level_to_ratio};
-use crate::config::{ActivationMode, Config, OutputMethod};
+use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
 use crate::overlay::{
     POSITION_VALUES as OVERLAY_POSITION_VALUES, STYLE_LABELS as OVERLAY_STYLE_LABELS,
     STYLE_VALUES as OVERLAY_STYLE_VALUES, WAVEFORM_LABELS as OVERLAY_WAVEFORM_LABELS,
@@ -48,6 +51,8 @@ enum StepKind {
     Shortcut,
     Output,
     OutputBackend,
+    OutputPasteKeys,
+    OutputSubmit,
     Startup,
     HistoryRetention,
     TranscriptFolder,
@@ -108,6 +113,8 @@ struct ConsoleState {
     output_selection: usize,
     backend_values: Vec<String>,
     backend_selection: usize,
+    paste_keys_selection: usize,
+    submit_selection: usize,
     startup_selection: usize,
     retention_fields: Vec<TextField>,
     retention_field: usize,
@@ -167,9 +174,12 @@ impl ConsoleState {
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = capabilities.output_labels();
-        let output_selection = usize::from(
-            config.output.method == OutputMethod::Type && capabilities.has_type_backend(),
-        );
+        let output_selection = capabilities.output_index(config.output.method);
+        let paste_keys_selection = PasteKeys::ALL
+            .iter()
+            .position(|keys| *keys == config.output.paste_keys)
+            .unwrap_or(0);
+        let submit_selection = usize::from(config.output.auto_submit);
         let backend_values = capabilities.typing_backend_values();
         let backend_selection = backend_values
             .iter()
@@ -210,6 +220,8 @@ impl ConsoleState {
             output_selection,
             backend_values,
             backend_selection,
+            paste_keys_selection,
+            submit_selection,
             startup_selection,
             retention_fields,
             retention_field,
@@ -457,6 +469,8 @@ impl ConsoleState {
             StepKind::Activation => ACTIVATION_LABELS.len(),
             StepKind::Output => self.output_labels.len(),
             StepKind::OutputBackend => self.backend_values.len(),
+            StepKind::OutputPasteKeys => PasteKeys::ALL.len(),
+            StepKind::OutputSubmit => AUTO_SUBMIT_LABELS.len(),
             StepKind::Startup => STARTUP_LABELS.len(),
             StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
             StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
@@ -480,6 +494,8 @@ impl ConsoleState {
             StepKind::Activation => &mut self.activation_selection,
             StepKind::Output => &mut self.output_selection,
             StepKind::OutputBackend => &mut self.backend_selection,
+            StepKind::OutputPasteKeys => &mut self.paste_keys_selection,
+            StepKind::OutputSubmit => &mut self.submit_selection,
             StepKind::Startup => &mut self.startup_selection,
             StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
             StepKind::OverlayPosition => &mut self.overlay_position_selection,
@@ -496,8 +512,12 @@ impl ConsoleState {
         }
     }
 
+    fn selected_output_method(&self) -> OutputMethod {
+        OUTPUT_METHODS[self.output_selection]
+    }
+
     fn has_backend_step(&self) -> bool {
-        self.output_selection == 1 && self.capabilities.has_type_backend()
+        self.selected_output_method().inserts_text() && self.capabilities.has_type_backend()
     }
 
     /// The overlay's position/waveform sub-steps are only worth configuring
@@ -527,6 +547,12 @@ impl ConsoleState {
         steps.push(Output);
         if self.has_backend_step() {
             steps.push(OutputBackend);
+        }
+        if self.selected_output_method() == OutputMethod::Paste {
+            steps.push(OutputPasteKeys);
+        }
+        if self.selected_output_method().inserts_text() {
+            steps.push(OutputSubmit);
         }
         steps.push(Startup);
         steps.push(HistoryRetention);
@@ -609,25 +635,29 @@ impl ConsoleState {
                 // typed value to validate or store, so Enter just continues.
             }
             StepKind::Output => {
-                if self.output_selection == 0 {
-                    self.config.output.method = OutputMethod::None;
-                    self.config.output.typing_backend = "auto".to_string();
-                } else if !self.capabilities.has_type_backend() {
-                    // Only a helper that actually works may be selected: stay
-                    // on this step and explain what to install instead of
-                    // saving an output method that can never type.
-                    self.error = self
-                        .capabilities
-                        .typing_helper_warning()
-                        .map(str::to_string);
+                let method = self.selected_output_method();
+                if let Some(problem) = self.capabilities.output_method_problem(method) {
+                    // Only a method that works here may be selected: stay on
+                    // this step and explain what to install instead of saving
+                    // an output method that can never deliver a transcript.
+                    self.error = Some(problem.to_string());
                     return Ok(ControlFlow::Continue);
-                } else {
-                    self.config.output.method = OutputMethod::Type;
+                }
+                self.config.output.method = method;
+                if !method.inserts_text() {
+                    self.config.output.typing_backend = "auto".to_string();
+                    self.config.output.auto_submit = false;
                 }
             }
             StepKind::OutputBackend => {
                 self.config.output.typing_backend =
                     self.backend_values[self.backend_selection].clone();
+            }
+            StepKind::OutputPasteKeys => {
+                self.config.output.paste_keys = PasteKeys::ALL[self.paste_keys_selection];
+            }
+            StepKind::OutputSubmit => {
+                self.config.output.auto_submit = self.submit_selection == 1;
             }
             StepKind::Startup => {
                 self.config.startup.autostart = self.startup_selection == 1;
@@ -796,6 +826,8 @@ impl ConsoleState {
             StepKind::Shortcut => "Shortcut",
             StepKind::Output => "Transcript output",
             StepKind::OutputBackend => "Typing backend",
+            StepKind::OutputPasteKeys => "Paste keys",
+            StepKind::OutputSubmit => "After the text",
             StepKind::Startup => "Startup",
             StepKind::HistoryRetention => "History retention",
             StepKind::TranscriptFolder => "Transcript folder",
@@ -855,7 +887,10 @@ impl ConsoleState {
         let footer = if let Some(error) = &self.error {
             Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)))
         } else if self.step == StepKind::Output {
-            match self.capabilities.typing_helper_warning() {
+            match self
+                .capabilities
+                .output_method_problem(self.selected_output_method())
+            {
                 Some(warning) => {
                     Line::from(Span::styled(warning, Style::default().fg(Color::Yellow)))
                 }
@@ -931,6 +966,24 @@ impl ConsoleState {
                 list_paragraph(
                     &self.backend_values,
                     self.backend_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::OutputPasteKeys => frame.render_widget(
+                list_paragraph(
+                    &paste_keys_labels(),
+                    self.paste_keys_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::OutputSubmit => frame.render_widget(
+                list_paragraph(
+                    &AUTO_SUBMIT_LABELS.map(String::from),
+                    self.submit_selection,
                     self.step_title(),
                     area.height,
                 ),
@@ -1345,7 +1398,7 @@ impl ConsoleState {
                 self.config.activation.mode,
                 crate::activation::keybind_display(&self.config.activation.keybind)
             )),
-            Line::from(format!("Output:      {}", self.config.output.method)),
+            Line::from(format!("Output:      {}", output_summary(&self.config))),
             Line::from(format!(
                 "Retention:   {}",
                 self.config.history.retention_summary()
@@ -1438,6 +1491,7 @@ mod tests {
                 "System default microphone".to_string(),
             )],
             typing_backends: Vec::new(),
+            clipboard: false,
             inference_backends: Vec::new(),
         }
     }
@@ -1609,6 +1663,65 @@ mod tests {
         assert_eq!(state.step, StepKind::Startup);
     }
 
+    #[test]
+    fn paste_walks_through_backend_keys_and_enter_steps() {
+        let capabilities = Capabilities {
+            typing_backends: vec!["dotool".to_string()],
+            clipboard: true,
+            ..no_mic_capabilities()
+        };
+        let mut state = ConsoleState::new(Config::default(), capabilities);
+        state.step = StepKind::Output;
+        state.output_selection = 3;
+        state.advance().unwrap();
+        assert_eq!(state.config.output.method, OutputMethod::Paste);
+        assert_eq!(state.step, StepKind::OutputBackend);
+        state.advance().unwrap();
+        assert_eq!(state.step, StepKind::OutputPasteKeys);
+        state.move_selection(1);
+        state.advance().unwrap();
+        assert_eq!(state.config.output.paste_keys, PasteKeys::ShiftInsert);
+        assert_eq!(state.step, StepKind::OutputSubmit);
+        state.move_selection(1);
+        state.advance().unwrap();
+        assert!(state.config.output.auto_submit);
+        assert_eq!(state.step, StepKind::Startup);
+        assert_eq!(state.prev_step(), Some(StepKind::OutputSubmit));
+    }
+
+    #[test]
+    fn clipboard_skips_the_typing_steps_and_clears_enter_after() {
+        let capabilities = Capabilities {
+            clipboard: true,
+            ..no_mic_capabilities()
+        };
+        let mut config = Config::default();
+        config.output.method = OutputMethod::Type;
+        config.output.auto_submit = true;
+        let mut state = ConsoleState::new(config, capabilities);
+        state.step = StepKind::Output;
+        state.output_selection = 2;
+        state.advance().unwrap();
+        assert_eq!(state.config.output.method, OutputMethod::Clipboard);
+        assert!(!state.config.output.auto_submit);
+        assert_eq!(state.step, StepKind::Startup);
+        state.config.validate().unwrap();
+    }
+
+    #[test]
+    fn clipboard_is_refused_without_a_clipboard_helper() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Output;
+        state.output_selection = 2;
+        state.advance().unwrap();
+        assert_eq!(state.step, StepKind::Output);
+        let error = state.error.clone().unwrap_or_default();
+        assert!(
+            error.contains("wl-clipboard") || error.contains("xclip"),
+            "{error}"
+        );
+    }
+
     fn capabilities_with_backends(backends: &[(&'static str, Option<&str>)]) -> Capabilities {
         let mut capabilities = no_mic_capabilities();
         capabilities.inference_backends = backends
@@ -1704,6 +1817,7 @@ mod tests {
                 ("test-mic-3".to_string(), "Test microphone 3".to_string()),
             ],
             typing_backends: Vec::new(),
+            clipboard: false,
             inference_backends: Vec::new(),
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
@@ -1723,6 +1837,7 @@ mod tests {
         let capabilities = Capabilities {
             microphones: vec![("test-mic-1".to_string(), "Test microphone 1".to_string())],
             typing_backends: Vec::new(),
+            clipboard: false,
             inference_backends: Vec::new(),
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);
@@ -1748,6 +1863,7 @@ mod tests {
                 ("test-mic-2".to_string(), "Test microphone 2".to_string()),
             ],
             typing_backends: Vec::new(),
+            clipboard: false,
             inference_backends: Vec::new(),
         };
         let mut state = ConsoleState::new(Config::default(), capabilities);

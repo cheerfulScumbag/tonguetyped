@@ -28,11 +28,13 @@ const STYLES: [&str; 7] = [
     "half-circle",
     "long-pill",
 ];
-const PHASES: [&str; 6] = [
+const PHASES: [&str; 8] = [
     "recording",
     "transcribing",
     "success",
     "no-speech",
+    "copied",
+    "clipboard-fallback",
     "cancelled",
     "error",
 ];

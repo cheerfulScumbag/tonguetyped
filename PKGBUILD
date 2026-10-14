@@ -31,6 +31,7 @@ conflicts=('tonguetyped')
 depends=('alsa-lib' 'openssl' 'xdotool' 'wtype' 'dotool' 'wl-clipboard')
 optdepends=(
   'wayland: desktop overlay feedback while recording'
+  'xclip: clipboard and paste output on X11'
 )
 source=("https://github.com/cheerfulScumbag/tonguetyped/releases/download/v${pkgver}/tonguetyped-v${pkgver}-linux-x86_64-gpu-vulkan")
 sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')

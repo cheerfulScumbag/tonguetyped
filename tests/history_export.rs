@@ -78,9 +78,13 @@ impl CoordinatorRuntime for StubRuntime {
         }
     }
 
-    fn output(&self, text: &str, _config: &Config) -> anyhow::Result<()> {
+    fn output(
+        &self,
+        text: &str,
+        _config: &Config,
+    ) -> anyhow::Result<tonguetyped::output::Delivery> {
         self.outputs.lock().unwrap().push(text.to_string());
-        Ok(())
+        Ok(tonguetyped::output::Delivery::Inserted)
     }
 }
 

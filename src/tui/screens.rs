@@ -13,10 +13,10 @@
 
 use crate::audio::{level_to_ratio, MicMonitor};
 use crate::commands;
-use crate::config::{ActivationMode, Config, OutputMethod};
+use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
 use crate::inference::BackendChoice;
 use crate::overlay;
-use crate::setup::Capabilities;
+use crate::setup::{paste_keys_labels, Capabilities, OUTPUT_METHODS};
 use crate::text_input::TextField;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -569,69 +569,126 @@ impl ShortcutScreen {
     }
 }
 
-/// Transcript output method: keep transcripts in-app, or type them into the
-/// focused application.
+/// Transcript output: the four methods, then - for the methods that insert
+/// text - Enter-after and, for `paste`, the paste keys. Like the Overlay
+/// screen, the option rows follow the saved method, and Enter on one toggles
+/// or cycles its value.
 pub(super) struct OutputScreen {
     pub labels: Vec<String>,
     pub selected: usize,
     pub result: Option<Result<(), String>>,
-    type_backend_available: bool,
-    warning: Option<&'static str>,
+    /// `Capabilities::output_method_problem` for each of `OUTPUT_METHODS`.
+    problems: [Option<&'static str>; OUTPUT_METHODS.len()],
 }
 
 impl OutputScreen {
+    const SUBMIT_ROW: usize = OUTPUT_METHODS.len();
+    const PASTE_KEYS_ROW: usize = OUTPUT_METHODS.len() + 1;
+
     pub(super) fn new(capabilities: &Capabilities, config: &Config) -> Self {
-        let labels = capabilities.output_labels();
-        let type_backend_available = capabilities.has_type_backend();
-        let selected =
-            usize::from(config.output.method == OutputMethod::Type && type_backend_available);
         Self {
-            labels,
-            selected,
+            labels: capabilities.output_labels(),
+            selected: capabilities.output_index(config.output.method),
             result: None,
-            type_backend_available,
-            warning: capabilities.typing_helper_warning(),
+            problems: OUTPUT_METHODS.map(|method| capabilities.output_method_problem(method)),
         }
     }
 
-    pub(super) fn move_selection(&mut self, delta: i32) {
-        let len = self.labels.len() as i32;
-        if len == 0 {
-            return;
+    fn row_count(config: &Config) -> usize {
+        match config.output.method {
+            OutputMethod::Paste => Self::PASTE_KEYS_ROW + 1,
+            OutputMethod::Type => Self::SUBMIT_ROW + 1,
+            OutputMethod::None | OutputMethod::Clipboard => OUTPUT_METHODS.len(),
         }
-        let next = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
-        self.selected = next;
     }
 
-    /// Applies the highlighted choice. "Type into the focused application"
-    /// can only be applied while a helper actually works; choosing it without
-    /// one leaves the configuration untouched and returns the refusal for
-    /// the result line, so the screen explains what to install instead of
-    /// silently saving a method that can never type.
+    pub(super) fn move_selection(&mut self, delta: i32, config: &Config) {
+        let len = Self::row_count(config) as i32;
+        self.selected = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
+    }
+
+    /// Applies the highlighted row. A method can only be applied while it
+    /// works here; choosing one that cannot leaves the configuration
+    /// untouched and returns the refusal for the result line, so the screen
+    /// explains what to install instead of silently saving a method that can
+    /// never deliver a transcript. Leaving `type`/`paste` also clears
+    /// Enter-after, which only those methods accept.
     pub(super) fn apply(&mut self, config: &mut Config) -> Result<(), String> {
-        if self.selected == 0 {
-            config.output.method = OutputMethod::None;
-            config.output.typing_backend = "auto".to_string();
+        if let Some(method) = OUTPUT_METHODS.get(self.selected).copied() {
+            if self.problems[self.selected].is_some() {
+                // The warning line just above names what to install; this
+                // line only has to say the choice was refused.
+                return Err("Cannot apply: a required helper is not installed.".to_string());
+            }
+            config.output.method = method;
+            if !method.inserts_text() {
+                config.output.typing_backend = "auto".to_string();
+                config.output.auto_submit = false;
+            }
             return Ok(());
         }
-        if !self.type_backend_available {
-            // The standing warning just above the list names what to install;
-            // this line only has to say the choice was refused.
-            return Err("Cannot apply: no typing helper is installed.".to_string());
+        match self.selected {
+            Self::SUBMIT_ROW => config.output.auto_submit = !config.output.auto_submit,
+            Self::PASTE_KEYS_ROW => {
+                let index = PasteKeys::ALL
+                    .iter()
+                    .position(|keys| *keys == config.output.paste_keys)
+                    .unwrap_or(0);
+                config.output.paste_keys = PasteKeys::ALL[(index + 1) % PasteKeys::ALL.len()];
+            }
+            _ => {}
         }
-        config.output.method = OutputMethod::Type;
         Ok(())
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
-        selection_list("Transcript output", &self.labels, self.selected)
+    /// The method rows, the saved one marked `(current)` since the cursor
+    /// can move away from it, then that method's options indented beneath.
+    pub(super) fn rows(&self, config: &Config) -> Vec<String> {
+        let mut rows: Vec<String> = self
+            .labels
+            .iter()
+            .zip(OUTPUT_METHODS)
+            .map(|(label, method)| {
+                if method == config.output.method {
+                    format!("{label} (current)")
+                } else {
+                    label.clone()
+                }
+            })
+            .collect();
+        if config.output.method.inserts_text() {
+            rows.push(format!(
+                "  {:<14}{}",
+                "After text",
+                if config.output.auto_submit {
+                    "press Enter"
+                } else {
+                    "nothing"
+                }
+            ));
+        }
+        if config.output.method == OutputMethod::Paste {
+            rows.push(format!(
+                "  {:<14}{}",
+                "Paste keys",
+                paste_keys_labels()[PasteKeys::ALL
+                    .iter()
+                    .position(|keys| *keys == config.output.paste_keys)
+                    .unwrap_or(0)]
+            ));
+        }
+        rows
     }
 
-    /// The install warning shown under the list when no typing helper works,
-    /// or an empty line - the same slot renders either way, so the layout
-    /// does not shift.
+    pub(super) fn list_widget(&self, config: &Config) -> Paragraph<'static> {
+        selection_list("Transcript output", &self.rows(config), self.selected)
+    }
+
+    /// The install warning for the highlighted method when it cannot work
+    /// here, or an empty line - the same slot renders either way, so the
+    /// layout does not shift.
     pub(super) fn warning_line(&self) -> Line<'static> {
-        typing_warning_line(self.warning)
+        typing_warning_line(self.problems.get(self.selected).copied().flatten())
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -1172,10 +1229,12 @@ mod tests {
             vec![
                 "Keep transcripts in TongueTyped".to_string(),
                 "Type into the focused application".to_string(),
+                "Copy to the clipboard".to_string(),
+                "Paste into the focused application".to_string(),
             ],
             "the type choice must stay listed so the warning can explain it"
         );
-        assert!(screen.warning.is_some());
+        assert!(screen.problems[1].is_some());
     }
 
     #[test]
@@ -1208,11 +1267,95 @@ mod tests {
         let capabilities = test_capabilities();
         let mut config = Config::default();
         let mut screen = OutputScreen::new(&capabilities, &config);
-        assert!(screen.warning.is_none());
+        assert!(screen.problems.iter().all(Option::is_none));
 
         screen.selected = 1;
         screen.apply(&mut config).unwrap();
         assert_eq!(config.output.method, OutputMethod::Type);
+    }
+
+    #[test]
+    fn output_screen_warns_for_the_highlighted_method_only() {
+        let capabilities = Capabilities {
+            clipboard: false,
+            ..test_capabilities()
+        };
+        let mut screen = OutputScreen::new(&capabilities, &Config::default());
+        let config = Config::default();
+        screen.move_selection(1, &config);
+        assert_eq!(screen.warning_line().to_string(), "");
+        screen.move_selection(1, &config);
+        assert!(
+            screen.warning_line().to_string().contains("wl-clipboard")
+                || screen.warning_line().to_string().contains("xclip"),
+            "the clipboard choice must name the clipboard helper to install"
+        );
+    }
+
+    #[test]
+    fn output_screen_refuses_clipboard_and_paste_without_a_clipboard_helper() {
+        let capabilities = Capabilities {
+            clipboard: false,
+            ..test_capabilities()
+        };
+        let mut config = Config::default();
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        for row in [2, 3] {
+            screen.selected = row;
+            assert!(screen.apply(&mut config).is_err());
+            assert_eq!(config.output.method, OutputMethod::None);
+        }
+    }
+
+    #[test]
+    fn output_screen_shows_paste_options_only_for_methods_that_use_them() {
+        let capabilities = test_capabilities();
+        let mut config = Config::default();
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        assert_eq!(screen.rows(&config).len(), 4);
+
+        screen.selected = 2;
+        screen.apply(&mut config).unwrap();
+        assert_eq!(config.output.method, OutputMethod::Clipboard);
+        assert_eq!(
+            screen.rows(&config).len(),
+            4,
+            "copying alone has no Enter or paste-key options"
+        );
+
+        screen.selected = 3;
+        screen.apply(&mut config).unwrap();
+        assert_eq!(config.output.method, OutputMethod::Paste);
+        let rows = screen.rows(&config);
+        assert_eq!(rows.len(), 6);
+        assert!(rows[4].contains("nothing"), "{rows:?}");
+        assert!(rows[5].contains("Ctrl+V"), "{rows:?}");
+
+        // Enter on the option rows toggles paste-and-enter and cycles the
+        // paste keys.
+        screen.selected = 4;
+        screen.apply(&mut config).unwrap();
+        assert!(config.output.auto_submit);
+        screen.selected = 5;
+        screen.apply(&mut config).unwrap();
+        assert_eq!(config.output.paste_keys, PasteKeys::ShiftInsert);
+        let rows = screen.rows(&config);
+        assert!(rows[4].contains("press Enter"), "{rows:?}");
+        assert!(rows[5].contains("Shift+Insert"), "{rows:?}");
+        config.validate().unwrap();
+
+        // `type` keeps Enter-after but has no paste keys row.
+        screen.selected = 1;
+        screen.apply(&mut config).unwrap();
+        assert_eq!(screen.rows(&config).len(), 5);
+        assert!(config.output.auto_submit);
+
+        // Leaving for a method that inserts nothing clears Enter-after, which
+        // would otherwise fail validation on save.
+        screen.selected = 2;
+        screen.apply(&mut config).unwrap();
+        assert!(!config.output.auto_submit);
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1294,6 +1437,7 @@ mod tests {
                 ),
             ],
             typing_backends: vec!["wtype".to_string(), "enigo".to_string()],
+            clipboard: true,
             inference_backends: Vec::new(),
         }
     }

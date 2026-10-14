@@ -41,7 +41,7 @@ pub trait CoordinatorRuntime: Send + Sync {
         clock: Arc<dyn Clock>,
     ) -> RecordingAttempt;
     fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt;
-    fn output(&self, text: &str, config: &Config) -> anyhow::Result<()>;
+    fn output(&self, text: &str, config: &Config) -> anyhow::Result<crate::output::Delivery>;
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -90,12 +90,28 @@ pub struct TranscriptionAttempt {
 /// the captured audio contained no speech (a muted, unplugged, or wrong input
 /// device), so it gets a distinct cue instead of the generic success - without
 /// this the user sees a normal "Ready" flash and never learns why nothing was
-/// typed. Every other outcome typed text and reports success.
+/// typed. The two clipboard outcomes say where the text went instead of
+/// claiming it was typed. Every other outcome reports success.
 fn completion_feedback_event(outcome: &str) -> FeedbackEvent {
-    if outcome == "empty" {
-        FeedbackEvent::NoSpeech
-    } else {
-        FeedbackEvent::Success
+    match outcome {
+        "empty" => FeedbackEvent::NoSpeech,
+        "copied" => FeedbackEvent::Copied,
+        "clipboard_fallback" => FeedbackEvent::ClipboardFallback,
+        "submit_failed" => FeedbackEvent::SubmitFailed,
+        _ => FeedbackEvent::Success,
+    }
+}
+
+/// The completion outcome a delivery reports when nothing else went wrong.
+/// A fallback is still a success: the transcript reached the clipboard. A
+/// failed submit is not: the text was inserted but the Enter was not.
+fn delivery_outcome(delivery: &crate::output::Delivery) -> &'static str {
+    use crate::output::Delivery;
+    match delivery {
+        Delivery::Kept | Delivery::Inserted => "success",
+        Delivery::Copied => "copied",
+        Delivery::CopiedAfterFailure(_) => "clipboard_fallback",
+        Delivery::SubmitFailed(_) => "submit_failed",
     }
 }
 
@@ -503,13 +519,8 @@ impl CoordinatorRuntime for ProductionRuntime {
         TranscriptionAttempt { result, timings }
     }
 
-    fn output(&self, text: &str, config: &Config) -> anyhow::Result<()> {
-        crate::output::output_text(
-            text,
-            &config.output.method,
-            &config.output.typing_backend,
-            config.output.auto_submit,
-        )
+    fn output(&self, text: &str, config: &Config) -> anyhow::Result<crate::output::Delivery> {
+        crate::output::output_text(text, &config.output)
     }
 
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
@@ -1150,22 +1161,36 @@ impl Coordinator {
                 .as_secs();
             *coordinator.last_result.lock().unwrap() = Some((trimmed.clone(), timestamp));
             let output_started = timing.lock().unwrap().phase_started();
-            let output_error = if config.transcription.trailing_space {
+            let delivery = if config.transcription.trailing_space {
                 coordinator
                     .runtime
                     .output(&format!("{} ", trimmed), &config)
             } else {
                 coordinator.runtime.output(&trimmed, &config)
-            }
-            .err()
-            .map(|error| format!("output failed: {error}"));
+            };
             timing
                 .lock()
                 .unwrap()
                 .finish_phase(Phase::Output, output_started);
-            if let Some(error) = &output_error {
-                tracing::error!("{error}");
-            }
+            let (output_error, delivered) = match delivery {
+                Ok(delivery) => {
+                    match &delivery {
+                        crate::output::Delivery::CopiedAfterFailure(error) => tracing::warn!(
+                            "typing failed, transcript copied to the clipboard instead: {error}"
+                        ),
+                        crate::output::Delivery::SubmitFailed(error) => tracing::warn!(
+                            "transcript inserted, but the trailing Enter failed: {error}"
+                        ),
+                        _ => {}
+                    }
+                    (None, delivery_outcome(&delivery))
+                }
+                Err(error) => {
+                    let error = format!("output failed: {error:#}");
+                    tracing::error!("{error}");
+                    (Some(error), "success")
+                }
+            };
             let mut history_failed = false;
             let export_folder = config.history.transcript_folder.trim().to_string();
             if config.history.enabled || !export_folder.is_empty() {
@@ -1211,8 +1236,12 @@ impl Coordinator {
                     .unwrap()
                     .finish_phase(Phase::History, history_started);
             }
+            // Where the transcript went outranks a history failure: the
+            // clipboard cue is how the user learns to paste it themselves.
             if let Some(error) = output_error {
                 coordinator.settle_error(generation, error, &timing, "output_error");
+            } else if delivered != "success" {
+                coordinator.settle(generation, &timing, delivered);
             } else if history_failed {
                 coordinator.settle(generation, &timing, "history_error");
             } else {

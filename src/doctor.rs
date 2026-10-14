@@ -22,7 +22,14 @@ pub struct DoctorReport {
     pub build: String,
     pub daemon_build: DaemonBuild,
     pub helpers_found: Vec<String>,
-    pub output_method_available: bool,
+    /// The clipboard helper this session copies with (`wl-copy` or `xclip`)
+    /// and whether it is installed.
+    pub clipboard_helper: String,
+    pub clipboard_available: bool,
+    pub output_method: crate::config::OutputMethod,
+    /// Why the configured output method cannot work here, naming the remedy,
+    /// or `None` when it can.
+    pub output_method_problem: Option<String>,
     pub shortcut_status: Option<crate::ipc::ShortcutStatus>,
     pub shortcut_portal_error: Option<String>,
 }
@@ -76,8 +83,13 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         (false, None, None)
     };
     let helpers_found = crate::output::list_available_backends();
-    let output_method_available = config.output.method == crate::config::OutputMethod::None
-        || crate::output::type_backend_available(&config.output.typing_backend);
+    let clipboard_available = crate::output::clipboard_available();
+    let output_method_problem = crate::output::method_unavailable_reason(
+        config.output.method,
+        crate::output::type_backend_available(&config.output.typing_backend),
+        clipboard_available,
+    )
+    .map(str::to_string);
     let (shortcut_status, shortcut_portal_error, daemon_build) = match daemon_health().await {
         Some(health) => (
             Some(health.shortcut_status),
@@ -110,7 +122,10 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         build: crate::build_info::VERSION.to_string(),
         daemon_build,
         helpers_found,
-        output_method_available,
+        clipboard_helper: crate::output::clipboard_helper().to_string(),
+        clipboard_available,
+        output_method: config.output.method,
+        output_method_problem,
         shortcut_status,
         shortcut_portal_error,
     })
@@ -175,16 +190,32 @@ fn detect_compositor() -> String {
     }
 }
 
-pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<()> {
-    if config.output.method == crate::config::OutputMethod::None {
-        anyhow::bail!("typing test requires output.method = 'type'");
+/// Sends a test transcript through the configured output method and
+/// returns a sentence saying where it went.
+pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<String> {
+    use crate::config::OutputMethod;
+    use crate::output::Delivery;
+    if config.output.method == OutputMethod::None {
+        anyhow::bail!("the output test needs output.method 'type', 'clipboard', or 'paste'");
     }
-    crate::output::output_text(
-        "TongueTyped typing test",
-        &config.output.method,
-        &config.output.typing_backend,
-        config.output.auto_submit,
-    )
+    let delivery = crate::output::output_text("TongueTyped typing test", &config.output)?;
+    Ok(match delivery {
+        Delivery::Kept => "Kept the test text in TongueTyped.".to_string(),
+        Delivery::Inserted if config.output.method == OutputMethod::Paste => {
+            "Pasted the test text into the focused application.".to_string()
+        }
+        Delivery::Inserted => "Typed the test text into the focused application.".to_string(),
+        Delivery::Copied => "Copied the test text to the clipboard.".to_string(),
+        Delivery::CopiedAfterFailure(error) => {
+            format!("Typing failed ({error}); copied the test text to the clipboard instead.")
+        }
+        Delivery::SubmitFailed(error) if config.output.method == OutputMethod::Paste => {
+            format!("Pasted the test text, but pressing Enter failed ({error}).")
+        }
+        Delivery::SubmitFailed(error) => {
+            format!("Typed the test text, but pressing Enter failed ({error}).")
+        }
+    })
 }
 
 #[cfg(test)]

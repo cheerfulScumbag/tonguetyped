@@ -14,6 +14,17 @@ pub enum FeedbackEvent {
     /// VAD rejected everything. Distinct from `Success` so a silent no-op
     /// still shows the user why nothing was typed.
     NoSpeech,
+    /// `clipboard` mode finished: the transcript is on the clipboard, ready
+    /// for the user to paste.
+    Copied,
+    /// Typing or pasting failed, so the transcript was left on the clipboard
+    /// instead. Distinct from `Copied` so the user learns typing is broken.
+    ClipboardFallback,
+    /// The transcript was inserted, but the trailing Enter (`auto_submit`)
+    /// failed, so it may not have been submitted. Distinct from
+    /// `ClipboardFallback`: the text is already in the focused application, so
+    /// nothing was copied and the user must not paste it again.
+    SubmitFailed,
     Cancelled,
     Error,
 }
@@ -194,6 +205,24 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
             "No speech detected",
             "normal",
         ),
+        FeedbackEvent::Copied => (
+            "edit-paste-symbolic",
+            "message",
+            "Copied to clipboard",
+            "low",
+        ),
+        FeedbackEvent::ClipboardFallback => (
+            "dialog-warning-symbolic",
+            "window-attention",
+            "Typing failed, copied to clipboard",
+            "normal",
+        ),
+        FeedbackEvent::SubmitFailed => (
+            "dialog-warning-symbolic",
+            "alarm-clock",
+            "Text entered, but Enter failed",
+            "normal",
+        ),
         FeedbackEvent::Cancelled => (
             "process-stop-symbolic",
             "dialog-warning",
@@ -229,6 +258,9 @@ mod tests {
             FeedbackEvent::Processing,
             FeedbackEvent::Success,
             FeedbackEvent::NoSpeech,
+            FeedbackEvent::Copied,
+            FeedbackEvent::ClipboardFallback,
+            FeedbackEvent::SubmitFailed,
             FeedbackEvent::Cancelled,
             FeedbackEvent::Error,
         ];

@@ -14,13 +14,17 @@ machine with transcribe.cpp and typed into the focused application or written
 to text files. No account, no cloud, and no audio leaves the computer."""
 depends = "$auto"
 # wtype types through the Wayland virtual-keyboard protocol (wlroots
-# compositors only) and wl-clipboard provides the Wayland clipboard tools.
+# compositors only) and wl-clipboard provides `wl-copy`, which the clipboard
+# and paste output methods and the typing fallback copy with.
 # Recommends rather than Depends because the deb targets releases as old as
 # Debian bullseye, which has no wtype package. dotool - the helper that works
 # on KDE's KWin - is deliberately not listed here: Debian has no dotool
 # package (only the unrelated ydotool), so recommending it could never
 # resolve. The Arch and Nix packages do ship dotool.
 recommends = "wtype, wl-clipboard"
+# xclip is the clipboard helper on X11 sessions, for the clipboard and paste
+# output methods and the typing fallback.
+suggests = "xclip"
 section = "utils"
 priority = "optional"
 

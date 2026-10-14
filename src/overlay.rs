@@ -2,7 +2,7 @@
 //!
 //! Renders directly into persistent, click-through `zwlr_layer_shell_v1`
 //! surfaces - one per target output - so recording/transcribing/success/
-//! no-speech/cancellation/failure state is glanceable on every connected
+//! no-speech/copied/cancellation/failure state is glanceable on every connected
 //! screen at once, without stealing keyboard or pointer focus. By default
 //! (`overlay.monitor = "all"`) the overlay is shown on *every* connected
 //! output; a named monitor narrows it to that one output (see [`target_for`]).
@@ -136,6 +136,13 @@ const SUCCESS_DWELL: Duration = Duration::from_millis(900);
 // A touch longer than `Success`: a "no speech" cue is information the user
 // needs to notice, but it is not an error and must not feel alarming.
 const NO_SPEECH_DWELL: Duration = Duration::from_millis(1400);
+// Longer than `Success`: the user has to notice the text is waiting on the
+// clipboard rather than typed.
+const COPIED_DWELL: Duration = Duration::from_millis(1200);
+// As long as an error: typing is broken and the user has to paste by hand.
+const CLIPBOARD_FALLBACK_DWELL: Duration = Duration::from_millis(1800);
+// Longer than `Success`: the text is in, but Enter was not pressed.
+const SUBMIT_FAILED_DWELL: Duration = Duration::from_millis(1800);
 const CANCELLED_DWELL: Duration = Duration::from_millis(900);
 const ERROR_DWELL: Duration = Duration::from_millis(1800);
 
@@ -144,6 +151,13 @@ const TRANSCRIBING_COLOR: (u8, u8, u8) = (0x19, 0x71, 0xC2);
 const SUCCESS_COLOR: (u8, u8, u8) = (0x2F, 0x9E, 0x44);
 // Amber: caution, not failure - distinct from every other phase hue.
 const NO_SPEECH_COLOR: (u8, u8, u8) = (0xE8, 0x9A, 0x2B);
+// Teal: done, like `Success`, but the text went to the clipboard.
+const COPIED_COLOR: (u8, u8, u8) = (0x0C, 0x96, 0x88);
+// Deep orange: a warning stronger than `NoSpeech`'s amber, short of an error.
+const CLIPBOARD_FALLBACK_COLOR: (u8, u8, u8) = (0xE8, 0x70, 0x1E);
+// Violet: the text landed (like `Success`) but the submit did not, so it is
+// neither a plain success nor an error.
+const SUBMIT_FAILED_COLOR: (u8, u8, u8) = (0x7E, 0x57, 0xC2);
 const CANCELLED_COLOR: (u8, u8, u8) = (0x86, 0x8E, 0x96);
 const ERROR_COLOR: (u8, u8, u8) = (0xC9, 0x2A, 0x2A);
 const GLYPH_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
@@ -351,6 +365,9 @@ enum Phase {
     Transcribing,
     Success,
     NoSpeech,
+    Copied,
+    ClipboardFallback,
+    SubmitFailed,
     Cancelled,
     Error,
 }
@@ -362,6 +379,9 @@ impl Phase {
             FeedbackEvent::Processing => Phase::Transcribing,
             FeedbackEvent::Success => Phase::Success,
             FeedbackEvent::NoSpeech => Phase::NoSpeech,
+            FeedbackEvent::Copied => Phase::Copied,
+            FeedbackEvent::ClipboardFallback => Phase::ClipboardFallback,
+            FeedbackEvent::SubmitFailed => Phase::SubmitFailed,
             FeedbackEvent::Cancelled => Phase::Cancelled,
             FeedbackEvent::Error => Phase::Error,
         }
@@ -372,6 +392,9 @@ impl Phase {
             Phase::Recording | Phase::Transcribing => None,
             Phase::Success => Some(SUCCESS_DWELL),
             Phase::NoSpeech => Some(NO_SPEECH_DWELL),
+            Phase::Copied => Some(COPIED_DWELL),
+            Phase::ClipboardFallback => Some(CLIPBOARD_FALLBACK_DWELL),
+            Phase::SubmitFailed => Some(SUBMIT_FAILED_DWELL),
             Phase::Cancelled => Some(CANCELLED_DWELL),
             Phase::Error => Some(ERROR_DWELL),
         }
@@ -1487,12 +1510,60 @@ fn glyph_muted_mic(
     );
 }
 
+/// A clipboard - the glyph for a transcript left on the clipboard, by choice
+/// (`Copied`) or because typing failed (`ClipboardFallback`; the phase color
+/// tells the two apart). `s` is the glyph's half-height, matching
+/// `glyph_muted_mic`.
+fn glyph_clipboard(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    thickness: f32,
+    rgb: (u8, u8, u8),
+) {
+    // The board: an outlined rectangle whose round line caps soften the
+    // corners.
+    let (left, right) = (cx - s * 0.7, cx + s * 0.7);
+    let (top, bottom) = (cy - s * 0.6, cy + s * 0.95);
+    stroke_line(canvas, left, top, left, bottom, thickness, rgb);
+    stroke_line(canvas, right, top, right, bottom, thickness, rgb);
+    stroke_line(canvas, left, bottom, right, bottom, thickness, rgb);
+    stroke_line(canvas, left, top, right, top, thickness, rgb);
+    // The clip: a solid tab standing up out of the board's top edge, the
+    // part that makes the shape read as a clipboard rather than a page.
+    fill_capsule(canvas, cx, top - s * 0.12, s * 0.36, s * 0.26, rgb, 1.0);
+    // Two lines of "text" on the board.
+    let line = thickness * 0.8;
+    stroke_line(
+        canvas,
+        cx - s * 0.32,
+        cy + s * 0.05,
+        cx + s * 0.32,
+        cy + s * 0.05,
+        line,
+        rgb,
+    );
+    stroke_line(
+        canvas,
+        cx - s * 0.32,
+        cy + s * 0.5,
+        cx + s * 0.32,
+        cy + s * 0.5,
+        line,
+        rgb,
+    );
+}
+
 fn phase_color(phase: Phase) -> (u8, u8, u8) {
     match phase {
         Phase::Recording => RECORDING_COLOR,
         Phase::Transcribing => TRANSCRIBING_COLOR,
         Phase::Success => SUCCESS_COLOR,
         Phase::NoSpeech => NO_SPEECH_COLOR,
+        Phase::Copied => COPIED_COLOR,
+        Phase::ClipboardFallback => CLIPBOARD_FALLBACK_COLOR,
+        Phase::SubmitFailed => SUBMIT_FAILED_COLOR,
         Phase::Cancelled => CANCELLED_COLOR,
         Phase::Error => ERROR_COLOR,
     }
@@ -1588,7 +1659,7 @@ fn paint_badge(
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             glyph_checkmark(
                 canvas,
@@ -1602,6 +1673,17 @@ fn paint_badge(
         Phase::NoSpeech => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             glyph_muted_mic(
+                canvas,
+                cx,
+                cy,
+                disc_radius * 0.42,
+                disc_radius * 0.15,
+                GLYPH_COLOR,
+            );
+        }
+        Phase::Copied | Phase::ClipboardFallback => {
+            fill_circle(canvas, cx, cy, disc_radius, color);
+            glyph_clipboard(
                 canvas,
                 cx,
                 cy,
@@ -1688,7 +1770,7 @@ fn paint_minimal(
                 color,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(
                 canvas,
                 cx,
@@ -1700,6 +1782,16 @@ fn paint_minimal(
         }
         Phase::NoSpeech => {
             glyph_muted_mic(
+                canvas,
+                cx,
+                cy,
+                ring_radius * 0.36,
+                ring_radius * 0.13,
+                color,
+            );
+        }
+        Phase::Copied | Phase::ClipboardFallback => {
+            glyph_clipboard(
                 canvas,
                 cx,
                 cy,
@@ -1775,7 +1867,7 @@ fn paint_pill(
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(
                 canvas,
                 cx,
@@ -1787,6 +1879,16 @@ fn paint_pill(
         }
         Phase::NoSpeech => {
             glyph_muted_mic(
+                canvas,
+                cx,
+                cy,
+                half_height * 0.46,
+                half_height * 0.17,
+                GLYPH_COLOR,
+            );
+        }
+        Phase::Copied | Phase::ClipboardFallback => {
+            glyph_clipboard(
                 canvas,
                 cx,
                 cy,
@@ -1859,7 +1961,7 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(
                 canvas,
                 button_cx,
@@ -1871,6 +1973,16 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
         }
         Phase::NoSpeech => {
             glyph_muted_mic(
+                canvas,
+                button_cx,
+                cy,
+                button_radius * 0.52,
+                button_radius * 0.18,
+                GLYPH_COLOR,
+            );
+        }
+        Phase::Copied | Phase::ClipboardFallback => {
+            glyph_clipboard(
                 canvas,
                 button_cx,
                 cy,
@@ -2066,11 +2178,14 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(canvas, cx, cy, radius * 0.42, radius * 0.16, GLYPH_COLOR);
         }
         Phase::NoSpeech => {
             glyph_muted_mic(canvas, cx, cy, radius * 0.36, radius * 0.13, GLYPH_COLOR);
+        }
+        Phase::Copied | Phase::ClipboardFallback => {
+            glyph_clipboard(canvas, cx, cy, radius * 0.36, radius * 0.13, GLYPH_COLOR);
         }
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, radius * 0.3, GLYPH_COLOR);
@@ -2259,7 +2374,8 @@ fn paint_half_circle(
 /// unpremultiplies, since PNG alpha is straight). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`;
-/// `recording`/`transcribing`/`success`/`no-speech`/`cancelled`/`error`), and
+/// `recording`/`transcribing`/`success`/`no-speech`/`copied`/
+/// `clipboard-fallback`/`submit-failed`/`cancelled`/`error`), and
 /// `None` clears to fully transparent. `levels` is the live microphone history
 /// the recording animations follow, oldest first - an empty slice means
 /// silence, and a representative pattern is how the offline mockups show the
@@ -2280,6 +2396,9 @@ pub fn render_frame_pixels(
         "transcribing" => Phase::Transcribing,
         "success" => Phase::Success,
         "no-speech" => Phase::NoSpeech,
+        "copied" => Phase::Copied,
+        "clipboard-fallback" => Phase::ClipboardFallback,
+        "submit-failed" => Phase::SubmitFailed,
         "cancelled" => Phase::Cancelled,
         "error" => Phase::Error,
         _ => Phase::Recording,
@@ -2642,10 +2761,41 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_events_map_to_dwelling_static_phases() {
+        assert_eq!(Phase::from_event(FeedbackEvent::Copied), Phase::Copied);
+        assert_eq!(
+            Phase::from_event(FeedbackEvent::ClipboardFallback),
+            Phase::ClipboardFallback
+        );
+        assert_eq!(Phase::Copied.dwell(), Some(COPIED_DWELL));
+        assert_eq!(
+            Phase::ClipboardFallback.dwell(),
+            Some(CLIPBOARD_FALLBACK_DWELL)
+        );
+        assert!(!Phase::Copied.is_animated());
+        assert!(!Phase::ClipboardFallback.is_animated());
+    }
+
+    #[test]
     fn no_speech_event_maps_to_a_dwelling_static_phase() {
         assert_eq!(Phase::from_event(FeedbackEvent::NoSpeech), Phase::NoSpeech);
         assert_eq!(Phase::NoSpeech.dwell(), Some(NO_SPEECH_DWELL));
         assert!(!Phase::NoSpeech.is_animated());
+    }
+
+    #[test]
+    fn submit_failure_maps_to_its_own_dwelling_static_phase() {
+        assert_eq!(
+            Phase::from_event(FeedbackEvent::SubmitFailed),
+            Phase::SubmitFailed
+        );
+        assert_eq!(Phase::SubmitFailed.dwell(), Some(SUBMIT_FAILED_DWELL));
+        assert!(!Phase::SubmitFailed.is_animated());
+        assert_ne!(
+            phase_color(Phase::SubmitFailed),
+            phase_color(Phase::Success),
+            "a failed submit must not paint as a plain success"
+        );
     }
 
     #[test]
@@ -2657,6 +2807,9 @@ mod tests {
                 Phase::Transcribing,
                 Phase::Success,
                 Phase::NoSpeech,
+                Phase::Copied,
+                Phase::ClipboardFallback,
+                Phase::SubmitFailed,
                 Phase::Cancelled,
                 Phase::Error,
             ] {
@@ -2783,6 +2936,9 @@ mod tests {
             Phase::Transcribing,
             Phase::Success,
             Phase::NoSpeech,
+            Phase::Copied,
+            Phase::ClipboardFallback,
+            Phase::SubmitFailed,
             Phase::Cancelled,
             Phase::Error,
         ] {

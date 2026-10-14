@@ -44,13 +44,15 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
         inference_device = %backend.device,
         "inference configuration"
     );
-    if config.output.method == crate::config::OutputMethod::Type
-        && !crate::output::has_any_type_backend()
-    {
-        // The configuration promises typing but no helper can type; say so
-        // (with what to install) once at startup instead of only failing
-        // each dictation's output phase.
-        tracing::warn!("{}", crate::output::typing_helper_warning());
+    // The configured method cannot work here; say so (with what to install)
+    // once at startup instead of only failing or falling back on each
+    // dictation.
+    if let Some(warning) = crate::output::method_unavailable_reason(
+        config.output.method,
+        crate::output::type_backend_available(&config.output.typing_backend),
+        crate::output::clipboard_available(),
+    ) {
+        tracing::warn!("{warning}");
     }
 
     let coordinator = Arc::new(Coordinator::new(config)?);

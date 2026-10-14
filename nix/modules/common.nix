@@ -121,14 +121,20 @@ in
             method = setting (types.enum [
               "none"
               "type"
-            ]) "`type` types transcripts into the focused application; `none` only stores them.";
+              "clipboard"
+              "paste"
+            ]) "Where the transcript goes: `type` types it into the focused application, `clipboard` copies it, `paste` copies then pastes it, and `none` only stores it. `type` and `paste` fall back to the clipboard when typing fails.";
             typing_backend = setting (types.enum [
               "auto"
               "wtype"
               "enigo"
               "dotool"
             ]) "Which helper types the transcript.";
-            auto_submit = setting types.bool "Press Enter after typing. Requires `method = \"type\"`.";
+            auto_submit = setting types.bool "Press Enter after the transcript is typed or pasted. Requires `method = \"type\"` or `\"paste\"`.";
+            paste_keys = setting (types.enum [
+              "ctrl-v"
+              "shift-insert"
+            ]) "Key combination `paste` presses after copying. `ctrl-v` for most applications, `shift-insert` for terminals.";
           };
           transcription = section "The `[transcription]` table." {
             vad_enabled = setting types.bool "Trim silence with voice activity detection.";
@@ -195,8 +201,11 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = !(cfg.settings.output.method == "none" && cfg.settings.output.auto_submit == true);
-        message = ''programs.tonguetyped.settings.output.auto_submit requires output.method = "type".'';
+        assertion = !(
+          cfg.settings.output.auto_submit == true
+          && (cfg.settings.output.method == "none" || cfg.settings.output.method == "clipboard")
+        );
+        message = ''programs.tonguetyped.settings.output.auto_submit requires output.method = "type" or "paste".'';
       }
     ];
   };

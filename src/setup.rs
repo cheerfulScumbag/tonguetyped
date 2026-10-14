@@ -1,4 +1,4 @@
-use crate::config::{ActivationMode, Config, OutputMethod};
+use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 
@@ -175,8 +175,55 @@ pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static 
 pub(crate) struct Capabilities {
     pub(crate) microphones: Vec<(String, String)>,
     pub(crate) typing_backends: Vec<String>,
+    /// Whether the session's clipboard helper (`wl-copy` or `xclip`) is
+    /// installed.
+    pub(crate) clipboard: bool,
     pub(crate) inference_backends: Vec<crate::inference::BackendChoice>,
 }
+
+/// The output methods, in the order every configuration UI lists them;
+/// `Capabilities::output_labels` names them in the same order.
+pub(crate) const OUTPUT_METHODS: [OutputMethod; 4] = [
+    OutputMethod::None,
+    OutputMethod::Type,
+    OutputMethod::Clipboard,
+    OutputMethod::Paste,
+];
+
+/// The output method with the options that shape it, for the configuration
+/// summaries: `paste (Shift+Insert, then Enter)`, `type`, `clipboard`.
+pub(crate) fn output_summary(config: &Config) -> String {
+    let mut details = Vec::new();
+    if config.output.method == OutputMethod::Paste {
+        details.push(config.output.paste_keys.to_string());
+    }
+    if config.output.auto_submit && config.output.method.inserts_text() {
+        details.push("then Enter".to_string());
+    }
+    if details.is_empty() {
+        config.output.method.to_string()
+    } else {
+        format!("{} ({})", config.output.method, details.join(", "))
+    }
+}
+
+/// The `output.paste_keys` choices, in `PasteKeys::ALL` order, each saying
+/// where those keys paste.
+pub(crate) fn paste_keys_labels() -> Vec<String> {
+    PasteKeys::ALL
+        .iter()
+        .map(|keys| match keys {
+            PasteKeys::CtrlV => format!("{keys} (most applications)"),
+            PasteKeys::ShiftInsert => format!("{keys} (terminals)"),
+        })
+        .collect()
+}
+
+/// The two `output.auto_submit` choices, in index order (`false`, `true`).
+pub(crate) const AUTO_SUBMIT_LABELS: [&str; 2] = [
+    "Leave the text for me to send",
+    "Press Enter after the text",
+];
 
 impl Capabilities {
     pub(crate) fn discover() -> anyhow::Result<Self> {
@@ -197,6 +244,7 @@ impl Capabilities {
         Ok(Self {
             microphones,
             typing_backends: crate::output::list_available_backends(),
+            clipboard: crate::output::clipboard_available(),
             inference_backends: crate::inference::backend_choices(),
         })
     }
@@ -213,6 +261,7 @@ impl Capabilities {
                     "System default microphone".to_string(),
                 )],
                 typing_backends: crate::output::list_available_backends(),
+                clipboard: crate::output::clipboard_available(),
                 inference_backends: crate::inference::backend_choices(),
             }
         })
@@ -250,22 +299,42 @@ impl Capabilities {
         !self.typing_backends.is_empty()
     }
 
-    /// The install warning both configuration UIs show when
+    /// The install warning the typing-backend screens show when
     /// `has_type_backend` is false, or `None` otherwise.
     pub(crate) fn typing_helper_warning(&self) -> Option<&'static str> {
         (!self.has_type_backend()).then(crate::output::typing_helper_warning)
     }
 
-    /// The transcript-output choices, in the order both configuration UIs
-    /// offer them: keep-in-app first, then type-into-the-focused-application.
-    /// The type choice is always listed - the screens explain its
-    /// unavailability via `typing_helper_warning` when no helper works,
-    /// rather than silently dropping it - but it can only be applied when
-    /// `has_type_backend` is true.
+    /// Why `method` cannot work on this machine, as the warning naming the
+    /// remedy, or `None` when it can. The configuration UIs show it for the
+    /// highlighted method and refuse to save a method that has one.
+    pub(crate) fn output_method_problem(&self, method: OutputMethod) -> Option<&'static str> {
+        crate::output::method_unavailable_reason(method, self.has_type_backend(), self.clipboard)
+    }
+
+    /// Where the configuration UIs open their output-method list: on the
+    /// configured method when it works here, otherwise on keep-in-app, so
+    /// confirming without moving never saves a method that cannot work.
+    pub(crate) fn output_index(&self, method: OutputMethod) -> usize {
+        if self.output_method_problem(method).is_some() {
+            return 0;
+        }
+        OUTPUT_METHODS
+            .iter()
+            .position(|candidate| *candidate == method)
+            .unwrap_or(0)
+    }
+
+    /// The transcript-output choices, in `OUTPUT_METHODS` order. Every choice
+    /// is always listed - the screens explain an unavailable one via
+    /// `output_method_problem` rather than silently dropping it - but only a
+    /// choice without a problem can be applied.
     pub(crate) fn output_labels(&self) -> Vec<String> {
         vec![
             "Keep transcripts in TongueTyped".to_string(),
             "Type into the focused application".to_string(),
+            "Copy to the clipboard".to_string(),
+            "Paste into the focused application".to_string(),
         ]
     }
 
@@ -447,34 +516,31 @@ fn configure(
 
     ui.section(output, 5, "Transcript output")?;
     let output_labels = capabilities.output_labels();
-    if let Some(warning) = capabilities.typing_helper_warning() {
+    let mut warnings: Vec<&str> = OUTPUT_METHODS
+        .iter()
+        .filter_map(|method| capabilities.output_method_problem(*method))
+        .collect();
+    warnings.dedup();
+    for warning in warnings {
         writeln!(output, "{warning}")?;
     }
-    let output_default =
-        usize::from(config.output.method == OutputMethod::Type && capabilities.has_type_backend());
-    // Choosing "type" with no working helper is refused with the same warning
-    // rather than silently saved into a configuration that can never type.
-    let output_method = loop {
+    let output_default = capabilities.output_index(config.output.method);
+    // A method that cannot work here is refused with the warning naming its
+    // remedy rather than silently saved into a configuration that can never
+    // deliver a transcript.
+    let method = loop {
         let Some(choice) = choose(input, output, errors, &output_labels, output_default)? else {
             return Ok(SetupOutcome::Cancelled);
         };
-        if choice == 1 && !capabilities.has_type_backend() {
-            writeln!(
-                errors,
-                "{}",
-                capabilities
-                    .typing_helper_warning()
-                    .expect("warning exists when no helper does")
-            )?;
+        let method = OUTPUT_METHODS[choice];
+        if let Some(problem) = capabilities.output_method_problem(method) {
+            writeln!(errors, "{problem}")?;
             continue;
         }
-        break choice;
+        break method;
     };
-    if output_method == 0 {
-        config.output.method = OutputMethod::None;
-        config.output.typing_backend = "auto".to_string();
-    } else {
-        config.output.method = OutputMethod::Type;
+    config.output.method = method;
+    if method.inserts_text() {
         let mut backend_values = vec!["auto".to_string()];
         backend_values.extend(capabilities.typing_backends);
         let mut backend_labels = vec!["Automatic (recommended)".to_string()];
@@ -493,6 +559,36 @@ fn configure(
             return Ok(SetupOutcome::Cancelled);
         };
         config.output.typing_backend = backend_values[backend].clone();
+    } else {
+        config.output.typing_backend = "auto".to_string();
+        config.output.auto_submit = false;
+    }
+    if method == OutputMethod::Paste {
+        writeln!(output, "\nPaste keys")?;
+        let labels = paste_keys_labels();
+        let default = PasteKeys::ALL
+            .iter()
+            .position(|keys| *keys == config.output.paste_keys)
+            .unwrap_or(0);
+        let Some(keys) = choose(input, output, errors, &labels, default)? else {
+            return Ok(SetupOutcome::Cancelled);
+        };
+        config.output.paste_keys = PasteKeys::ALL[keys];
+    }
+    if method.inserts_text() {
+        writeln!(output, "\nAfter the text")?;
+        let labels = AUTO_SUBMIT_LABELS.map(str::to_string);
+        let Some(submit) = choose(
+            input,
+            output,
+            errors,
+            &labels,
+            usize::from(config.output.auto_submit),
+        )?
+        else {
+            return Ok(SetupOutcome::Cancelled);
+        };
+        config.output.auto_submit = submit == 1;
     }
 
     ui.section(output, 6, "Startup")?;
@@ -526,7 +622,7 @@ fn configure(
             crate::activation::keybind_label(&config.activation.keybind)
         }
     )?;
-    writeln!(output, "  Output:      {}", config.output.method)?;
+    writeln!(output, "  Output:      {}", output_summary(&config))?;
     writeln!(
         output,
         "  Autostart:   {}",
@@ -721,6 +817,7 @@ mod tests {
                 ),
             ],
             typing_backends: Vec::new(),
+            clipboard: false,
             inference_backends: Vec::new(),
         };
 
