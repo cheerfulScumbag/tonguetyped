@@ -1078,7 +1078,7 @@ impl TextProcessingScreen {
     pub(super) const ROW_TIMEOUT: usize = 4;
     pub(super) const ROWS: usize = 5;
     const REPLACEMENTS_PLACEHOLDER: &'static str =
-        "vox type => Voxtype; tee vee => TV (';' and '\\' escaped with '\\')";
+        "vox type => Voxtype; tee vee => TV (';', '>', and '\\' escaped with '\\')";
 
     pub(super) fn new(config: &Config) -> Self {
         Self {
