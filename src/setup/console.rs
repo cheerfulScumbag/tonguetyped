@@ -1016,7 +1016,8 @@ impl ConsoleState {
                 &self.text_processing_fields,
                 self.text_processing_field,
                 &[
-                    "vox type => Voxtype; tee vee => TV".to_string(),
+                    "vox type => Voxtype; tee vee => TV (';' and '\\' escaped with '\\')"
+                        .to_string(),
                     "empty disables it".to_string(),
                     String::new(),
                 ],

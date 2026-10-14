@@ -1673,7 +1673,7 @@ impl App {
         frame.render_widget(screen.list_widget(), chunks[0]);
         frame.render_widget(
             Paragraph::new(
-                "Replacements: 'from => to' separated by ';'. Filler removal is English-only.",
+                "Replacements: 'from => to' separated by ';'; escape ';' and '\\' with '\\'. Filler removal is English-only.",
             ),
             chunks[1],
         );

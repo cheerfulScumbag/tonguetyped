@@ -394,17 +394,22 @@ fn apply_filler_removal(text: &str) -> String {
 /// Runs `command` through `sh -c` with `text` on stdin, returning its stdout
 /// (with one trailing newline dropped) on a clean exit. Any spawn error,
 /// non-zero exit, read error, or `timeout` expiry returns `None`, so the
-/// caller keeps the text it already had. On timeout the child is killed, which
-/// closes its stdout and releases the reader thread.
+/// caller keeps the text it already had. On timeout the child's whole process
+/// group is killed, which closes its stdout and releases the reader thread.
 fn run_external_command(command: &str, text: &str, timeout: Duration) -> Option<String> {
-    let mut child = Command::new("sh")
+    let mut builder = Command::new("sh");
+    builder
         .arg("-c")
         .arg(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        builder.process_group(0);
+    }
+    let mut child = builder.spawn().ok()?;
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
     let input = text.to_string();
@@ -440,19 +445,37 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus>
             Ok(Some(status)) => return Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    kill_child_group(child);
                     let _ = child.wait();
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(_) => {
-                let _ = child.kill();
+                kill_child_group(child);
                 let _ = child.wait();
                 return None;
             }
         }
     }
+}
+
+/// Kills the child and its whole process group. The child is spawned in its
+/// own group (`process_group(0)`), so a descendant that inherited stdout (a
+/// pipeline stage, or a command that forked) dies too and cannot keep the
+/// stdout pipe open after the direct `sh` child is killed.
+fn kill_child_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // SAFETY: `pid` is this child's own process-group id because it was
+        // spawned with `process_group(0)`, and it has not been reaped yet, so a
+        // negative pid addresses exactly that group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 #[cfg(test)]
@@ -585,6 +608,19 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "the timeout must actually bound the wait"
+        );
+    }
+
+    #[test]
+    fn a_timing_out_command_kills_descendants_that_hold_the_output_pipe() {
+        let mut config = config();
+        config.post_process_command = "sleep 30 | cat".to_string();
+        config.post_process_timeout_seconds = 1;
+        let started = Instant::now();
+        assert_eq!(post_process("keep me", &config, "en"), "keep me");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a surviving pipeline stage must not keep the reader blocked"
         );
     }
 

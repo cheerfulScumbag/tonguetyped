@@ -595,8 +595,9 @@ fn configure(
     let mut text = config.text.clone();
     loop {
         let prompt = format!(
-            "Replacements ('from {} to', separated by '{}')",
+            "Replacements ('from {} to', separated by '{}'; escape '{}' and '\\' with '\\')",
             crate::config::REPLACEMENT_ARROW,
+            crate::config::REPLACEMENT_ENTRY_SEPARATOR,
             crate::config::REPLACEMENT_ENTRY_SEPARATOR
         );
         let Some(raw) = ask_text(

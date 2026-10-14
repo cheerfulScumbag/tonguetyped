@@ -1181,6 +1181,10 @@ impl Coordinator {
                 }
             };
             let trimmed = transcript.trim();
+            if trimmed.is_empty() {
+                coordinator.settle(generation, &timing, "empty");
+                return;
+            }
             let processed =
                 crate::text::post_process(trimmed, &config.text, &config.transcription.language);
             if processed.trim().is_empty() {
