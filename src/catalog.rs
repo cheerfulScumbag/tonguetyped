@@ -1041,15 +1041,6 @@ pub const ENTRIES: &[CatalogModel] = &[
     },
 ];
 
-/// The default active model for every backend (CPU and every accelerator
-/// alike): the one GGUF file `InferenceEngine::load` tries first on an
-/// accelerator and falls back to on CPU. Matches the GPU path's historical
-/// hardcoded default (same repo, revision, filename, and SHA-256 already
-/// verified in the slice 2 GPU benchmark report), so existing GPU-build
-/// installs are unaffected, and is also the nearest GGUF equivalent (same
-/// `small` family, a comparable quantization) to the legacy CPU-only build's
-/// `whisper-small-q5_1` default that `config::migrate_legacy_model_config`
-/// maps pre-consolidation configs onto.
 /// A single pinned, integrity-checked download outside the speech-model catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinnedFile {
@@ -1068,6 +1059,15 @@ pub const VAD_MODEL: PinnedFile = PinnedFile {
     sha256: "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28",
 };
 
+/// The default active model for every backend (CPU and every accelerator
+/// alike): the one GGUF file `InferenceEngine::load` tries first on an
+/// accelerator and falls back to on CPU. Matches the GPU path's historical
+/// hardcoded default (same repo, revision, filename, and SHA-256 already
+/// verified in the slice 2 GPU benchmark report), so existing GPU-build
+/// installs are unaffected, and is also the nearest GGUF equivalent (same
+/// `small` family, a comparable quantization) to the legacy CPU-only build's
+/// `whisper-small-q5_1` default that `config::migrate_legacy_model_config`
+/// maps pre-consolidation configs onto.
 pub const DEFAULT_MODEL_ID: &str = "whisper-small-q5_k_m";
 
 pub fn find(id: &str) -> Option<&'static CatalogModel> {
