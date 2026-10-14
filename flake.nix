@@ -232,6 +232,79 @@
           gpu-rocm = rocmPackage;
           gpu-cuda = cudaPackage;
         };
+
+        # Evaluates the NixOS module and runs the daemon launcher it generates
+        # (with a stub daemon, so no TongueTyped build is needed) against an
+        # existing config.toml, checking declared keys win and others survive.
+        checks.nixos-module =
+          let
+            nixos = nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.default
+                {
+                  boot.isContainer = true;
+                  system.stateVersion = "25.11";
+                  programs.tonguetyped = {
+                    enable = true;
+                    package = pkgs.writeShellScriptBin "tonguetyped" "";
+                    settings = {
+                      activation.mode = "toggle";
+                      model.idle_unload.timeout_minutes = 5;
+                      audio.feedback_volume = 0.5;
+                      overlay.style = "pill";
+                    };
+                  };
+                }
+              ];
+            };
+            service = nixos.config.systemd.user.services.tonguetyped;
+          in
+          pkgs.runCommand "tonguetyped-nixos-module-check"
+            {
+              nativeBuildInputs = [
+                pkgs.jq
+                pkgs.remarshal
+              ];
+            }
+            ''
+              export HOME=$TMPDIR/home XDG_CONFIG_HOME=$TMPDIR/home/.config
+              mkdir -p $XDG_CONFIG_HOME/tonguetyped
+              cat >$XDG_CONFIG_HOME/tonguetyped/config.toml <<'TOML'
+              [activation]
+              mode = "hold"
+              keybind = "Super+O"
+
+              [overlay]
+              style = "badge"
+              position = "top-left"
+              TOML
+
+              ${service.serviceConfig.ExecStart}
+
+              remarshal --from toml --to json $XDG_CONFIG_HOME/tonguetyped/config.toml >config.json
+              jq -e '
+                .activation == {mode: "toggle", keybind: "Super+O"}
+                and .model == {idle_unload: {timeout_minutes: 5}}
+                and .audio == {feedback_volume: 0.5}
+                and .overlay == {style: "pill", position: "top-left"}
+              ' config.json
+              test "$(stat -c %a $XDG_CONFIG_HOME/tonguetyped/config.toml)" = 600
+              test ${pkgs.lib.escapeShellArg (builtins.toJSON service.wantedBy)} = '["graphical-session.target"]'
+              touch $out
+            '';
       }
-    );
+    )
+    // {
+      nixosModules = rec {
+        default = tonguetyped;
+        tonguetyped = import ./nix/modules/nixos.nix { inherit self; };
+      };
+      homeManagerModules = rec {
+        default = tonguetyped;
+        tonguetyped = import ./nix/modules/home-manager.nix { inherit self; };
+      };
+      # The newer name for the same output.
+      homeModules = self.homeManagerModules;
+    };
 }

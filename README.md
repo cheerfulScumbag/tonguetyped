@@ -110,6 +110,65 @@ package ships the `tonguetyped` binary and the
 `io.github.cheerfulScumbag.tonguetyped.desktop` entry, and wraps the binary with
 the `wtype`, `dotool`, `wl-clipboard`, and `canberra-gtk-play` helpers it needs.
 
+### NixOS and home-manager modules
+
+The flake also exports `nixosModules.default` and `homeManagerModules.default`
+(also `homeModules.default`). Both provide the same `programs.tonguetyped`
+options. Add the flake as an input:
+
+```nix
+inputs.tonguetyped.url = "github:cheerfulScumbag/tonguetyped";
+```
+
+then import one module. With home-manager:
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.tonguetyped.homeManagerModules.default ];
+
+  programs.tonguetyped = {
+    enable = true;
+    backend = "cuda";         # "vulkan" (default), "cuda", or "rocm"
+    autostart = "systemd";    # "systemd" (default), "xdg", or "none"
+    settings = {
+      activation.mode = "toggle";
+      model.active_model = "whisper-small-q5_k_m";
+      output.method = "type";
+      overlay.style = "pill";
+    };
+  };
+}
+```
+
+On NixOS, import `inputs.tonguetyped.nixosModules.default` and set the same
+options. The NixOS module installs the package for every user and starts the
+daemon in each user's graphical session.
+
+- `backend` picks the package build. Every build carries the CPU fallback;
+  `cuda` and `rocm` are x86_64 only. Set `package` to use a build of your own.
+- `autostart = "systemd"` runs a `tonguetyped.service` user unit tied to
+  `graphical-session.target`, which KDE, GNOME, and compositors started through
+  systemd or uwsm reach. `"xdg"` installs an XDG autostart entry instead;
+  `"none"` leaves starting the daemon to you (for example `exec-once` in
+  Hyprland). Do not also run `tonguetyped autostart enable`, which adds a
+  second autostart entry.
+- `settings` takes any key from [Configuration](#configuration). Common keys
+  are typed, so a misspelled value fails at evaluation time.
+
+`config.toml` stays a normal writable file, because the dashboard, `tonguetyped
+setup`, and the daemon itself all write it. The modules merge the keys you set
+over it: those keys are reset to your value, and every other key keeps what the
+app last wrote. Removing a key from `settings` leaves its last value in the
+file. home-manager applies settings on every activation and runs `tonguetyped
+reload` if the daemon is up; the NixOS module applies them each time the
+daemon starts, so on NixOS `settings` needs `autostart` set to `"systemd"` or
+`"xdg"`.
+
+Typing on KWin goes through `dotool`, which needs `/dev/uinput` access. On
+NixOS, set `hardware.uinput.enable = true` and add your user to the `uinput`
+group.
+
 ### Arch Linux (AUR)
 
 ```sh
