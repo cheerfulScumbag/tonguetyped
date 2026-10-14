@@ -9,10 +9,10 @@
 //! doc comment).
 //!
 //! The home screen is two stacked panels with one selection cursor: a
-//! fixed Settings panel listing the thirteen configuration areas (Model,
+//! fixed Settings panel listing the fourteen configuration areas (Model,
 //! Inference backend, Translation, Decoding, Microphone, Activation,
 //! Shortcut, Transcript output, Typing backend, Transcript folder, History
-//! retention, Startup, Overlay)
+//! retention, Startup, Overlay, Media pause)
 //! with their current values, and a Commands panel derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
@@ -154,8 +154,8 @@ struct HomeItem {
     about: String,
 }
 
-/// The thirteen configuration areas the home screen's Settings panel lists,
-/// in display order.
+/// The fourteen configuration areas the home screen's Settings panel lists, in
+/// display order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingId {
     Model,
@@ -171,10 +171,11 @@ enum SettingId {
     HistoryRetention,
     Startup,
     Overlay,
+    MediaPause,
 }
 
 impl SettingId {
-    const ALL: [SettingId; 13] = [
+    const ALL: [SettingId; 14] = [
         SettingId::Model,
         SettingId::InferenceBackend,
         SettingId::Translation,
@@ -188,6 +189,7 @@ impl SettingId {
         SettingId::HistoryRetention,
         SettingId::Startup,
         SettingId::Overlay,
+        SettingId::MediaPause,
     ];
 
     fn label(self) -> &'static str {
@@ -205,12 +207,13 @@ impl SettingId {
             SettingId::HistoryRetention => "History retention",
             SettingId::Startup => "Startup",
             SettingId::Overlay => "Overlay",
+            SettingId::MediaPause => "Media pause",
         }
     }
 }
 
-/// Thirteen settings rows plus the panel's two border rows.
-const SETTINGS_PANEL_HEIGHT: u16 = 15;
+/// Fourteen settings rows plus the panel's two border rows.
+const SETTINGS_PANEL_HEIGHT: u16 = 16;
 
 /// The dashboard's Commands panel, derived from the exact same clap metadata
 /// `--help` renders - see this module's doc comment. The implicit `help`
@@ -257,6 +260,7 @@ enum Screen {
     TranscriptOutput(screens::OutputScreen),
     TypingBackend(screens::TypingBackendScreen),
     Overlay(screens::OverlayScreen),
+    MediaPause(screens::MediaPauseScreen),
     TextFields(screens::TextFieldsScreen),
 }
 
@@ -523,6 +527,7 @@ impl App {
             Screen::TranscriptOutput(_) => self.handle_output_key(key),
             Screen::TypingBackend(_) => self.handle_typing_backend_key(key),
             Screen::Overlay(_) => self.handle_overlay_key(key),
+            Screen::MediaPause(_) => self.handle_media_pause_key(key),
             Screen::TextFields(_) => self.handle_text_fields_key(key),
         }
         Ok(())
@@ -611,6 +616,9 @@ impl App {
             }
             SettingId::Startup => Screen::Autostart(screens::AutostartScreen::new(&self.config)),
             SettingId::Overlay => Screen::Overlay(screens::OverlayScreen::new(&self.config)),
+            SettingId::MediaPause => {
+                Screen::MediaPause(screens::MediaPauseScreen::new(&self.config))
+            }
         };
     }
 
@@ -626,6 +634,7 @@ impl App {
             Screen::TranscriptOutput(screen) => screen.result = Some(result),
             Screen::TypingBackend(screen) => screen.result = Some(result),
             Screen::Overlay(screen) => screen.result = Some(result),
+            Screen::MediaPause(screen) => screen.result = Some(result),
             Screen::TextFields(screen) => screen.result = Some(result),
             _ => {}
         }
@@ -772,6 +781,30 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Screen::Overlay(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_media_pause_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::MediaPause(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::MediaPause(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::MediaPause(screen) = &mut self.screen {
                     screen.apply(&mut self.config);
                 }
                 self.save_settings_config();
@@ -1177,6 +1210,7 @@ impl App {
             Screen::TranscriptOutput(screen) => self.render_output(frame, area, screen),
             Screen::TypingBackend(screen) => self.render_typing_backend(frame, area, screen),
             Screen::Overlay(screen) => self.render_overlay(frame, area, screen),
+            Screen::MediaPause(screen) => self.render_media_pause(frame, area, screen),
             Screen::TextFields(screen) => self.render_text_fields(frame, area, screen),
         }
     }
@@ -1301,6 +1335,13 @@ impl App {
                             "simple pulse"
                         }
                     )
+                }
+            }
+            SettingId::MediaPause => {
+                if self.config.audio.pause_media {
+                    "pause while dictating".to_string()
+                } else {
+                    "keep playing".to_string()
                 }
             }
         }
@@ -1529,6 +1570,28 @@ impl App {
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
             chunks[3],
+        );
+    }
+
+    fn render_media_pause(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        screen: &screens::MediaPauseScreen,
+    ) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            chunks[2],
         );
     }
 
@@ -1954,6 +2017,7 @@ mod tests {
                 "History retention",
                 "Startup",
                 "Overlay",
+                "Media pause",
             ]
         );
     }

@@ -157,6 +157,10 @@ pub struct AudioConfig {
     pub feedback_device: String,
     #[serde(default)]
     pub mute_playback: MutePlaybackConfig,
+    /// Pause MPRIS media players that are playing when a recording starts and
+    /// resume them when it ends (see `crate::media`). Off by default.
+    #[serde(default = "default_false")]
+    pub pause_media: bool,
 }
 
 impl Default for AudioConfig {
@@ -167,6 +171,7 @@ impl Default for AudioConfig {
             feedback_volume: default_feedback_volume(),
             feedback_device: default_feedback_device(),
             mute_playback: MutePlaybackConfig::default(),
+            pause_media: false,
         }
     }
 }
@@ -1481,6 +1486,19 @@ mod tests {
         assert!(config.validate().is_err());
         config.audio.feedback_volume = 1.01;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn media_pause_defaults_off_and_round_trips_through_toml() {
+        assert!(!Config::default().audio.pause_media);
+        let config: Config = toml::from_str("[audio]\nmicrophone = \"default\"\n").unwrap();
+        assert!(!config.audio.pause_media);
+
+        let config: Config = toml::from_str("[audio]\npause_media = true\n").unwrap();
+        assert!(config.audio.pause_media);
+        config.validate().unwrap();
+        let reloaded: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert!(reloaded.audio.pause_media);
     }
 
     #[test]

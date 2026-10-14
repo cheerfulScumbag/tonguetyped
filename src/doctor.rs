@@ -250,6 +250,9 @@ mod tests {
                 shortcut_status: crate::ipc::ShortcutStatus::Failed,
                 activation_error: Some("activation listener failed".to_string()),
                 build: Some("0.1.0 (a1b2c3d)".to_string()),
+                model: None,
+                backend: None,
+                device: None,
             };
             writer
                 .write_all(crate::ipc::encode_frame(&response).unwrap().as_bytes())

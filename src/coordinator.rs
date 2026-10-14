@@ -65,6 +65,14 @@ pub trait CoordinatorRuntime: Send + Sync {
     fn shutdown(&self) -> anyhow::Result<()> {
         Ok(())
     }
+    /// Pause playing media for one recording (`audio.pause_media`). Called on
+    /// the recording worker's blocking thread just before `record`; the
+    /// returned guard is dropped as soon as `record` returns, however the
+    /// recording ended, and dropping it resumes the media. The default pauses
+    /// nothing.
+    fn pause_media(&self) -> Box<dyn Send> {
+        Box::new(())
+    }
 }
 
 pub struct RecordingAttempt {
@@ -573,6 +581,12 @@ impl CoordinatorRuntime for ProductionRuntime {
             token.cancel();
         }
     }
+
+    fn pause_media(&self) -> Box<dyn Send> {
+        Box::new(crate::media::MediaPause::start(
+            tokio::runtime::Handle::current(),
+        ))
+    }
 }
 
 /// Acquire `mutex`, giving up after `timeout`. Used to bound shutdown's engine
@@ -1074,6 +1088,10 @@ impl Coordinator {
                 transcription_attempted: false,
             };
             let duration = Duration::from_secs(config.transcription.max_recording_seconds);
+            let media_pause = config
+                .audio
+                .pause_media
+                .then(|| coordinator.runtime.pause_media());
             let recording = coordinator.runtime.record(
                 &config.audio.microphone,
                 duration,
@@ -1081,6 +1099,7 @@ impl Coordinator {
                 started_tx,
                 Arc::clone(&coordinator.clock),
             );
+            drop(media_pause);
             {
                 let mut timing = timing.lock().unwrap();
                 if let Some(stop_at) = recording.automatic_stop_at {
@@ -1487,6 +1506,10 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         operation_error: inner.last_error.clone(),
         shortcut_status: inner.shortcut_status.clone(),
         activation_error: inner.runtime_error.clone(),
+        model: inner.config.model.active_model.clone(),
+        backend: crate::inference::BackendPreference::parse(&inner.config.model.preferred_backend)
+            .ok()
+            .map(crate::inference::cached_preferred_backend_info),
     }
 }
 
@@ -1504,6 +1527,11 @@ pub enum CoordinatorResponse {
         operation_error: Option<String>,
         shortcut_status: crate::ipc::ShortcutStatus,
         activation_error: Option<String>,
+        /// The configured `model.active_model`.
+        model: String,
+        /// The backend and device the configured `model.preferred_backend`
+        /// resolves to on this machine, as the daemon logs at startup.
+        backend: Option<crate::inference::BackendInfo>,
     },
 }
 

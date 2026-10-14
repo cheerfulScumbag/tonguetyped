@@ -283,7 +283,7 @@ const KEY_TAB: &[u8] = b"\t";
 const KEY_BACKSPACE: &[u8] = b"\x7f";
 const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 
-const SETTING_LABELS: [&str; 13] = [
+const SETTING_LABELS: [&str; 14] = [
     "Model",
     "Inference backend",
     "Translation",
@@ -297,6 +297,7 @@ const SETTING_LABELS: [&str; 13] = [
     "History retention",
     "Startup",
     "Overlay",
+    "Media pause",
 ];
 
 const COMMAND_NAMES: [&str; 9] = [
@@ -311,7 +312,15 @@ const COMMAND_NAMES: [&str; 9] = [
     "shortcut-test",
 ];
 
-/// Home index of the first command row (after the thirteen Settings rows), for
+/// Home index of the Settings row labelled `label`.
+fn setting_row(label: &str) -> usize {
+    SETTING_LABELS
+        .iter()
+        .position(|candidate| *candidate == label)
+        .unwrap()
+}
+
+/// Home index of the first command row (after the fourteen Settings rows), for
 /// tests that need to arrow down to a specific command.
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
 
@@ -331,9 +340,9 @@ fn select_setting(session: &mut Session, label: &str) -> String {
 #[test]
 fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
-    // Tall enough for the thirteen Settings rows plus every Commands row with
+    // Tall enough for the fourteen Settings rows plus every Commands row with
     // no scrolling of either panel.
-    let session = Session::spawn(&sandbox, 100, 36);
+    let session = Session::spawn(&sandbox, 100, 37);
 
     // The pre-change baseline (see .superdesign/replica_html_template and the
     // dashboard task's report) listed 11 CLI commands with model/autostart
@@ -663,8 +672,8 @@ fn pty_overlay_setting_cycles_position_and_persists_it() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Overlay is the last Settings row.
-    for _ in 0..SETTING_LABELS.len() - 1 {
+    // Overlay is a Settings row.
+    for _ in 0..setting_row("Overlay") {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Overlay", Duration::from_secs(3));
@@ -721,7 +730,7 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
         home.contains("Overlay            disabled"),
         "the summary row should reflect the disabled overlay:\n{home}"
     );
-    for _ in 0..SETTING_LABELS.len() - 1 {
+    for _ in 0..setting_row("Overlay") {
         session.send(KEY_DOWN);
     }
     session.wait_for("> Overlay", Duration::from_secs(3));
@@ -1371,6 +1380,48 @@ fn pty_last_result_can_be_scrolled_to_text_taller_than_the_pane() {
     assert!(
         scrolled.contains("juliet ZZZTAILZZZ"),
         "scrolling should bring the tail into view:\n{scrolled}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_media_pause_setting_defaults_off_and_persists_when_enabled() {
+    let sandbox = Sandbox::new("media-pause-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    let home = session.wait_for("Settings", Duration::from_secs(5));
+    assert!(
+        home.contains("Media pause        keep playing"),
+        "media pause should default to off:\n{home}"
+    );
+
+    for _ in 0..setting_row("Media pause") {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Media pause", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    let opened = session.wait_for(
+        "> Keep media playing while dictating",
+        Duration::from_secs(3),
+    );
+    assert!(
+        opened.contains("Pause playing media while dictating, then resume it"),
+        "the Media pause screen should offer both choices:\n{opened}"
+    );
+
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    session.wait_for("Media pause setting saved.", Duration::from_secs(3));
+    assert!(sandbox.config_contents().contains("pause_media = true"));
+
+    session.send(KEY_ESC);
+    let home = session.wait_for(
+        "Media pause        pause while dictating",
+        Duration::from_secs(3),
+    );
+    assert!(
+        home.contains("> Media pause"),
+        "selection should return to the Media pause row:\n{home}"
     );
 
     session.quit_and_wait();

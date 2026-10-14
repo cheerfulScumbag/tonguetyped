@@ -480,6 +480,44 @@ impl TranslationScreen {
     }
 }
 
+/// Media pause: leave playing media alone, or pause it while recording.
+pub(super) struct MediaPauseScreen {
+    pub selected: usize,
+    pub result: Option<Result<(), String>>,
+}
+
+pub(super) const MEDIA_PAUSE_LABELS: [&str; 2] = [
+    "Keep media playing while dictating",
+    "Pause playing media while dictating, then resume it",
+];
+
+impl MediaPauseScreen {
+    pub(super) fn new(config: &Config) -> Self {
+        Self {
+            selected: usize::from(config.audio.pause_media),
+            result: None,
+        }
+    }
+
+    pub(super) fn move_selection(&mut self, delta: i32) {
+        let next = (self.selected as i32 + delta).clamp(0, 1) as usize;
+        self.selected = next;
+    }
+
+    pub(super) fn apply(&mut self, config: &mut Config) {
+        config.audio.pause_media = self.selected == 1;
+    }
+
+    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+        let rows = MEDIA_PAUSE_LABELS.map(String::from);
+        selection_list("Media pause", &rows, self.selected)
+    }
+
+    pub(super) fn result_line(&self) -> Line<'static> {
+        result_line(&self.result, "Media pause setting saved.")
+    }
+}
+
 /// The Shortcut screen: the binding the desktop reports and the two actions
 /// that talk to the desktop's global-shortcuts portal. TongueTyped never
 /// picks a key, so setting one always goes through the portal's native
@@ -1422,6 +1460,20 @@ mod tests {
         screen.apply(&mut config);
         assert!(config.activation.mode == ActivationMode::Toggle);
         assert_eq!(ActivationScreen::new(&config).selected, 1);
+    }
+
+    #[test]
+    fn media_pause_screen_starts_off_and_saves_the_choice() {
+        let mut config = Config::default();
+        let mut screen = MediaPauseScreen::new(&config);
+        assert_eq!(screen.selected, 0);
+        screen.move_selection(1);
+        screen.apply(&mut config);
+        assert!(config.audio.pause_media);
+        assert_eq!(MediaPauseScreen::new(&config).selected, 1);
+        screen.move_selection(-1);
+        screen.apply(&mut config);
+        assert!(!config.audio.pause_media);
     }
 
     fn test_capabilities() -> Capabilities {
