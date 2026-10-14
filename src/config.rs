@@ -292,8 +292,10 @@ pub struct TranscriptionConfig {
     /// Chunk boundaries fall at the quietest point near each limit, so a
     /// split lands in a pause rather than through a word. `0` disables
     /// chunking, so a model with no input ceiling decodes the whole buffer in
-    /// one call; a hard-capped family (canary, cohere) is still split into
-    /// windows within its cap regardless.
+    /// one call; a model that advertises an audio limit is still bounded
+    /// regardless - a hard input cap (canary, cohere) to its cap, or a model
+    /// whose cap is on its output (moonshine) to half the `max_audio_ms` it
+    /// advertises - so this setting only ever narrows the model's own bound.
     #[serde(default = "default_chunk_seconds")]
     pub chunk_seconds: u64,
     /// Text the Whisper decoder reads as if it came just before the

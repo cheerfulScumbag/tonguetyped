@@ -7,8 +7,10 @@
 //! transcription shares one decode path with dictation rather than carrying a
 //! second inference implementation. The engine is loaded once and reused for
 //! every chunk of a long file; the chunking itself lives in
-//! `InferenceEngine::transcribe`, driven by `transcription.chunk_seconds` and,
-//! for a hard-capped family (canary, cohere), always by the model's own cap.
+//! `InferenceEngine::transcribe`, driven by `transcription.chunk_seconds` and
+//! always by the active model's own limit - a hard input cap (canary, cohere)
+//! or, for a model whose cap is on its output (moonshine), a window clamped to
+//! half the `max_audio_ms` the GGUF advertises.
 
 use crate::config::Config;
 use crate::inference::{BackendPreference, InferenceEngine, Transcription};

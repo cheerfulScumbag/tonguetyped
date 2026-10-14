@@ -579,14 +579,19 @@ CPU or GPU model.
 
 A single live recording is capped by `transcription.max_recording_seconds`
 (600 s by default). Decoding is bounded separately: audio longer than
-`transcription.chunk_seconds` (30 s by default, Whisper's native window) is
-transcribed in back-to-back chunks that each fit that window, with each chunk
-boundary snapped back to the quietest point before its limit so a split lands
-in a pause rather than through a word. This keeps memory and latency bounded
-for a long dictation instead of sending one unbounded buffer through the
-decoder. Set `chunk_seconds = 0` to decode the whole buffer in one call; a
-hard-capped model (canary, cohere) is still split into windows within its
-per-call limit, so the whole file never reaches it in one request.
+`transcription.chunk_seconds` (30 s by default) is transcribed in back-to-back
+chunks that each fit that window, with each chunk boundary snapped back to the
+quietest point before its limit so a split lands in a pause rather than through
+a word. This keeps memory and latency bounded for a long dictation instead of
+sending one unbounded buffer through the decoder.
+
+The window is model-aware. A model that advertises an audio limit is decoded in
+windows at most half that limit, so its own ceiling is never overrun: Moonshine's
+cap is on its *output* (a 194-token decoder budget, roughly 48 s of English), so
+it is chunked at about 24 s rather than the configured 30 s. A hard-capped model
+(canary, cohere) is likewise split into windows within its per-call limit. Set
+`chunk_seconds = 0` to decode the whole buffer in one call for a model with no
+practical limit; a model that advertises one is still bounded.
 
 The same inference path transcribes an existing audio file:
 
@@ -709,12 +714,12 @@ pipeline (whisper, parakeet, moonshine, canary, and cohere), published by
 [handy-computer](https://huggingface.co/handy-computer). Each entry is pinned to
 a commit with an expected byte size and SHA-256, and `tonguetyped model list`
 labels it with its family and language coverage. Families differ in how much
-audio one call accepts: whisper and parakeet take any length, moonshine can
-truncate output past about 48 s (keeping the partial transcript and reporting
-that it was cut short), and canary and
+audio one call accepts: whisper and parakeet take any length, moonshine's
+decoder has a fixed output budget (about 48 s of English, kept partially if a
+run still hits it), and canary and
 cohere reject input past about 400 s, so `InferenceEngine::transcribe` always
-keeps each call within the active model's cap - splitting a hard-capped model's
-input into windows at most that limit even when `chunk_seconds = 0` - and
+keeps each call within the active model's advertised limit - splitting any such
+model's input into windows within that limit even when `chunk_seconds = 0` - and
 `Config::validate` additionally refuses a config whose per-call buffer
 (`min(max_recording_seconds, chunk_seconds)`, or just `max_recording_seconds`
 with chunking off) would exceed it.

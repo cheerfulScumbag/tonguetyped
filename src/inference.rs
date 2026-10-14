@@ -323,6 +323,11 @@ struct LoadedSession {
     session: transcribe_cpp::Session,
     backend: BackendInfo,
     decode_support: DecodeSupport,
+    /// The loaded model's own advertised audio ceiling in ms (0 = no practical
+    /// limit), probed from `Capabilities::max_audio_ms` at load. Moonshine's is
+    /// an *output*-token cap (~48 s) rather than an input window, so the
+    /// per-run window is halved from it (`decode_window_samples`).
+    max_audio_ms: i64,
     /// Whether `DecodeSupport::warn_unsupported` already logged for this
     /// load, so a dropped option is reported once rather than per dictation.
     warned_unsupported: bool,
@@ -415,28 +420,48 @@ const DECODE_SAMPLE_RATE: usize = 16_000;
 /// boundary, in samples (10 ms at 16 kHz).
 const CHUNK_PROBE_SAMPLES: usize = 160;
 
-/// The decode window in samples for `config` on a model with `long_form`, or
-/// `None` when neither chunking nor a hard cap bounds a call. Chunking bounds
-/// every call to `chunk_seconds`; a hard-capped family bounds every call to
-/// its cap regardless, so the file path cannot hand it an over-length buffer
-/// with chunking off. When both apply the smaller window wins.
+/// Samples in a whole number of seconds at [`DECODE_SAMPLE_RATE`].
+fn seconds_to_samples(seconds: u64) -> usize {
+    (seconds as usize).saturating_mul(DECODE_SAMPLE_RATE)
+}
+
+/// Samples in `milliseconds` at [`DECODE_SAMPLE_RATE`]. Negative input (an
+/// "unset" sentinel from the binding) clamps to zero.
+fn milliseconds_to_samples(milliseconds: i64) -> usize {
+    (milliseconds.max(0) as usize).saturating_mul(DECODE_SAMPLE_RATE) / 1000
+}
+
+/// The decode window in samples for `config` on the loaded model, or `None`
+/// when nothing bounds a call. Three independent bounds combine by taking the
+/// smallest:
+///
+/// - `transcription.chunk_seconds`, when chunking is enabled (`> 0`);
+/// - the catalog family bound, so an over-length buffer is never submitted even
+///   with chunking off: a hard input cap as-is (canary, cohere) or half a soft
+///   output window (moonshine), since the documented soft ceiling assumes ~4
+///   output tokens/s while English decodes nearer 6;
+/// - the loaded model's own advertised `max_audio_ms`, halved for the same
+///   output-budget headroom - the model-aware bound. Read from the GGUF at load
+///   rather than assuming one family's number for every model, and applied to
+///   any model that advertises a bound (Moonshine's 194-token decoder cap is
+///   ~48 s, so ~24 s here).
 fn decode_window_samples(
     config: &crate::config::TranscriptionConfig,
     long_form: crate::catalog::LongForm,
+    model_max_audio_ms: i64,
 ) -> Option<usize> {
-    let chunk = (config.chunk_seconds > 0)
-        .then(|| (config.chunk_seconds as usize).saturating_mul(DECODE_SAMPLE_RATE));
-    let cap = match long_form {
+    let chunk = (config.chunk_seconds > 0).then(|| seconds_to_samples(config.chunk_seconds));
+    let family = match long_form {
         crate::catalog::LongForm::HardCap { cap_seconds } => {
-            Some((cap_seconds as usize).saturating_mul(DECODE_SAMPLE_RATE))
+            Some(seconds_to_samples(cap_seconds as u64))
         }
-        _ => None,
+        crate::catalog::LongForm::SoftWindow { window_seconds } => {
+            Some(seconds_to_samples(window_seconds as u64) / 2)
+        }
+        crate::catalog::LongForm::Unbounded => None,
     };
-    match (chunk, cap) {
-        (Some(chunk), Some(cap)) => Some(chunk.min(cap)),
-        (Some(chunk), None) => Some(chunk),
-        (None, cap) => cap,
-    }
+    let model = (model_max_audio_ms > 0).then(|| milliseconds_to_samples(model_max_audio_ms) / 2);
+    [chunk, family, model].into_iter().flatten().min()
 }
 
 /// Contiguous sample ranges covering `samples`, each at most `window` long. A
@@ -491,10 +516,12 @@ fn quietest_boundary(samples: &[f32], low: usize, high: usize) -> usize {
     best_at
 }
 
-/// One decode's text plus whether the model's generation budget cut it short
-/// before end-of-stream. `truncated` is true only for a run the binding reports
-/// as [`transcribe_cpp::Error::OutputTruncated`], so a caller can tell a
-/// partial transcript from a complete one and cue the user accordingly.
+/// One decode's text plus whether it ended before end-of-stream, leaving a
+/// partial transcript. `truncated` is true only when the binding preserved a
+/// partial from a run it reports as [`transcribe_cpp::Error::OutputTruncated`]
+/// (the model's generation budget ran out) or [`transcribe_cpp::Error::Aborted`]
+/// (cooperative cancellation mid-decode), so a caller can tell a partial
+/// transcript from a complete one and cue the user accordingly.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Transcription {
     pub text: String,
@@ -502,13 +529,14 @@ pub struct Transcription {
 }
 
 /// Maps a `Session::run` result to the [`Transcription`] `transcribe` returns.
-/// The binding reports a decode that hit its generation budget before
-/// end-of-stream as [`transcribe_cpp::Error::OutputTruncated`] carrying the
-/// partial transcript, not as `Ok`. That is not a hard failure: the partial
-/// text is surfaced with `truncated` set and the truncation logged, so a model
-/// with a soft window (moonshine) yields the short transcript the catalog
-/// documents instead of losing the dictation. Every other error stays a
-/// failure.
+/// The binding reports a decode that ended before end-of-stream - a generation
+/// budget reached ([`transcribe_cpp::Error::OutputTruncated`]) or an abort
+/// ([`transcribe_cpp::Error::Aborted`]) - carrying the partial transcript it
+/// produced, not as `Ok`. That is not a hard failure: when the error carries a
+/// partial (`Error::partial()`), the partial text is surfaced with `truncated`
+/// set and the stop logged, so a model with a soft window (moonshine) yields the
+/// short transcript the catalog documents instead of losing the dictation.
+/// Every error with no partial stays a failure.
 fn run_result(
     result: transcribe_cpp::Result<transcribe_cpp::Transcript>,
 ) -> anyhow::Result<Transcription> {
@@ -517,21 +545,72 @@ fn run_result(
             text: transcript.text,
             truncated: false,
         }),
-        Err(transcribe_cpp::Error::OutputTruncated { partial, .. }) => {
-            let text = partial
-                .map(|transcript| transcript.text)
-                .unwrap_or_default();
-            tracing::warn!(
-                "transcription reached the model's decode limit and was truncated; keeping the {}-character partial transcript",
-                text.chars().count()
-            );
-            Ok(Transcription {
-                text,
-                truncated: true,
-            })
-        }
-        Err(error) => Err(anyhow::Error::new(error).context("transcription failed")),
+        Err(error) => match error.partial().map(|partial| partial.text.clone()) {
+            Some(text) => {
+                tracing::warn!(
+                    "transcription stopped before end-of-stream; keeping the {}-character partial transcript",
+                    text.chars().count()
+                );
+                Ok(Transcription {
+                    text,
+                    truncated: true,
+                })
+            }
+            None => Err(anyhow::Error::new(error).context("transcription failed")),
+        },
     }
+}
+
+/// Joins the per-chunk transcripts of one `transcribe` call in decode order:
+/// each is trimmed, the empty ones are dropped, and the rest are separated by a
+/// single space (matching Handy's `transcribe-rs` `merge_sequential`). The
+/// chunks are contiguous and non-overlapping, so there is no duplication to
+/// reconcile and no overlap/dedup is needed.
+fn merge_transcripts(chunks: &[Transcription]) -> String {
+    chunks
+        .iter()
+        .map(|chunk| chunk.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Folds one chunked call's per-chunk results into a single [`Transcription`],
+/// preserving whatever earlier chunks already decoded when a later chunk fails.
+/// A run the binding reports as a partial ([`run_result`] `Ok` with `truncated`)
+/// is kept as text; a hard failure with no partial stops the fold, and if any
+/// earlier chunk produced text the merged transcript is returned with
+/// `truncated` set (the dictation is incomplete but not thrown away). Only when
+/// no chunk produced text does the hard error propagate.
+fn accumulate_chunks(
+    results: impl IntoIterator<Item = anyhow::Result<Transcription>>,
+) -> anyhow::Result<Transcription> {
+    let mut chunks: Vec<Transcription> = Vec::new();
+    let mut truncated = false;
+    let mut produced = false;
+    for (index, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(chunk) => {
+                produced |= !chunk.text.trim().is_empty();
+                truncated |= chunk.truncated;
+                chunks.push(chunk);
+            }
+            Err(error) => {
+                if produced {
+                    tracing::error!(
+                        "chunk {index} failed after an earlier chunk produced text; keeping the partial transcript: {error:#}"
+                    );
+                    truncated = true;
+                    break;
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(Transcription {
+        text: merge_transcripts(&chunks),
+        truncated,
+    })
 }
 
 pub struct InferenceEngine {
@@ -540,8 +619,10 @@ pub struct InferenceEngine {
     preference: BackendPreference,
     cancel: CancelToken,
     /// The loaded model's input-length contract, recovered from the catalog by
-    /// `model_path`. A hard-capped family (canary, cohere) is always decoded
-    /// in windows at most its cap, so no call can exceed the limit even when
+    /// `model_path` and combined with the session's own advertised ceiling in
+    /// `decode_window_samples`. A hard-capped family (canary, cohere) is
+    /// decoded in windows at most its cap and any model that advertises a
+    /// limit at most half it, so no call can exceed the limit even when
     /// `transcription.chunk_seconds` is `0`.
     long_form: crate::catalog::LongForm,
 }
@@ -634,6 +715,12 @@ impl InferenceEngine {
                     self.session = Some(LoadedSession {
                         backend: describe_loaded_backend(&model),
                         decode_support: DecodeSupport::probe(&model),
+                        // The model's advertised ceiling, read once here so the
+                        // per-run window can be clamped to it without assuming a
+                        // family's number. `Session::limits()` reports the same
+                        // effective value for the options we use (n_ctx left at
+                        // the model default), so the model-level read is enough.
+                        max_audio_ms: model.capabilities().max_audio_ms,
                         warned_unsupported: false,
                         session,
                     });
@@ -673,20 +760,24 @@ impl InferenceEngine {
     }
 
     /// Transcribe one buffer of 16 kHz mono audio, splitting it into bounded
-    /// chunks first when it is longer than `transcription.chunk_seconds` or
-    /// the active hard-capped model's limit. This is the one decode path
-    /// shared by live dictation (`coordinator`) and the file command
-    /// (`crate::transcribe`): both hand their audio to this method, which owns
-    /// every `Session::run` call. Each chunk is decoded by the same loaded
-    /// session and the non-empty transcripts are joined with a single space, so
-    /// a long recording never sends one unbounded buffer through the decoder.
+    /// chunks first when it is longer than `transcription.chunk_seconds`, the
+    /// active family's limit, or the loaded model's own advertised ceiling. The
+    /// window is model-aware (`decode_window_samples`): a model that publishes
+    /// `max_audio_ms` (Moonshine's output-token cap) is decoded in windows at
+    /// most half that, so its bounded output budget is never overrun. This is
+    /// the one decode path shared by live dictation (`coordinator`) and the file
+    /// command (`crate::transcribe`): both hand their audio to this method,
+    /// which owns every `Session::run` call. Each chunk is decoded by the same
+    /// loaded session and the non-empty transcripts are joined with a single
+    /// space, so a long recording never sends one unbounded buffer through the
+    /// decoder.
     pub fn transcribe(
         &mut self,
         audio: &[f32],
         config: &crate::config::TranscriptionConfig,
     ) -> anyhow::Result<Transcription> {
-        let window = decode_window_samples(config, self.long_form);
         let loaded = self.session.as_mut().context("engine not loaded")?;
+        let window = decode_window_samples(config, self.long_form, loaded.max_audio_ms);
         if !loaded.warned_unsupported {
             loaded.warned_unsupported = loaded.decode_support.warn_unsupported(config);
         }
@@ -694,20 +785,10 @@ impl InferenceEngine {
         let session = &mut loaded.session;
         match window {
             Some(window) if audio.len() > window => {
-                let mut parts: Vec<String> = Vec::new();
-                let mut truncated = false;
-                for range in split_chunks(audio, window) {
-                    let decoded = run_result(session.run(&audio[range], &options))?;
-                    truncated |= decoded.truncated;
-                    let text = decoded.text.trim();
-                    if !text.is_empty() {
-                        parts.push(text.to_string());
-                    }
-                }
-                Ok(Transcription {
-                    text: parts.join(" "),
-                    truncated,
-                })
+                let results = split_chunks(audio, window)
+                    .into_iter()
+                    .map(|range| run_result(session.run(&audio[range], &options)));
+                accumulate_chunks(results)
             }
             _ => run_result(session.run(audio, &options)),
         }
@@ -914,6 +995,22 @@ mod tests {
     }
 
     #[test]
+    fn an_aborted_run_keeps_the_partial_transcript_instead_of_failing() {
+        // Cancellation mid-decode is data like truncation: the binding keeps the
+        // partial, so it is surfaced (marked incomplete) rather than discarded.
+        let result = run_result(Err(transcribe_cpp::Error::Aborted {
+            message: "cancelled".to_string(),
+            partial: Some(Box::new(transcribe_cpp::Transcript {
+                text: "what was decoded before the abort".to_string(),
+                ..Default::default()
+            })),
+        }))
+        .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.text, "what was decoded before the abort");
+    }
+
+    #[test]
     fn a_successful_run_returns_its_transcript_text_untruncated() {
         let result = run_result(Ok(transcribe_cpp::Transcript {
             text: "hello world".to_string(),
@@ -1067,11 +1164,11 @@ mod tests {
     fn decode_window_is_the_configured_seconds_and_none_when_unbounded_and_disabled() {
         use crate::catalog::LongForm;
         assert_eq!(
-            decode_window_samples(&config_with_chunk_seconds(30), LongForm::Unbounded),
+            decode_window_samples(&config_with_chunk_seconds(30), LongForm::Unbounded, 0),
             Some(30 * 16_000)
         );
         assert_eq!(
-            decode_window_samples(&config_with_chunk_seconds(0), LongForm::Unbounded),
+            decode_window_samples(&config_with_chunk_seconds(0), LongForm::Unbounded, 0),
             None
         );
     }
@@ -1082,18 +1179,85 @@ mod tests {
         let cap = LongForm::HardCap { cap_seconds: 400 };
         // Chunking on but configured wider than the cap: the cap wins.
         assert_eq!(
-            decode_window_samples(&config_with_chunk_seconds(600), cap),
+            decode_window_samples(&config_with_chunk_seconds(600), cap, 0),
             Some(400 * 16_000)
         );
         // Chunking off: the cap still bounds every call.
         assert_eq!(
-            decode_window_samples(&config_with_chunk_seconds(0), cap),
+            decode_window_samples(&config_with_chunk_seconds(0), cap, 0),
             Some(400 * 16_000)
         );
         // Chunking narrower than the cap: chunking wins.
         assert_eq!(
-            decode_window_samples(&config_with_chunk_seconds(30), cap),
+            decode_window_samples(&config_with_chunk_seconds(30), cap, 0),
             Some(30 * 16_000)
+        );
+    }
+
+    #[test]
+    fn decode_window_halves_a_models_advertised_ceiling() {
+        // Moonshine's `max_audio_ms` is ~48 s (194 decoder tokens at the
+        // advisory 4 tokens/s), so the model-aware window is ~24 s - half the
+        // advertised bound, which keeps the real ~6-tokens/s English output
+        // budget clear. It wins over the configured 30 s chunk.
+        let moon = || {
+            crate::catalog::find("moonshine-base-f16")
+                .unwrap()
+                .info()
+                .long_form
+        };
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(30), moon(), 48_500),
+            Some(24 * 16_000),
+            "30 s chunk must be clamped to the ~24 s model bound"
+        );
+        // A wider configured chunk is still clamped, and chunking off does not
+        // remove the model bound.
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(60), moon(), 48_500),
+            Some(24 * 16_000)
+        );
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(0), moon(), 48_500),
+            Some(24 * 16_000)
+        );
+    }
+
+    #[test]
+    fn decode_window_applies_the_advertised_bound_to_any_model() {
+        // The bound is read from the model, not assumed per family: a model the
+        // catalog calls unbounded is still bounded by its own advertised
+        // ceiling, and a hard-capped family's window is the smaller of its cap
+        // and half its advertised bound.
+        use crate::catalog::LongForm;
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(0), LongForm::Unbounded, 48_500),
+            Some(388_000),
+            "half of 48.5 s is 24.25 s"
+        );
+        assert_eq!(
+            decode_window_samples(
+                &config_with_chunk_seconds(0),
+                LongForm::HardCap { cap_seconds: 400 },
+                400_000,
+            ),
+            Some(200 * 16_000),
+            "half the advertised 400 s bound wins over the catalog cap"
+        );
+    }
+
+    #[test]
+    fn decode_window_uses_the_catalog_soft_window_when_the_model_advertises_none() {
+        // Defensive fallback: a soft-window family whose load-time probe reports
+        // no bound is still clamped to half its curated window.
+        use crate::catalog::LongForm;
+        assert_eq!(
+            decode_window_samples(
+                &config_with_chunk_seconds(30),
+                LongForm::SoftWindow { window_seconds: 48 },
+                0,
+            ),
+            Some(24 * 16_000)
         );
     }
 
@@ -1118,8 +1282,9 @@ mod tests {
         let crate::catalog::LongForm::HardCap { cap_seconds } = entry.info().long_form else {
             panic!("canary-1b-v2-f16 should be hard-capped");
         };
-        let window = decode_window_samples(&config_with_chunk_seconds(0), entry.info().long_form)
-            .expect("a hard-capped model always has a bounded window");
+        let window =
+            decode_window_samples(&config_with_chunk_seconds(0), entry.info().long_form, 0)
+                .expect("a hard-capped model always has a bounded window");
         assert_eq!(window, cap_seconds as usize * 16_000);
 
         let samples = vec![0.0_f32; window + 16_000];
@@ -1166,6 +1331,94 @@ mod tests {
                 range
             );
         }
+    }
+
+    #[test]
+    fn chunk_transcripts_merge_in_order_with_single_spaces() {
+        // Each chunk's text is trimmed, empty chunks drop out, and the rest are
+        // single-spaced in decode order - one dictation, no duplicated boundary
+        // words (the chunks never overlap).
+        let chunks = vec![
+            Transcription {
+                text: "  the first part ".to_string(),
+                truncated: false,
+            },
+            Transcription {
+                text: "   ".to_string(),
+                truncated: false,
+            },
+            Transcription {
+                text: "the second part".to_string(),
+                truncated: true,
+            },
+        ];
+        assert_eq!(merge_transcripts(&chunks), "the first part the second part");
+        assert!(merge_transcripts(&[]).is_empty());
+    }
+
+    fn transcribed(text: &str) -> anyhow::Result<Transcription> {
+        run_result(Ok(transcribe_cpp::Transcript {
+            text: text.to_string(),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn a_later_chunk_failure_keeps_the_earlier_text_as_a_partial() {
+        // Chunk 1 decodes text, chunk 2 fails hard: the dictation is incomplete
+        // but the decoded text is returned (marked truncated) instead of lost.
+        let merged = accumulate_chunks(vec![
+            transcribed("the first part"),
+            run_result(Err(transcribe_cpp::Error::OutOfMemory(
+                "out of host memory".to_string(),
+            ))),
+        ])
+        .unwrap();
+        assert!(merged.truncated);
+        assert_eq!(merged.text, "the first part");
+    }
+
+    #[test]
+    fn a_later_chunk_failure_after_a_truncated_chunk_keeps_the_partial() {
+        // A partial chunk (OutputTruncated) kept, then a later hard failure: both
+        // the text and the incomplete marking survive.
+        let merged = accumulate_chunks(vec![
+            run_result(Err(transcribe_cpp::Error::OutputTruncated {
+                message: "max_length reached".to_string(),
+                partial: Some(Box::new(transcribe_cpp::Transcript {
+                    text: "half the dictation".to_string(),
+                    ..Default::default()
+                })),
+            })),
+            run_result(Err(transcribe_cpp::Error::Busy("model busy".to_string()))),
+        ])
+        .unwrap();
+        assert!(merged.truncated);
+        assert_eq!(merged.text, "half the dictation");
+    }
+
+    #[test]
+    fn a_chunk_failure_with_no_earlier_text_propagates() {
+        // Nothing decoded yet: a hard failure is still a failure, not an empty
+        // "success", and a leading silently-empty chunk does not count as text.
+        assert!(accumulate_chunks(vec![
+            transcribed("   "),
+            run_result(Err(transcribe_cpp::Error::InputTooLong(
+                "too long".to_string()
+            ))),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn successful_chunks_merge_untruncated_and_ordered() {
+        let merged = accumulate_chunks(vec![
+            transcribed("  the first part "),
+            transcribed("the second part"),
+        ])
+        .unwrap();
+        assert!(!merged.truncated);
+        assert_eq!(merged.text, "the first part the second part");
     }
 
     #[test]
