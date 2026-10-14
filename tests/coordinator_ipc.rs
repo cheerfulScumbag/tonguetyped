@@ -760,6 +760,72 @@ async fn truncated_transcript_still_delivers_but_reports_a_cut_short_cue() {
 }
 
 #[tokio::test]
+async fn text_processing_shapes_the_output_with_replacements_and_the_cleanup_command() {
+    let runtime = Arc::new(TestRuntime::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config
+        .text
+        .replacements
+        .insert("test".to_string(), "Voxtype".to_string());
+    config.text.post_process_command = "sed 's/transcript/CLEANED/'".to_string();
+    config.text.post_process_timeout_seconds = 5;
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime.clone()).unwrap());
+
+    stop_and_wait(&coordinator).await;
+
+    // The replacement ran first, then the cleanup command saw its result.
+    assert_eq!(*runtime.outputs.lock().unwrap(), vec!["Voxtype CLEANED "]);
+}
+
+#[tokio::test]
+async fn text_processing_runs_replacements_spoken_punctuation_and_filler_removal_in_order() {
+    let runtime = Arc::new(TestRuntime::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.transcription.language = "en".to_string();
+    config.text.spoken_punctuation = true;
+    config.text.remove_fillers = true;
+    config.text.replacements.insert(
+        "test transcript".to_string(),
+        "um hello comma world period um".to_string(),
+    );
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime.clone()).unwrap());
+
+    stop_and_wait(&coordinator).await;
+
+    // The replacement inserts the phrase, spoken punctuation turns the spoken
+    // words into symbols, and filler removal drops the `um`s - all on the
+    // finished transcript before it is output.
+    assert_eq!(*runtime.outputs.lock().unwrap(), vec!["hello, world. "]);
+}
+
+#[tokio::test]
+async fn a_pass_that_empties_the_transcript_skips_the_cleanup_command() {
+    let runtime = Arc::new(TestRuntime::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.transcription.language = "en".to_string();
+    config.text.remove_fillers = true;
+    config
+        .text
+        .replacements
+        .insert("test transcript".to_string(), "um".to_string());
+    config.text.post_process_command = "echo hallucinated".to_string();
+    config.text.post_process_timeout_seconds = 5;
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime.clone()).unwrap());
+
+    stop_and_wait(&coordinator).await;
+
+    // The replacement makes the whole transcript a filler word, filler removal
+    // empties it, and the cleanup command must not run on empty stdin.
+    assert!(
+        runtime.outputs.lock().unwrap().is_empty(),
+        "a pass-emptied transcript must not reach the cleanup command"
+    );
+}
+
+#[tokio::test]
 async fn a_truncated_transcript_reports_the_cut_short_cue_across_delivery_modes() {
     for delivery in [
         Delivery::Inserted,
@@ -782,6 +848,24 @@ async fn a_truncated_transcript_reports_the_cut_short_cue_across_delivery_modes(
             Some(&FeedbackEvent::Truncated)
         );
     }
+}
+
+#[tokio::test]
+async fn an_empty_transcript_never_reaches_the_cleanup_command() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.empty_transcript.store(true, Ordering::SeqCst);
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.text.post_process_command = "echo hallucinated".to_string();
+    config.text.post_process_timeout_seconds = 5;
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime.clone()).unwrap());
+
+    stop_and_wait(&coordinator).await;
+
+    assert!(
+        runtime.outputs.lock().unwrap().is_empty(),
+        "a silent capture must settle empty instead of the command's output"
+    );
 }
 
 #[tokio::test]

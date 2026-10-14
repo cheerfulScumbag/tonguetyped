@@ -951,6 +951,83 @@ fn pty_text_processing_screen_toggles_passes_and_persists_replacements() {
 }
 
 #[test]
+fn pty_text_processing_screen_round_trips_replacement_separator_and_backslash() {
+    let sandbox = Sandbox::new("text-processing-round-trip");
+    // A hand-written table whose value contains the form's own separator (`;`)
+    // and whose key contains a backslash - the exact shapes the escaped
+    // single-line form exists to protect. Applying an unrelated screen save
+    // must not silently rewrite them.
+    sandbox.write_config("[text.replacements]\n\"a\" = \"x; b => y\"\n\"c\\\\d\" = \"\\\\;\"\n");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // Enter on the Replacements row (the default selection) applies and saves
+    // the whole form without changing it.
+    session.send(KEY_ENTER);
+    session.wait_for("Text processing saved.", Duration::from_secs(3));
+
+    let contents = sandbox.config_contents();
+    assert!(
+        contents.contains("x; b => y"),
+        "a value containing ';' must round-trip intact:\n{contents}"
+    );
+    assert!(
+        contents.contains(r"c\d") && contents.contains(r"\;"),
+        "a key with a backslash and a value of '\\;' must round-trip intact:\n{contents}"
+    );
+    session.send(KEY_ESC);
+    session.wait_for("> Text processing", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_text_processing_screen_rejects_invalid_input_without_saving() {
+    let sandbox = Sandbox::new("text-processing-invalid");
+    sandbox.write_config("");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // A replacement entry without the '=>' arrow is rejected, and nothing is
+    // saved.
+    session.send(b"no arrow here");
+    session.send(KEY_ENTER);
+    let error = session.wait_for("Each replacement must be", Duration::from_secs(3));
+    assert!(error.contains("from => to"), "{error}");
+    assert!(!sandbox.config_contents().contains("no arrow here"));
+
+    session.send(KEY_ESC); // discard the bad form and return home
+    session.wait_for("> Text processing", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // A zero cleanup timeout is rejected as well.
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.send(KEY_BACKSPACE);
+    session.send(KEY_BACKSPACE);
+    session.send(b"0");
+    session.send(KEY_ENTER);
+    let error = session.wait_for("Timeout must be at least 1 second", Duration::from_secs(3));
+    assert!(error.contains("Timeout"), "{error}");
+    assert!(!sandbox
+        .config_contents()
+        .contains("post_process_timeout_seconds = 0"));
+
+    session.send(KEY_ESC);
+    session.wait_for("> Text processing", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_history_retention_setting_persists_both_limits() {
     let sandbox = Sandbox::new("retention-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);

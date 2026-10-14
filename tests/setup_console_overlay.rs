@@ -379,6 +379,62 @@ fn pty_history_retention_and_transcript_folder_steps_persist_their_inputs() {
 }
 
 #[test]
+fn pty_text_processing_step_persists_replacements_and_passes() {
+    let sandbox = Sandbox::new("text-processing");
+    let mut session = Session::spawn(&sandbox, 100, 36);
+
+    session.wait_for("Speech model", Duration::from_secs(10));
+    session.send(KEY_ENTER); // Model -> Inference backend
+    session.wait_for("Inference backend", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Translation
+    session.wait_for("Translate speech into English", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Decoding
+    session.wait_for("Vocabulary prompt", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Text processing
+
+    let text = session.wait_for("Text processing", Duration::from_secs(5));
+    assert!(
+        text.contains("Replacements")
+            && text.contains("Cleanup command")
+            && text.contains("Timeout"),
+        "the text-processing step should show each field:\n{text}"
+    );
+    // Type a replacement into the (selected) first field, then Enter saves the
+    // step and advances to the passes list.
+    session.send(b"vox type => Voxtype");
+    session.send(KEY_ENTER);
+
+    let passes = session.wait_for("Text passes", Duration::from_secs(5));
+    assert!(
+        passes.contains("Spoken punctuation and filler removal"),
+        "the passes step should offer the combined choice:\n{passes}"
+    );
+    for _ in 0..3 {
+        session.send(KEY_DOWN);
+    }
+    session.send(KEY_ENTER); // both passes -> Microphone
+    session.wait_for("Microphone", Duration::from_secs(5));
+
+    advance_from_microphone_to_overlay_enabled(&mut session);
+    session.wait_for("Overlay", Duration::from_secs(5));
+    session.send(KEY_UP); // Disabled -> skip straight to Review
+    session.send(KEY_ENTER);
+
+    let confirm = session.wait_for("Write this configuration?", Duration::from_secs(5));
+    assert!(
+        confirm.contains("1 replacement, spoken punctuation, filler removal"),
+        "review should summarize the text settings:\n{confirm}"
+    );
+    session.send(KEY_ENTER); // save
+    session.wait_for_exit(Duration::from_secs(5));
+
+    let config = sandbox.config_contents();
+    assert!(config.contains("\"vox type\" = \"Voxtype\""), "{config}");
+    assert!(config.contains("spoken_punctuation = true"), "{config}");
+    assert!(config.contains("remove_fillers = true"), "{config}");
+}
+
+#[test]
 fn pty_translation_and_decoding_steps_persist_their_inputs() {
     let sandbox = Sandbox::new("decoding");
     let mut session = Session::spawn(&sandbox, 100, 32);
