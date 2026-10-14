@@ -1107,6 +1107,49 @@ fn pty_shortcut_screen_offers_the_system_dialog_and_reports_portal_failures_inli
 }
 
 #[test]
+fn pty_text_processing_toggle_does_not_stick_after_a_failed_save() {
+    let sandbox = Sandbox::new("text-processing-toggle-revert");
+    sandbox.write_config("");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // Leave an invalid replacement in the form, then press Enter on the Spoken
+    // punctuation row: the whole form fails to apply, so the toggle flip must
+    // not stick.
+    session.send(b"no arrow here");
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    let error = session.wait_for("Each replacement must be", Duration::from_secs(3));
+    assert!(error.contains("from => to"), "{error}");
+    assert!(!sandbox
+        .config_contents()
+        .contains("spoken_punctuation = true"));
+
+    // Clear the bad replacement, then Enter on the same toggle row again. A
+    // stale flip from the failed save would turn spoken punctuation back off
+    // here; the correct behavior is that this Enter turns it on and saves it.
+    session.send(KEY_UP);
+    for _ in 0.."no arrow here".len() {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    wait_for_config(
+        &sandbox,
+        "spoken_punctuation = true",
+        Duration::from_secs(3),
+    );
+
+    session.send(KEY_ESC);
+    session.wait_for("> Text processing", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_microphone_screen_lists_devices_with_a_level_panel() {
     let sandbox = Sandbox::new("microphone-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);

@@ -217,7 +217,9 @@ fn apply_edits(tokens: &[Token], edits: &[Edit]) -> String {
             if matches!(edit.attach, Attach::Right | Attach::Both) {
                 while index < tokens.len() {
                     match &tokens[index] {
-                        Token::Sep(sep) if is_all_whitespace(sep) => index += 1,
+                        Token::Sep(sep) if is_all_whitespace(sep) && !sep.contains('\n') => {
+                            index += 1
+                        }
                         _ => break,
                     }
                 }
@@ -581,6 +583,14 @@ mod tests {
             post_process("hello comma world", &config, "en"),
             "hello comma world"
         );
+    }
+
+    #[test]
+    fn spoken_punctuation_never_eats_a_line_break() {
+        let mut config = config();
+        config.spoken_punctuation = true;
+        assert_eq!(post_process("open paren\nfoo", &config, "en"), "(\nfoo");
+        assert_eq!(post_process("a equals\nb", &config, "en"), "a=\nb");
     }
 
     #[test]

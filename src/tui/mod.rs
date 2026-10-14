@@ -735,17 +735,18 @@ impl App {
             return;
         }
         if key.code == KeyCode::Enter {
-            if let Screen::TextProcessing(screen) = &mut self.screen {
-                screen.toggle_selected();
-            }
-            let result = match &self.screen {
-                Screen::TextProcessing(screen) => screen.apply(&mut self.config),
-                _ => return,
+            let Screen::TextProcessing(screen) = &mut self.screen else {
+                return;
             };
-            let saved = result.is_ok();
-            if let Screen::TextProcessing(screen) = &mut self.screen {
-                screen.result = Some(result);
+            let previous = (screen.spoken_punctuation, screen.remove_fillers);
+            screen.toggle_selected();
+            let result = screen.apply(&mut self.config);
+            if result.is_err() {
+                screen.spoken_punctuation = previous.0;
+                screen.remove_fillers = previous.1;
             }
+            let saved = result.is_ok();
+            screen.result = Some(result);
             if saved {
                 self.save_settings_config();
             }

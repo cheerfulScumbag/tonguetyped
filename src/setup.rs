@@ -595,7 +595,7 @@ fn configure(
     let mut text = config.text.clone();
     loop {
         let prompt = format!(
-            "Replacements ('from {} to', separated by '{}'; escape '{}' and '\\' with '\\')",
+            "Replacements ('from {} to', separated by '{}'; escape '{}' and '\\' with '\\'; empty keeps, 'none' clears)",
             crate::config::REPLACEMENT_ARROW,
             crate::config::REPLACEMENT_ENTRY_SEPARATOR,
             crate::config::REPLACEMENT_ENTRY_SEPARATOR
@@ -605,7 +605,7 @@ fn configure(
             output,
             &prompt,
             &text.replacements_form_value(),
-            "none",
+            "(none)",
         )?
         else {
             return Ok(SetupOutcome::Cancelled);
@@ -640,9 +640,9 @@ fn configure(
     let Some(command) = ask_text(
         input,
         output,
-        "Cleanup command for the transcript (empty for none)",
+        "Cleanup command for the transcript (empty keeps, 'none' clears)",
         text.post_process_command.trim(),
-        "none",
+        "(none)",
     )?
     else {
         return Ok(SetupOutcome::Cancelled);
@@ -808,7 +808,8 @@ fn read_answer(input: &mut impl BufRead) -> io::Result<Option<String>> {
 }
 
 /// Prompts for one line of free text, showing `current` (or `empty_label`
-/// when it is empty) and keeping `current` on an empty answer. `None` means
+/// when it is empty). An empty answer keeps `current`, the case-insensitive
+/// word `none` clears it, and anything else replaces it. `None` means
 /// end-of-input or a cancel, which aborts setup.
 fn ask_text(
     input: &mut impl BufRead,
@@ -832,6 +833,8 @@ fn ask_text(
     }
     if answer.is_empty() {
         Ok(Some(current.to_string()))
+    } else if answer.eq_ignore_ascii_case("none") {
+        Ok(Some(String::new()))
     } else {
         Ok(Some(answer))
     }

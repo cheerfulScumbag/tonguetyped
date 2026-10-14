@@ -277,6 +277,49 @@ fn setup_on_a_wlroots_compositor_names_wtype() {
 }
 
 #[test]
+fn setup_clears_a_configured_command_and_replacements_with_none() {
+    let root = root("clear-none");
+    let directory = root.join("tonguetyped");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("config.toml"),
+        "[text]\npost_process_command = \"my-cleaner\"\npost_process_timeout_seconds = 7\n\n[text.replacements]\n\"vox type\" = \"Voxtype\"\n",
+    )
+    .unwrap();
+
+    // Model, microphone, activation, transcript output, then 'none' at the
+    // Replacements and Cleanup command prompts clears both; the empty timeout
+    // answer keeps 7; startup and the final confirm take their defaults.
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "", "none", "", "", "none", "", "", ""]),
+        None,
+        "KDE",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = std::fs::read_to_string(directory.join("config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert_eq!(
+        config.text.post_process_command, "",
+        "'none' must clear the cleanup command"
+    );
+    assert!(
+        config.text.replacements.is_empty(),
+        "'none' must clear the replacement table"
+    );
+    assert_eq!(
+        config.text.post_process_timeout_seconds, 7,
+        "an empty answer must keep the configured timeout"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cancellation_preserves_the_existing_file_byte_for_byte() {
     let root = root("cancel");
     let directory = root.join("tonguetyped");
