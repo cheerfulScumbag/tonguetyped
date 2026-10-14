@@ -242,9 +242,9 @@ tonguetyped
 
 The dashboard opens on a settings overview - one row each for Model, Inference
 backend, Translation, Decoding, Microphone, Activation, Shortcut, Transcript
-output, Typing backend, Transcript folder, History retention, Startup, and
-Overlay - above a list of the remaining commands. Selecting a row opens a
-screen that edits just that area, with the same live microphone preview and
+output, Typing backend, Transcript folder, History retention, Startup, Overlay,
+and Media pause - above a list of the remaining commands. Selecting a row opens
+a screen that edits just that area, with the same live microphone preview and
 shortcut dialog the setup wizard uses.
 
 ### Commands
@@ -258,6 +258,7 @@ shortcut dialog the setup wizard uses.
 | `tonguetyped start` / `stop` / `toggle` | Control recording |
 | `tonguetyped cancel` | Cancel recording or discard in-flight processing |
 | `tonguetyped status` | Show daemon state, activation mode, and shortcut health |
+| `tonguetyped status --format json [--follow] [--extended]` | Machine-readable status for status bars |
 | `tonguetyped reload` | Validate and reload the configuration |
 | `tonguetyped last-result` | Print the most recent transcription |
 | `tonguetyped doctor` | Check runtime dependencies, mic, model, and backends |
@@ -313,6 +314,53 @@ bind=SUPER,s,spawn,tonguetyped toggle
 Because the key runs the command directly, this is effectively
 press-to-toggle regardless of the `activation.mode` setting; the portal's
 hold/toggle distinction only applies to the desktop shortcut above.
+
+### Status bars
+
+`tonguetyped status --format json` prints the daemon state as one JSON object
+in the shape Waybar's custom modules read. Add `--follow` to keep running and
+print a new line each time the state changes; a daemon that stops or restarts
+shows as `stopped` and is picked up again when it comes back, so the stream
+never ends while the bar runs.
+
+```json
+{"text":"recording","alt":"recording","class":"recording","tooltip":"TongueTyped: recording"}
+```
+
+The state is `idle`, `recording`, `processing`, or `stopped`, repeated in
+`text`, `alt` and `class` so you can show it as text, map it to an icon, or
+style it. `--extended` adds `model`, `backend`, `device` and `build` fields and
+lists them in the tooltip.
+
+```jsonc
+// Waybar (config.jsonc)
+"custom/tonguetyped": {
+    "exec": "tonguetyped status --format json --follow",
+    "return-type": "json",
+    "format": "{icon}",
+    "format-icons": {
+        "idle": "",
+        "recording": "●",
+        "processing": "…",
+        "stopped": ""
+    },
+    "on-click": "tonguetyped toggle"
+}
+```
+
+### Pausing media while dictating
+
+Set `audio.pause_media = true` (or pick it on the dashboard's Media pause
+screen) to pause music and videos while you dictate. When a recording starts,
+every MPRIS media player that is playing is paused; when the recording ends,
+whether stopped, cancelled, or failed, those same players are resumed. A
+player you stopped yourself in the meantime is left alone. It is off by
+default.
+
+```toml
+[audio]
+pause_media = true
+```
 
 ### Overlay
 

@@ -1,7 +1,10 @@
 use clap::Parser;
-use tonguetyped::cli::{AutostartCommand, Cli, Commands, DaemonCommand, ModelCommand};
+use tonguetyped::cli::{
+    AutostartCommand, Cli, Commands, DaemonCommand, ModelCommand, StatusFormat,
+};
 use tonguetyped::{
-    activation, autostart, catalog, commands, config, daemon, doctor, ipc, model, setup, tui,
+    activation, autostart, catalog, commands, config, daemon, doctor, ipc, model, setup, status,
+    tui,
 };
 
 #[tokio::main]
@@ -57,9 +60,26 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Cancel) => {
             send_command(ipc::Request::Cancel).await?;
         }
-        Some(Commands::Status) => {
+        Some(Commands::Status {
+            format: StatusFormat::Text,
+            follow,
+            extended,
+        }) => {
+            if follow || extended {
+                anyhow::bail!("--follow and --extended require --format json");
+            }
             send_command(ipc::Request::Status).await?;
         }
+        Some(Commands::Status {
+            format: StatusFormat::Json,
+            follow: false,
+            extended,
+        }) => status::print_json(extended).await?,
+        Some(Commands::Status {
+            format: StatusFormat::Json,
+            follow: true,
+            extended,
+        }) => status::follow_json(extended).await?,
         Some(Commands::Doctor { test_type }) => {
             if test_type {
                 let config = config::Config::load()?;

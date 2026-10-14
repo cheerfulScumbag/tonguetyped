@@ -335,6 +335,7 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
             shortcut_status,
             activation_error,
             build,
+            ..
         } => {
             let mut lines = vec![
                 line(format!("state:            {state}")),

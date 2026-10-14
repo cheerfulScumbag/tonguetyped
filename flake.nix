@@ -81,6 +81,9 @@
 
               buildFeatures = [ feature ];
 
+              # `tests/media_pause.rs` starts a private `dbus-daemon`.
+              nativeCheckInputs = [ pkgs.dbus ];
+
               # `tests/tui_dashboard.rs`'s `pty_*`-prefixed tests allocate a real
               # pseudo-terminal and spawn the built binary into it
               # (`portable-pty`); the Nix build sandbox's `checkPhase` has no

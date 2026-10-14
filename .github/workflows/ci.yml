@@ -35,6 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # dbus provides the private dbus-daemon tests/media_pause.rs runs.
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxdo-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxdo-dev cmake dbus
       - run: cargo test

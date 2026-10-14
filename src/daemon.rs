@@ -311,14 +311,25 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             operation_error,
             shortcut_status,
             activation_error,
-        } => Response::Status {
-            state,
-            activation_mode,
-            operation_error,
-            shortcut_status,
-            activation_error,
-            build: Some(crate::build_info::VERSION.to_string()),
-        },
+            model,
+            backend,
+        } => {
+            let (backend, device) = match backend {
+                Some(info) => (Some(info.backend), Some(info.device)),
+                None => (None, None),
+            };
+            Response::Status {
+                state,
+                activation_mode,
+                operation_error,
+                shortcut_status,
+                activation_error,
+                build: Some(crate::build_info::VERSION.to_string()),
+                model: Some(model),
+                backend,
+                device,
+            }
+        }
     }
 }
 

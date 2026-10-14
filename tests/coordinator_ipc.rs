@@ -41,6 +41,16 @@ struct TestRuntime {
     idle_policy_started: (Mutex<bool>, Condvar),
     second_idle_policy_started: (Mutex<bool>, Condvar),
     idle_policy_gate: (Mutex<bool>, Condvar),
+    media_events: Arc<Mutex<Vec<&'static str>>>,
+}
+
+/// Records the resume half of `TestRuntime::pause_media`.
+struct TestMediaPause(Arc<Mutex<Vec<&'static str>>>);
+
+impl Drop for TestMediaPause {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().push("resume");
+    }
 }
 
 impl TestRuntime {
@@ -257,6 +267,11 @@ impl CoordinatorRuntime for TestRuntime {
         Ok(())
     }
 
+    fn pause_media(&self) -> Box<dyn Send> {
+        self.media_events.lock().unwrap().push("pause");
+        Box::new(TestMediaPause(self.media_events.clone()))
+    }
+
     fn apply_idle_unload_policy(
         &self,
         config: &Config,
@@ -402,6 +417,13 @@ fn coordinator(runtime: Arc<TestRuntime>, max_seconds: u64) -> Arc<Coordinator> 
     let mut config = Config::default();
     config.history.enabled = false;
     config.transcription.max_recording_seconds = max_seconds;
+    Arc::new(Coordinator::with_runtime(config, runtime).unwrap())
+}
+
+fn coordinator_pausing_media(runtime: Arc<TestRuntime>) -> Arc<Coordinator> {
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.audio.pause_media = true;
     Arc::new(Coordinator::with_runtime(config, runtime).unwrap())
 }
 
@@ -1792,4 +1814,74 @@ async fn whitespace_transcript_is_not_published() {
 
     assert!(runtime.outputs.lock().unwrap().is_empty());
     assert!(coordinator.get_last_result().is_none());
+}
+
+async fn wait_for_media_events(runtime: &TestRuntime, expected: &[&str]) {
+    for _ in 0..300 {
+        if *runtime.media_events.lock().unwrap() == expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "expected media events {expected:?}, got {:?}",
+        runtime.media_events.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn media_is_not_paused_by_default() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator(runtime.clone(), 2);
+
+    stop_and_wait(&coordinator).await;
+
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 1);
+    assert!(runtime.media_events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paused_media_resumes_when_recording_stops_before_transcription() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_transcription.store(true, Ordering::SeqCst);
+    let _release = TranscriptionReleaseGuard(runtime.clone());
+    let coordinator = coordinator_pausing_media(runtime.clone());
+
+    dispatch(&coordinator, Request::Start).await;
+    wait_for_media_events(&runtime, &["pause"]).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert_eq!(*runtime.media_events.lock().unwrap(), ["pause"]);
+
+    dispatch(&coordinator, Request::Stop).await;
+    wait_for_flag(&runtime.transcription_started).await;
+    assert_eq!(*runtime.media_events.lock().unwrap(), ["pause", "resume"]);
+    runtime.release_transcription();
+    wait_for_state(&coordinator, "idle").await;
+}
+
+#[tokio::test]
+async fn paused_media_resumes_when_recording_is_cancelled() {
+    let runtime = Arc::new(TestRuntime::default());
+    let coordinator = coordinator_pausing_media(runtime.clone());
+
+    dispatch(&coordinator, Request::Start).await;
+    wait_for_media_events(&runtime, &["pause"]).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Cancel).await,
+        Response::Cancelled
+    ));
+    wait_for_media_events(&runtime, &["pause", "resume"]).await;
+}
+
+#[tokio::test]
+async fn paused_media_resumes_when_recording_fails() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.microphone_error.store(true, Ordering::SeqCst);
+    let coordinator = coordinator_pausing_media(runtime.clone());
+
+    dispatch(&coordinator, Request::Start).await;
+    wait_for_media_events(&runtime, &["pause"]).await;
+    runtime.release_microphone_error();
+    wait_for_state(&coordinator, "idle").await;
+    wait_for_media_events(&runtime, &["pause", "resume"]).await;
 }

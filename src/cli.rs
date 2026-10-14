@@ -4,7 +4,7 @@
 //! maintaining a second, driftable copy of each command's name/description
 //! for the dashboard's first page.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -38,7 +38,20 @@ pub enum Commands {
     /// Cancel current recording or processing
     Cancel,
     /// Get daemon status
-    Status,
+    Status {
+        /// Output format; `json` prints one object per line for status bars
+        /// such as Waybar, and reports a stopped daemon instead of failing
+        #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
+        format: StatusFormat,
+        /// Keep running and print a new line each time the status changes
+        /// (requires `--format json`)
+        #[arg(long)]
+        follow: bool,
+        /// Also report the model, inference backend, device, and daemon build
+        /// (requires `--format json`)
+        #[arg(long)]
+        extended: bool,
+    },
     /// Reload daemon configuration
     Reload,
     /// Return the most recent transcription
@@ -95,4 +108,12 @@ pub enum AutostartCommand {
     Enable,
     /// Stop starting TongueTyped automatically
     Disable,
+}
+
+#[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StatusFormat {
+    /// The human-readable status report
+    Text,
+    /// One JSON object per line, in Waybar's custom-module format
+    Json,
 }

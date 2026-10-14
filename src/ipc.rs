@@ -40,6 +40,17 @@ pub enum Response {
         /// older build than any client that knows about the field.
         #[serde(default)]
         build: Option<String>,
+        /// The daemon's configured model id. `None` from a daemon that
+        /// predates reporting it, like `build`.
+        #[serde(default)]
+        model: Option<String>,
+        /// The inference backend the daemon's configuration resolves to,
+        /// e.g. `transcribe.cpp/vulkan`. `None` from an older daemon.
+        #[serde(default)]
+        backend: Option<String>,
+        /// The device that backend runs on. `None` from an older daemon.
+        #[serde(default)]
+        device: Option<String>,
     },
     LastResult {
         text: String,
