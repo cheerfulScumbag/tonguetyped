@@ -186,20 +186,27 @@ impl DownloadManager {
     }
 
     pub async fn ensure_vad_model(&self) -> anyhow::Result<PathBuf> {
-        let path = crate::inference::InferenceEngine::models_dir()?.join("silero_vad_v4.onnx");
-        if path.exists() {
-            return Ok(path);
-        }
-        let temporary = path.with_extension("download");
-        let response = self
-            .client
-            .get("https://raw.githubusercontent.com/cjpais/Handy/8f9cf53cd1410cda26beea39ff802ac306e39585/src-tauri/resources/models/silero_vad_v4.onnx")
-            .send()
-            .await?
-            .error_for_status()?;
-        let bytes = response.bytes().await?;
-        tokio::fs::write(&temporary, bytes).await?;
-        tokio::fs::rename(&temporary, &path).await?;
+        let vad = &crate::catalog::VAD_MODEL;
+        let path = crate::inference::InferenceEngine::models_dir()?.join(vad.filename);
+        self.fetch_pinned(vad, &path).await
+    }
+
+    /// Downloads a `PinnedFile`, rejecting it unless its SHA-256 matches the pin.
+    async fn fetch_pinned(
+        &self,
+        file: &crate::catalog::PinnedFile,
+        dest_path: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let (path, _) = self
+            .fetch_verified(
+                file.url,
+                dest_path,
+                file.size_bytes,
+                file.sha256,
+                file.filename,
+                None,
+            )
+            .await?;
         Ok(path)
     }
 }
@@ -430,6 +437,51 @@ mod tests {
         assert!(result.is_err());
         assert!(!dest.exists());
         assert!(!dest.with_extension("download").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupted_vad_download_is_rejected() {
+        let vad = crate::catalog::VAD_MODEL;
+        let body = vec![0_u8; vad.size_bytes as usize];
+        let url = spawn_server(body, true).await;
+        let url: &'static str = format!("{url}/file").leak();
+        let pin = crate::catalog::PinnedFile { url, ..vad };
+
+        let root = models_root("vad-corrupt");
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join(vad.filename);
+
+        let manager = DownloadManager::new().unwrap();
+        let error = manager.fetch_pinned(&pin, &dest).await.unwrap_err();
+
+        assert!(error.to_string().contains("SHA-256 verification"));
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("download").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn matching_pinned_download_is_accepted() {
+        let body = b"pinned vad model bytes".to_vec();
+        let sha256: &'static str = sha256_hex(&body).leak();
+        let url: &'static str = format!("{}/file", spawn_server(body.clone(), true).await).leak();
+        let pin = crate::catalog::PinnedFile {
+            url,
+            filename: "vad.onnx",
+            size_bytes: body.len() as u64,
+            sha256,
+        };
+
+        let root = models_root("vad-ok");
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join(pin.filename);
+
+        let manager = DownloadManager::new().unwrap();
+        let path = manager.fetch_pinned(&pin, &dest).await.unwrap();
+
+        assert_eq!(path, dest);
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
         std::fs::remove_dir_all(root).unwrap();
     }
 

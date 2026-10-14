@@ -1050,6 +1050,24 @@ pub const ENTRIES: &[CatalogModel] = &[
 /// `small` family, a comparable quantization) to the legacy CPU-only build's
 /// `whisper-small-q5_1` default that `config::migrate_legacy_model_config`
 /// maps pre-consolidation configs onto.
+/// A single pinned, integrity-checked download outside the speech-model catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinnedFile {
+    pub url: &'static str,
+    pub filename: &'static str,
+    pub size_bytes: u64,
+    /// Lowercase hex SHA-256 of the file contents at `url`.
+    pub sha256: &'static str,
+}
+
+/// Silero VAD v4, pinned to a Handy commit and verified like catalog entries.
+pub const VAD_MODEL: PinnedFile = PinnedFile {
+    url: "https://raw.githubusercontent.com/cjpais/Handy/8f9cf53cd1410cda26beea39ff802ac306e39585/src-tauri/resources/models/silero_vad_v4.onnx",
+    filename: "silero_vad_v4.onnx",
+    size_bytes: 1807522,
+    sha256: "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28",
+};
+
 pub const DEFAULT_MODEL_ID: &str = "whisper-small-q5_k_m";
 
 pub fn find(id: &str) -> Option<&'static CatalogModel> {
