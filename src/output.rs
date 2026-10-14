@@ -9,9 +9,11 @@ use std::time::Duration;
 /// keys, so an Enter sent straight away can submit before the text arrives.
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 
-/// Where a transcript ended up. Every variant except an `Err` from
-/// `output_text` means the user can still reach the text outside
-/// TongueTyped's own history.
+/// Where a transcript ended up. `Kept` holds the transcript in TongueTyped
+/// only; every other variant puts it somewhere the user can reach outside
+/// TongueTyped's own history. An `Err` from `output_text` means neither
+/// insertion nor clipboard copy succeeded, though the text is still in the
+/// history and `last-result`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
     /// `none` mode: the transcript stays in TongueTyped only.
