@@ -1,0 +1,203 @@
+# The `programs.tonguetyped` options shared by the NixOS and home-manager
+# modules. Only where the package, the daemon, and the settings land differs.
+{ self }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+let
+  inherit (lib) mkOption types;
+  cfg = config.programs.tonguetyped;
+  tomlFormat = pkgs.formats.toml { };
+  system = pkgs.stdenv.hostPlatform.system;
+
+  # Every typed setting defaults to null and is dropped before rendering, so
+  # the app's own default applies to whatever the configuration leaves unset.
+  setting =
+    type: description:
+    mkOption {
+      type = types.nullOr type;
+      default = null;
+      inherit description;
+    };
+  section =
+    description: options:
+    mkOption {
+      type = types.submodule {
+        freeformType = tomlFormat.type;
+        inherit options;
+      };
+      default = { };
+      inherit description;
+    };
+in
+{
+  options.programs.tonguetyped = {
+    enable = lib.mkEnableOption "TongueTyped, the offline Linux dictation daemon";
+
+    backend = mkOption {
+      type = types.enum [
+        "vulkan"
+        "cuda"
+        "rocm"
+      ];
+      default = "vulkan";
+      description = ''
+        GPU backend the package is built with. Every build also carries the
+        CPU fallback. `cuda` and `rocm` are available on x86_64-linux only.
+      '';
+    };
+
+    package = mkOption {
+      type = types.package;
+      default =
+        self.packages.${system}."gpu-${cfg.backend}"
+          or (throw "programs.tonguetyped: the ${cfg.backend} backend is not packaged for ${system}");
+      defaultText = lib.literalExpression ''tonguetyped.packages.''${system}."gpu-''${backend}"'';
+      description = "The TongueTyped package. Defaults to the build for `backend`.";
+    };
+
+    autostart = mkOption {
+      type = types.enum [
+        "systemd"
+        "xdg"
+        "none"
+      ];
+      default = "systemd";
+      description = ''
+        How the daemon starts with the desktop session.
+
+        - `systemd`: a `tonguetyped.service` user unit bound to
+          `graphical-session.target`. Needs a session that starts that target
+          (KDE, GNOME, and compositors launched through systemd or uwsm).
+        - `xdg`: a `tonguetyped.desktop` XDG autostart entry, for desktops that
+          run autostart entries but not `graphical-session.target`.
+        - `none`: start it yourself, for example with `exec-once` in a
+          compositor configuration.
+
+        Do not also run `tonguetyped autostart enable`; that writes a second
+        autostart entry.
+      '';
+    };
+
+    settings = mkOption {
+      type = types.submodule {
+        freeformType = tomlFormat.type;
+        options = {
+          activation = section "The `[activation]` table." {
+            mode = setting (types.enum [
+              "hold"
+              "toggle"
+            ]) "Hold the shortcut while speaking, or press once to start and again to stop.";
+          };
+          model = section "The `[model]` table." {
+            active_model = setting types.str "Catalog id of the GGUF model to load (see `tonguetyped model list`).";
+            preferred_backend = setting (types.enum [
+              "auto"
+              "cpu"
+              "vulkan"
+              "cuda"
+              "rocm"
+              "metal"
+            ]) "Inference backend. `auto` tries each built-in accelerator, then the CPU.";
+            idle_unload = section "The `[model.idle_unload]` table." {
+              policy = setting (types.enum [
+                "never"
+                "after_transcription"
+                "after_idle"
+              ]) "When the loaded model is freed.";
+              timeout_minutes = setting types.ints.unsigned "Idle minutes before unloading, for `after_idle`.";
+            };
+          };
+          audio = section "The `[audio]` table." {
+            microphone = setting types.str "ALSA input device name, or `default`.";
+            feedback_sounds = setting types.bool "Play a sound on recording start and stop.";
+            feedback_volume = setting (types.numbers.between 0 1) "Feedback sound volume, from 0 to 1.";
+            feedback_device = setting types.str "Output device for feedback sounds, or `default`.";
+          };
+          output = section "The `[output]` table." {
+            method = setting (types.enum [
+              "none"
+              "type"
+            ]) "`type` types transcripts into the focused application; `none` only stores them.";
+            typing_backend = setting (types.enum [
+              "auto"
+              "wtype"
+              "enigo"
+              "dotool"
+            ]) "Which helper types the transcript.";
+            auto_submit = setting types.bool "Press Enter after typing. Requires `method = \"type\"`.";
+          };
+          transcription = section "The `[transcription]` table." {
+            vad_enabled = setting types.bool "Trim silence with voice activity detection.";
+            language = setting types.str "Spoken language code, or `auto` to detect it.";
+            trailing_space = setting types.bool "Append a space after each transcript.";
+            max_recording_seconds = setting types.ints.positive "Longest single recording.";
+          };
+          history = section "The `[history]` table." {
+            enabled = setting types.bool "Keep transcripts in the local history database.";
+            max_entries = setting types.ints.unsigned "Entries to keep. 0 means no limit.";
+            max_age_days = setting types.ints.unsigned "Days to keep entries. 0 means no limit.";
+            transcript_folder = setting types.str "Also write each transcript to this folder. Empty disables it.";
+          };
+          overlay = section "The `[overlay]` table." {
+            enabled = setting types.bool "Show the on-screen recording overlay.";
+            position = setting (types.enum [
+              "top-left"
+              "top"
+              "top-right"
+              "center"
+              "bottom-left"
+              "bottom"
+              "bottom-right"
+            ]) "Overlay position. Ignored by the `border` and `half-circle` styles.";
+            style = setting (types.enum [
+              "badge"
+              "minimal"
+              "pill"
+              "blob"
+              "border"
+              "half-circle"
+              "long-pill"
+            ]) "Overlay look.";
+            monitor = setting types.str "`all`, or one output name from `tonguetyped doctor`.";
+            live_waveform = setting types.bool "Show the live microphone waveform instead of a pulsing dot.";
+          };
+        };
+      };
+      default = { };
+      example = lib.literalExpression ''
+        {
+          activation.mode = "toggle";
+          model.active_model = "whisper-small-q5_k_m";
+          output = {
+            method = "type";
+            auto_submit = false;
+          };
+          overlay.style = "pill";
+        }
+      '';
+      description = ''
+        TongueTyped settings, written into
+        `$XDG_CONFIG_HOME/tonguetyped/config.toml`. See the Configuration
+        section of the README for every key.
+
+        The file stays writable. Keys set here are merged over it and win;
+        keys left unset keep whatever the file holds, so the dashboard and
+        `tonguetyped setup` can still change them. Removing a key here leaves
+        its last written value in place.
+      '';
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !(cfg.settings.output.method == "none" && cfg.settings.output.auto_submit == true);
+        message = ''programs.tonguetyped.settings.output.auto_submit requires output.method = "type".'';
+      }
+    ];
+  };
+}
