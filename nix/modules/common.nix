@@ -116,6 +116,7 @@ in
             feedback_sounds = setting types.bool "Play a sound on recording start and stop.";
             feedback_volume = setting (types.numbers.between 0 1) "Feedback sound volume, from 0 to 1.";
             feedback_device = setting types.str "Output device for feedback sounds, or `default`.";
+            pause_media = setting types.bool "Pause playing media while recording and resume it when done. Off by default.";
           };
           output = section "The `[output]` table." {
             method = setting (types.enum [
