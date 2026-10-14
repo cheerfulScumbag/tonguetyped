@@ -145,6 +145,9 @@ pub struct ModelRow {
     pub quant: &'static str,
     pub size_bytes: u64,
     pub license_spdx: &'static str,
+    /// The entry's family, language coverage, and long-form behavior, shared
+    /// with the model list and dashboard so both label models the same way.
+    pub info: &'static crate::catalog::VariantInfo,
     pub installed: bool,
     pub active: bool,
 }
@@ -158,6 +161,7 @@ pub fn model_rows(config: &Config) -> Vec<ModelRow> {
             quant: entry.quant,
             size_bytes: entry.size_bytes,
             license_spdx: entry.license_spdx,
+            info: entry.info(),
             installed: crate::catalog::is_installed(entry.id),
             active: entry.id == config.model.active_model,
         })

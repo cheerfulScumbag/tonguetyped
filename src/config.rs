@@ -984,6 +984,24 @@ impl Config {
         {
             anyhow::bail!("max_recording_seconds is too large");
         }
+        // The pipeline hands the model one VAD-filtered buffer, so a family
+        // that rejects over-length input (canary, cohere) needs the configured
+        // recording cap to stay within that family's single-buffer limit. Every
+        // catalog entry has `VariantInfo` (see `catalog::VARIANTS`), so this
+        // reads the model's own limit rather than assuming whisper.
+        let entry = crate::catalog::find(&self.model.active_model)
+            .expect("the catalog check above already accepted this id");
+        if let crate::catalog::LongForm::HardCap { cap_seconds } = entry.info().long_form {
+            if self.transcription.max_recording_seconds > u64::from(cap_seconds) {
+                anyhow::bail!(
+                    "the active model {} accepts at most {cap_seconds}s of audio per call, but \
+                     transcription.max_recording_seconds is {}; select a model that accepts longer \
+                     recordings or lower the recording limit",
+                    self.model.active_model,
+                    self.transcription.max_recording_seconds,
+                );
+            }
+        }
         self.transcription.validate_decoding()?;
         if self.model.idle_unload.policy == IdleUnloadPolicy::AfterIdle {
             let seconds = self
@@ -1298,6 +1316,24 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.model.active_model = "whisper-tiny-q5_k_m".to_string();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_a_recording_limit_above_a_hard_cap_models_input_window() {
+        let mut config = Config::default();
+        config.model.active_model = "canary-1b-v2-f16".to_string();
+        config.transcription.max_recording_seconds = 500;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("accepts at most 400s"), "{error}");
+        assert!(error.contains("canary-1b-v2-f16"), "{error}");
+
+        // At the cap it validates, and a no-practical-limit family is unaffected.
+        config.transcription.max_recording_seconds = 400;
+        config.validate().unwrap();
+
+        config.model.active_model = "parakeet-tdt-0.6b-v2-f16".to_string();
+        config.transcription.max_recording_seconds = 500;
         config.validate().unwrap();
     }
 

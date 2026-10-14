@@ -146,8 +146,8 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
         ModelCommand::List => {
             let config = config::Config::load()?;
             println!(
-                "{:<32} {:<10} {:>10}  {:<11}  license",
-                "MODEL ID", "QUANT", "SIZE", "STATUS"
+                "{:<32} {:<10} {:>10}  {:<11}  {:<12} {:<14}  license",
+                "MODEL ID", "QUANT", "SIZE", "STATUS", "FAMILY", "LANGUAGES"
             );
             for entry in catalog::ENTRIES {
                 let installed = catalog::is_installed(entry.id);
@@ -156,12 +156,15 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                     (true, false) => "installed",
                     (false, _) => "-",
                 };
+                let info = entry.info();
                 println!(
-                    "{:<32} {:<10} {:>10}  {:<11}  {}",
+                    "{:<32} {:<10} {:>10}  {:<11}  {:<12} {:<14}  {}",
                     entry.id,
                     entry.quant,
                     commands::human_size(entry.size_bytes),
                     status,
+                    info.family_label(),
+                    info.language_summary(),
                     entry.license_spdx,
                 );
             }

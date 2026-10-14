@@ -667,10 +667,16 @@ Vulkan, CUDA, ROCm, and Metal through one Rust binding for transcribe.cpp (the
 backend and never lets the library auto-select, so a fallback never silently
 substitutes a different model or family.
 
-**A curated catalog.** `src/catalog.rs` tracks every reviewed `family =
-"whisper"` GGUF model published by
-[handy-computer](https://huggingface.co/handy-computer), each pinned to a commit
-with an expected byte size and SHA-256.
+**A curated catalog.** `src/catalog.rs` tracks reviewed GGUF models from the
+offline families this project has checked against its VAD-then-single-buffer
+pipeline (whisper, parakeet, moonshine, canary, and cohere), published by
+[handy-computer](https://huggingface.co/handy-computer). Each entry is pinned to
+a commit with an expected byte size and SHA-256, and `tonguetyped model list`
+labels it with its family and language coverage. Families differ in how much
+audio one call accepts: whisper and parakeet take any length, moonshine can
+truncate output past about 48 s, and canary and cohere reject input past about
+400 s, so `Config::validate` keeps `max_recording_seconds` within the active
+model's limit.
 
 **Benchmarking.** `examples/transcribe_benchmark.rs` measures cold load and warm
 inference on a 16 kHz mono WAV:
