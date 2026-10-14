@@ -1,9 +1,28 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// The CLI lives in `src/cli.rs`, a plain library module that depends only on
+// clap, so the build script attaches it with `#[path]` and renders the man
+// pages and shell completions from the exact same definition `--help` shows,
+// instead of a second, driftable copy. `cli.rs` reads its version from
+// `crate::build_info::VERSION`, which the build script has no module for, so
+// the stub below supplies the crate version.
+#[path = "src/cli.rs"]
+#[allow(dead_code, unused_imports)]
+mod cli;
+
+mod build_info {
+    pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+}
+
+use clap::{Command as ClapCommand, CommandFactory};
+use clap_complete::{generate_to, Shell};
+use clap_mangen::Man;
+
 fn main() {
     emit_build_commit();
     link_cuda();
+    generate_dist();
 }
 
 /// Exposes the git commit this binary was built from as
@@ -108,4 +127,79 @@ fn link_cuda() {
         "cargo:rustc-link-arg=-Wl,--push-state,--no-as-needed,-lcudart,-lcublas,-lcuda,--pop-state"
     );
     println!("cargo:rustc-link-arg=-Wl,-rpath,/run/opengl-driver/lib");
+}
+
+/// Renders the man pages and shell completions that the packages and the
+/// release asset bundle carry, into `<target>/[<triple>/]<profile>/dist/`.
+/// That path is exactly what cargo-deb and cargo-generate-rpm call
+/// `target/release` when they remap an asset's `target/release/...` source, so
+/// both packagers and the release workflow find the files in one place.
+///
+/// Only release builds write it: a debug `cargo build` (and `cargo test` /
+/// `cargo clippy`) skips generation so everyday builds leave no artifacts
+/// behind. Set `TONGUETYPED_GEN_DIST=1` to force it for a local dry run.
+fn generate_dist() {
+    let is_release = std::env::var("PROFILE").as_deref() == Ok("release");
+    if !is_release && std::env::var_os("TONGUETYPED_GEN_DIST").is_none() {
+        return;
+    }
+
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    // OUT_DIR is `<target>/[<triple>/]<profile>/build/<pkg>-<hash>/out`; three
+    // ancestors up is the profile directory, whatever the target/triple layout.
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("OUT_DIR always has a profile directory above it")
+        .to_path_buf();
+    let dist_dir = profile_dir.join("dist");
+    let man_dir = dist_dir.join("man");
+    let completion_dir = dist_dir.join("completions");
+    for dir in [&man_dir, &completion_dir] {
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            panic!("failed to create {}: {error}", dir.display());
+        }
+    }
+
+    let mut command = cli::Cli::command();
+    let name = command.get_name().to_string();
+
+    render_man_pages(&command, &name, &man_dir);
+    for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+        if let Err(error) = generate_to(shell, &mut command, &name, &completion_dir) {
+            panic!("failed to generate {shell:?} completions: {error}");
+        }
+    }
+}
+
+/// Writes `<name>.1` plus one page per subcommand (and nested subcommand),
+/// named the way man(1) resolves `man <name>-<sub>`, e.g. `tonguetyped-model`,
+/// `tonguetyped-model-install`.
+fn render_man_pages(command: &ClapCommand, name: &str, man_dir: &Path) {
+    render_man(command, &man_dir.join(format!("{name}.1")));
+    for subcommand in command.get_subcommands() {
+        let sub_name = subcommand.get_name().to_string();
+        if sub_name == "help" {
+            continue;
+        }
+        render_man(subcommand, &man_dir.join(format!("{name}-{sub_name}.1")));
+        for nested in subcommand.get_subcommands() {
+            let nested_name = nested.get_name().to_string();
+            if nested_name == "help" {
+                continue;
+            }
+            render_man(
+                nested,
+                &man_dir.join(format!("{name}-{sub_name}-{nested_name}.1")),
+            );
+        }
+    }
+}
+
+fn render_man(command: &ClapCommand, path: &Path) {
+    let mut file = std::fs::File::create(path)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", path.display()));
+    Man::new(command.clone())
+        .render(&mut file)
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
 }

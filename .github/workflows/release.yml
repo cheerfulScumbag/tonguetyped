@@ -73,22 +73,73 @@ jobs:
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"
           echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-      - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
       - name: Build release binary
         env:
           TRANSCRIBE_CMAKE_ARGS: ${{ matrix.feature == 'gpu-rocm' && '-DAMDGPU_TARGETS=gfx803;gfx900;gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1201' || '' }}
         run: cargo build --locked --release --features "${{ matrix.feature }}"
-      - name: Package Debian archive and binary
+      - name: Package Debian archive, RPM, and binary
         run: |
           version="${RELEASE_TAG#v}"
           mkdir -p release-assets
           cargo deb --locked --no-build --variant "${{ matrix.variant }}" --deb-version "$version"
           cp target/debian/*.deb release-assets/
+          cargo generate-rpm --variant "${{ matrix.variant }}" \
+            --set-metadata "version = \"${version}\"" \
+            -o "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64-${{ matrix.variant }}.rpm"
           cp target/release/tonguetyped "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64-${{ matrix.variant }}"
+      - name: Bundle shell completions and man pages
+        # build.rs writes these to target/release/dist during the release
+        # build; the same files are already inside the .deb and .rpm above.
+        # One bundle is enough - it is identical for every backend.
+        if: matrix.variant == 'gpu-vulkan'
+        run: |
+          bundle="tonguetyped-${RELEASE_TAG}-completions-and-man"
+          mkdir -p "bundle/${bundle}/completions" "bundle/${bundle}/man"
+          cp target/release/dist/completions/* "bundle/${bundle}/completions/"
+          cp target/release/dist/man/*.1 "bundle/${bundle}/man/"
+          tar -C bundle -czf "release-assets/${bundle}.tar.gz" "$bundle"
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux-${{ matrix.variant }}
+          path: release-assets/
+          if-no-files-found: error
+
+  linux-aarch64:
+    name: Linux aarch64 (cpu)
+    # Native arm64 runner: no cross toolchain to maintain. CPU-only - the
+    # CUDA and ROCm backends are x86_64-only, and there is no mainstream
+    # arm64 Vulkan target worth shipping yet. ort/onnxruntime's prebuilt
+    # aarch64-unknown-linux-gnu library is CPU-only and needs glibc 2.38+,
+    # which Ubuntu 24.04 provides.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev pkg-config
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+      - name: Build release binary
+        run: cargo build --locked --release
+      - name: Package Debian archive, RPM, and binary
+        run: |
+          version="${RELEASE_TAG#v}"
+          mkdir -p release-assets
+          cargo deb --locked --no-build --deb-version "$version"
+          cp target/debian/*.deb release-assets/
+          cargo generate-rpm \
+            --set-metadata "version = \"${version}\"" \
+            -o "release-assets/tonguetyped-${RELEASE_TAG}-linux-aarch64-cpu.rpm"
+          cp target/release/tonguetyped "release-assets/tonguetyped-${RELEASE_TAG}-linux-aarch64-cpu"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-aarch64
           path: release-assets/
           if-no-files-found: error
 
@@ -115,17 +166,21 @@ jobs:
         run: |
           version="${RELEASE_TAG#v}"
           binary="linux-release/tonguetyped-${RELEASE_TAG}-linux-x86_64-gpu-vulkan"
+          bundle="linux-release/tonguetyped-${RELEASE_TAG}-completions-and-man.tar.gz"
           test -f "$binary"
+          test -f "$bundle"
           mkdir -p build
           cp PKGBUILD build/PKGBUILD
-          sha256="$(sha256sum "$binary" | cut -d' ' -f1)"
+          sha256_binary="$(sha256sum "$binary" | cut -d' ' -f1)"
+          sha256_bundle="$(sha256sum "$bundle" | cut -d' ' -f1)"
           sed -i "s/^pkgver=.*/pkgver=${version}/" build/PKGBUILD
-          sed -i "s/^sha256sums=.*/sha256sums=('${sha256}')/" build/PKGBUILD
-          # Place the already-built binary under the name makepkg's source
-          # array expects, so makepkg verifies the checksum locally instead
+          sed -i "s/^sha256sums=.*/sha256sums=('${sha256_binary}' '${sha256_bundle}')/" build/PKGBUILD
+          # Place the already-built assets under the names makepkg's source
+          # array expects, so makepkg verifies their checksums locally instead
           # of downloading from the GitHub release - which doesn't exist yet
           # at this point in the workflow.
           cp "$binary" "build/tonguetyped-v${version}-linux-x86_64-gpu-vulkan"
+          cp "$bundle" "build/tonguetyped-v${version}-completions-and-man.tar.gz"
           chown -R builder:builder build
       - name: Build package with makepkg
         run: su builder -c 'cd build && makepkg --noconfirm --nodeps'
@@ -150,7 +205,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: [linux, arch]
+    needs: [linux, linux-aarch64, arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,6 +214,71 @@ jobs:
           pattern: release-*
           path: release-assets
           merge-multiple: true
+      - name: Generate SHA256SUMS.txt
+        # One checksum per release artifact (not per signature, not for the
+        # manifest itself). Deterministic order: the shell glob sorts.
+        run: |
+          cd release-assets
+          shopt -s nullglob
+          files=(*)
+          targets=()
+          for file in "${files[@]}"; do
+            case "$file" in
+              *.asc|SHA256SUMS.txt) continue ;;
+            esac
+            targets+=("$file")
+          done
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "no artifacts to checksum; failing." >&2
+            exit 1
+          fi
+          sha256sum "${targets[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Sign release artifacts
+        # Detached, ASCII-armored signatures (.asc) over every artifact and
+        # SHA256SUMS.txt itself. Signing is skipped with a loud warning when
+        # the GPG secrets are absent, so a release still publishes without
+        # signatures rather than blocking on a missing secret. Set
+        # GPG_PRIVATE_KEY (armored secret key) and GPG_PASSPHRASE to enable
+        # it; GPG_SIGNING_KEY (fingerprint) is optional and pins which key
+        # signs when the import holds more than one.
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+        run: |
+          if [ -z "${GPG_PRIVATE_KEY:-}" ] || [ -z "${GPG_PASSPHRASE:-}" ]; then
+            echo "::warning::GPG_PRIVATE_KEY / GPG_PASSPHRASE not set - publishing without detached signatures. Add both repository secrets to sign SHA256SUMS.txt and every artifact."
+            exit 0
+          fi
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "${WORK}"' EXIT
+          export GNUPGHOME="${WORK}/gpg"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          printf 'allow-loopback-pinentry\n' > "${GNUPGHOME}/gpg-agent.conf"
+          printf 'pinentry-mode loopback\n' > "${GNUPGHOME}/gpg.conf"
+          gpgconf --kill gpg-agent || true
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
+          local_user_args=()
+          if [ -n "${GPG_SIGNING_KEY:-}" ]; then
+            local_user_args=(--local-user "${GPG_SIGNING_KEY}!")
+          fi
+          cd release-assets
+          shopt -s nullglob
+          files=(*)
+          for file in "${files[@]}"; do
+            case "$file" in
+              *.asc) continue ;;
+            esac
+            printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes \
+              --pinentry-mode loopback --passphrase-fd 0 \
+              "${local_user_args[@]}" \
+              --detach-sign --armor --output "${file}.asc" "${file}"
+            echo "signed ${file}"
+          done
+          echo "Detached signatures:"
+          ls -1 ./*.asc
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -171,8 +291,8 @@ jobs:
 
   aur-publish:
     name: Publish to AUR
-    # Runs after the GitHub release exists so the PKGBUILD's source URL
-    # (a GitHub release download link) actually resolves for AUR users.
+    # Runs after the GitHub release exists so the PKGBUILD's source URLs
+    # (GitHub release download links) actually resolve for AUR users.
     needs: [publish]
     runs-on: ubuntu-latest
     steps:

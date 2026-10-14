@@ -109,6 +109,21 @@
               postInstall = ''
                 install -Dm644 data/tonguetyped.desktop \
                   $out/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
+
+                # build.rs renders these during the release build. Locate them
+                # rather than hardcoding a path: buildRustPackage passes
+                # `--target <triple>`, so the profile directory is
+                # target/<triple>/release, not target/release.
+                dist="$(find target -type d -path '*/release/dist' -print -quit)"
+                test -d "$dist"
+                install -Dm644 "$dist/completions/tonguetyped.bash" \
+                  $out/share/bash-completion/completions/tonguetyped
+                install -Dm644 "$dist/completions/_tonguetyped" \
+                  $out/share/zsh/site-functions/_tonguetyped
+                install -Dm644 "$dist/completions/tonguetyped.fish" \
+                  $out/share/fish/vendor_completions.d/tonguetyped.fish
+                install -d $out/share/man/man1
+                install -m644 "$dist/man/"*.1 $out/share/man/man1/
               '';
 
               postFixup = ''
