@@ -361,8 +361,10 @@ fn words_weight(words: &[&str]) -> usize {
     words.iter().map(|word| word.chars().count()).sum()
 }
 
-/// Removes whole English filler words, taking the whitespace after each with
-/// it so no double space is left behind; a trailing filler leaves no space.
+/// Removes whole English filler words, taking the space or tab after each with
+/// it so no double space is left behind; a trailing filler leaves no space. A
+/// following separator that contains a newline is kept (only a space just
+/// before it is dropped), so removing a filler can never merge two lines.
 fn apply_filler_removal(text: &str) -> String {
     let tokens = tokenize(text);
     let mut output = String::new();
@@ -376,7 +378,13 @@ fn apply_filler_removal(text: &str) -> String {
                 index += 1;
                 if let Some(Token::Sep(separator)) = tokens.get(index) {
                     if is_all_whitespace(separator) {
-                        index += 1;
+                        if separator.contains('\n') {
+                            while output.ends_with(' ') || output.ends_with('\t') {
+                                output.pop();
+                            }
+                        } else {
+                            index += 1;
+                        }
                     }
                 }
                 continue;
@@ -393,9 +401,11 @@ fn apply_filler_removal(text: &str) -> String {
 
 /// Runs `command` through `sh -c` with `text` on stdin, returning its stdout
 /// (with one trailing newline dropped) on a clean exit. Any spawn error,
-/// non-zero exit, read error, or `timeout` expiry returns `None`, so the
-/// caller keeps the text it already had. On timeout the child's whole process
-/// group is killed, which closes its stdout and releases the reader thread.
+/// non-zero exit, read error, or deadline expiry returns `None`, so the caller
+/// keeps the text it already had. The child runs in its own process group and
+/// that group is killed whenever a pipe thread is still blocked at the
+/// deadline, so a descendant the direct `sh` child left behind cannot keep the
+/// wait unbounded on any exit path.
 fn run_external_command(command: &str, text: &str, timeout: Duration) -> Option<String> {
     let mut builder = Command::new("sh");
     builder
@@ -413,14 +423,28 @@ fn run_external_command(command: &str, text: &str, timeout: Duration) -> Option<
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
     let input = text.to_string();
+    let (writer_done, writer_finished) = std::sync::mpsc::channel();
     let writer = std::thread::spawn(move || {
         let _ = stdin.write_all(input.as_bytes());
         // Dropping `stdin` here closes the pipe so the command sees EOF.
+        let _ = writer_done.send(());
     });
-    let reader = std::thread::spawn(move || read_to_end(stdout));
-    let status = wait_with_timeout(&mut child, timeout);
+    let (output_tx, output_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let _ = output_tx.send(read_to_end(stdout));
+    });
+    let deadline = Instant::now().checked_add(timeout)?;
+    let status = wait_until(&mut child, deadline);
+    // A descendant that inherited a pipe but outlived the direct `sh` child
+    // would keep these joins blocked, so bound both by the same deadline and
+    // kill the group once either is still waiting.
+    let bytes = output_rx.recv_timeout(until(deadline));
+    if bytes.is_err() || writer_finished.recv_timeout(until(deadline)).is_err() {
+        kill_child_group(&mut child);
+    }
     let _ = writer.join();
-    let bytes = reader.join().ok()?;
+    let _ = reader.join();
+    let bytes = bytes.ok()?;
     match status {
         Some(status) if status.success() => {
             let output = String::from_utf8(bytes).ok()?;
@@ -430,16 +454,19 @@ fn run_external_command(command: &str, text: &str, timeout: Duration) -> Option<
     }
 }
 
+fn until(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
 fn read_to_end(mut stdout: impl Read) -> Vec<u8> {
     let mut buffer = Vec::new();
     let _ = stdout.read_to_end(&mut buffer);
     buffer
 }
 
-/// Waits for `child` to exit, killing it once `timeout` passes. `None` means
-/// the child was killed for exceeding the timeout (or `try_wait` failed).
-fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
-    let deadline = Instant::now().checked_add(timeout)?;
+/// Waits for `child` to exit, killing it once `deadline` passes. `None` means
+/// the child was killed for exceeding the deadline (or `try_wait` failed).
+fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
@@ -584,6 +611,18 @@ mod tests {
     }
 
     #[test]
+    fn filler_removal_never_eats_a_line_break() {
+        let mut config = config();
+        config.remove_fillers = true;
+        assert_eq!(post_process("one um\nconst", &config, "en"), "one\nconst");
+        config.spoken_punctuation = true;
+        assert_eq!(
+            post_process("one um new line const", &config, "en"),
+            "one\nconst"
+        );
+    }
+
+    #[test]
     fn a_failing_post_process_command_falls_back_to_the_cleaned_text() {
         let mut config = config();
         config
@@ -621,6 +660,19 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "a surviving pipeline stage must not keep the reader blocked"
+        );
+    }
+
+    #[test]
+    fn a_command_that_leaves_a_descendant_holding_stdout_stays_bounded() {
+        let mut config = config();
+        config.post_process_command = "sleep 30 &".to_string();
+        config.post_process_timeout_seconds = 1;
+        let started = Instant::now();
+        assert_eq!(post_process("keep me", &config, "en"), "keep me");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a backgrounded descendant holding stdout must not keep the reader blocked"
         );
     }
 
