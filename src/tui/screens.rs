@@ -191,7 +191,9 @@ fn long_form_note(long_form: crate::catalog::LongForm) -> String {
             "none; the model windows or encodes internally".to_string()
         }
         crate::catalog::LongForm::SoftWindow { window_seconds } => {
-            format!("any length, but output can truncate past about {window_seconds}s")
+            format!(
+                "any length, but output can truncate past about {window_seconds}s (partial kept)"
+            )
         }
         crate::catalog::LongForm::HardCap { cap_seconds } => {
             format!("{cap_seconds}s per recording; longer recordings are rejected")

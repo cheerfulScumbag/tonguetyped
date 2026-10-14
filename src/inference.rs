@@ -474,6 +474,32 @@ fn quietest_boundary(samples: &[f32], low: usize, high: usize) -> usize {
     best_at
 }
 
+/// Maps a `Session::run` result to the text `transcribe` returns. The binding
+/// reports a decode that hit its generation budget before end-of-stream as
+/// [`transcribe_cpp::Error::OutputTruncated`] carrying the partial transcript,
+/// not as `Ok`. That is not a hard failure: the partial text is surfaced and
+/// the truncation logged, so a model with a soft window (moonshine) yields the
+/// short transcript the catalog documents instead of losing the dictation.
+/// Every other error stays a failure.
+fn run_result(
+    result: transcribe_cpp::Result<transcribe_cpp::Transcript>,
+) -> anyhow::Result<String> {
+    match result {
+        Ok(transcript) => Ok(transcript.text),
+        Err(transcribe_cpp::Error::OutputTruncated { partial, .. }) => {
+            let text = partial
+                .map(|transcript| transcript.text)
+                .unwrap_or_default();
+            tracing::warn!(
+                "transcription reached the model's decode limit and was truncated; keeping the {}-character partial transcript",
+                text.chars().count()
+            );
+            Ok(text)
+        }
+        Err(error) => Err(anyhow::Error::new(error).context("transcription failed")),
+    }
+}
+
 pub struct InferenceEngine {
     session: Option<LoadedSession>,
     model_path: PathBuf,
@@ -625,10 +651,7 @@ impl InferenceEngine {
             Some(window) if audio.len() > window => {
                 let mut parts: Vec<String> = Vec::new();
                 for range in split_chunks(audio, window) {
-                    let text = session
-                        .run(&audio[range], &options)
-                        .context("transcription failed")?
-                        .text;
+                    let text = run_result(session.run(&audio[range], &options))?;
                     let text = text.trim();
                     if !text.is_empty() {
                         parts.push(text.to_string());
@@ -636,12 +659,7 @@ impl InferenceEngine {
                 }
                 Ok(parts.join(" "))
             }
-            _ => {
-                let transcript = session
-                    .run(audio, &options)
-                    .context("transcription failed")?;
-                Ok(transcript.text)
-            }
+            _ => run_result(session.run(audio, &options)),
         }
     }
 
@@ -829,6 +847,35 @@ mod tests {
             run_options(&config, other_family),
             transcribe_cpp::RunOptions::default()
         );
+    }
+
+    #[test]
+    fn a_truncated_run_keeps_the_partial_transcript_instead_of_failing() {
+        let result = run_result(Err(transcribe_cpp::Error::OutputTruncated {
+            message: "max_length reached".to_string(),
+            partial: Some(Box::new(transcribe_cpp::Transcript {
+                text: "the first half of the dictation".to_string(),
+                ..Default::default()
+            })),
+        }));
+        assert_eq!(result.unwrap(), "the first half of the dictation");
+    }
+
+    #[test]
+    fn a_successful_run_returns_its_transcript_text() {
+        let result = run_result(Ok(transcribe_cpp::Transcript {
+            text: "hello world".to_string(),
+            ..Default::default()
+        }));
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn any_other_run_error_stays_a_failure() {
+        let result = run_result(Err(transcribe_cpp::Error::OutOfMemory(
+            "out of host memory".to_string(),
+        )));
+        assert!(result.is_err());
     }
 
     fn engine(preference: BackendPreference) -> InferenceEngine {

@@ -17,8 +17,8 @@
 //! - whisper and parakeet window or encode internally and accept any length
 //!   ([`LongForm::Unbounded`]).
 //! - moonshine accepts any length but can truncate its output past roughly 48
-//!   seconds ([`LongForm::SoftWindow`]); the transcript comes back short, not
-//!   as an error.
+//!   seconds ([`LongForm::SoftWindow`]); the partial transcript is kept and the
+//!   truncation logged (`src/inference.rs`), rather than the dictation failing.
 //! - canary and cohere reject input past their encoder table (about 400
 //!   seconds) before decoding ([`LongForm::HardCap`]), so
 //!   [`crate::config::Config::validate`] refuses a `max_recording_seconds`
@@ -42,7 +42,8 @@ pub enum LongForm {
     /// or its encoder is unbounded (parakeet).
     Unbounded,
     /// Any length is accepted, but past `window_seconds` the output can be
-    /// truncated rather than the call rejected (moonshine).
+    /// truncated rather than the call rejected (moonshine); the partial
+    /// transcript is kept.
     SoftWindow { window_seconds: u32 },
     /// Input longer than `cap_seconds` is rejected before decoding (canary,
     /// cohere). The pipeline must not submit a longer buffer.
@@ -74,12 +75,6 @@ impl VariantInfo {
             ["en"] => "English".to_string(),
             languages => format!("{} languages", languages.len()),
         }
-    }
-
-    /// Whether more than one language is advertised, so the UI can tell a
-    /// multilingual model from an English-only one at a glance.
-    pub fn is_multilingual(&self) -> bool {
-        self.languages.len() > 1
     }
 
     /// Human-readable family name for the model list and dashboard. The stored
@@ -1735,10 +1730,6 @@ mod tests {
                 .language_summary(),
             "14 languages"
         );
-        assert!(!variant_info("parakeet-tdt-0.6b-v2")
-            .unwrap()
-            .is_multilingual());
-        assert!(variant_info("canary-1b-v2").unwrap().is_multilingual());
     }
 
     #[test]
