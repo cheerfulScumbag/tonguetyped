@@ -27,6 +27,17 @@ recommends = "wtype, wl-clipboard"
 suggests = "xclip"
 section = "utils"
 priority = "optional"
+# `$auto` keeps the binary in /usr/bin and the readme under /usr/share/doc;
+# the rest are the shell completions and man pages build.rs writes into
+# `target/<profile>/dist/` (the directory cargo-deb remaps `target/release/`
+# to). Every variant inherits this list.
+assets = [
+    "$auto",
+    ["target/release/dist/completions/tonguetyped.bash", "usr/share/bash-completion/completions/tonguetyped", "644"],
+    ["target/release/dist/completions/_tonguetyped", "usr/share/zsh/site-functions/_tonguetyped", "644"],
+    ["target/release/dist/completions/tonguetyped.fish", "usr/share/fish/vendor_completions.d/tonguetyped.fish", "644"],
+    ["target/release/dist/man/*.1", "usr/share/man/man1/", "644"],
+]
 
 # One .deb per GPU backend (each also carries the CPU fallback). They all
 # install /usr/bin/tonguetyped, so each provides, conflicts with and replaces
@@ -49,6 +60,61 @@ name = "tonguetyped-gpu-rocm"
 provides = "tonguetyped"
 conflicts = "tonguetyped"
 replaces = "tonguetyped"
+
+# RPM packaging (cargo-generate-rpm), the Fedora/RHEL family counterpart to
+# the .deb variants above. Same layout: one package per GPU backend, all
+# providing/conflicting/obsoleting the virtual `tonguetyped` name so
+# installing a different backend swaps it out. Assets mirror the .deb list.
+# cargo-generate-rpm reads dependencies as tables mapping a package name to a
+# version requirement ("" means any version), not as lists.
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/tonguetyped", dest = "/usr/bin/tonguetyped", mode = "755" },
+    { source = "target/release/dist/completions/tonguetyped.bash", dest = "/usr/share/bash-completion/completions/tonguetyped", mode = "644" },
+    { source = "target/release/dist/completions/_tonguetyped", dest = "/usr/share/zsh/site-functions/_tonguetyped", mode = "644" },
+    { source = "target/release/dist/completions/tonguetyped.fish", dest = "/usr/share/fish/vendor_completions.d/tonguetyped.fish", mode = "644" },
+    { source = "target/release/dist/man/*.1", dest = "/usr/share/man/man1/", mode = "644" },
+]
+
+[package.metadata.generate-rpm.recommends]
+wtype = ""
+wl-clipboard = ""
+
+[package.metadata.generate-rpm.variants.gpu-vulkan]
+name = "tonguetyped-gpu-vulkan"
+
+[package.metadata.generate-rpm.variants.gpu-vulkan.provides]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-vulkan.conflicts]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-vulkan.obsoletes]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-cuda]
+name = "tonguetyped-gpu-cuda"
+
+[package.metadata.generate-rpm.variants.gpu-cuda.provides]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-cuda.conflicts]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-cuda.obsoletes]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-rocm]
+name = "tonguetyped-gpu-rocm"
+
+[package.metadata.generate-rpm.variants.gpu-rocm.provides]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-rocm.conflicts]
+tonguetyped = ""
+
+[package.metadata.generate-rpm.variants.gpu-rocm.obsoletes]
+tonguetyped = ""
 
 [[bin]]
 name = "tonguetyped"
@@ -103,6 +169,14 @@ gpu-vulkan = ["transcribe-cpp/vulkan"]
 gpu-cuda = ["transcribe-cpp/cuda"]
 gpu-rocm = ["transcribe-cpp/rocm"]
 gpu-metal = ["transcribe-cpp/metal"]
+
+# build.rs reuses the real CLI definition (src/cli.rs) to render the man pages
+# and shell completions that ship in the packages, so they can never drift
+# from `--help`. These only build in the build script, never into the binary.
+[build-dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_mangen = "0.2"
+clap_complete = "4"
 
 [dev-dependencies]
 hound = "3"
