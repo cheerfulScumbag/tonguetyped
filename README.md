@@ -329,8 +329,9 @@ never ends while the bar runs.
 
 The state is `idle`, `recording`, `processing`, or `stopped`, repeated in
 `text`, `alt` and `class` so you can show it as text, map it to an icon, or
-style it. `--extended` adds `model`, `backend`, `device` and `build` fields and
-lists them in the tooltip.
+style it. `--extended` adds `model`, `backend`, `device` and `build` fields;
+the tooltip lists `model`, `backend` and `device`, while `build` appears only in
+the JSON.
 
 ```jsonc
 // Waybar (config.jsonc)

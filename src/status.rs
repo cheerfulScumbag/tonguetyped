@@ -11,7 +11,8 @@
 //! `processing`, or `stopped` when no daemon is running), so a bar can show
 //! it directly, map it to an icon through `alt`, or style it through `class`.
 //! `--extended` adds `model`, `backend`, `device` and `build` fields (each
-//! `null` when the daemon does not report it) and lists them in the tooltip.
+//! `null` when the daemon does not report it); the tooltip lists `model`,
+//! `backend` and `device`, while `build` appears only in the JSON.
 //!
 //! Following polls the daemon's ordinary `Status` request over one kept-open
 //! connection, so it works against any daemon build. A daemon that stops or
