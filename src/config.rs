@@ -1488,7 +1488,8 @@ mod tests {
     #[test]
     fn text_replacements_form_preserves_edge_whitespace_and_skips_blank_keys() {
         let mut text = TextConfig::default();
-        text.replacements.insert("period".to_string(), ". ".to_string());
+        text.replacements
+            .insert("period".to_string(), ". ".to_string());
         text.replacements
             .insert(" lead".to_string(), " x ".to_string());
         text.replacements
