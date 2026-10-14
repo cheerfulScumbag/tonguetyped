@@ -45,7 +45,7 @@ pub enum Commands {
     LastResult,
     /// Run system diagnostics
     Doctor {
-        /// Run explicit typing test
+        /// Send a test line through the configured output method
         #[arg(long)]
         test_type: bool,
     },

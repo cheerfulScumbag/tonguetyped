@@ -2375,7 +2375,7 @@ fn paint_half_circle(
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`;
 /// `recording`/`transcribing`/`success`/`no-speech`/`copied`/
-/// `clipboard-fallback`/`cancelled`/`error`), and
+/// `clipboard-fallback`/`submit-failed`/`cancelled`/`error`), and
 /// `None` clears to fully transparent. `levels` is the live microphone history
 /// the recording animations follow, oldest first - an empty slice means
 /// silence, and a representative pattern is how the offline mockups show the
