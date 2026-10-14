@@ -288,7 +288,9 @@ pub struct TranscriptionConfig {
     /// holds an unbounded buffer in memory or blocks for minutes on end.
     /// Chunk boundaries fall at the quietest point near each limit, so a
     /// split lands in a pause rather than through a word. `0` disables
-    /// chunking and always sends the whole buffer in one call.
+    /// chunking, so a model with no input ceiling decodes the whole buffer in
+    /// one call; a hard-capped family (canary, cohere) is still split into
+    /// windows within its cap regardless.
     #[serde(default = "default_chunk_seconds")]
     pub chunk_seconds: u64,
     /// Text the Whisper decoder reads as if it came just before the
@@ -984,6 +986,33 @@ impl Config {
         {
             anyhow::bail!("max_recording_seconds is too large");
         }
+        // A family that rejects over-length input (canary, cohere) is bounded
+        // to its cap by the engine on every call, including the file path with
+        // chunking off; this check additionally keeps the configured live
+        // recording limit within the cap. With chunking on that limit is
+        // `chunk_seconds`, otherwise `max_recording_seconds`. Every catalog
+        // entry has `VariantInfo` (see `catalog::VARIANTS`), so this reads the
+        // model's own limit rather than assuming whisper.
+        let entry = crate::catalog::find(&self.model.active_model)
+            .expect("the catalog check above already accepted this id");
+        if let crate::catalog::LongForm::HardCap { cap_seconds } = entry.info().long_form {
+            let per_call_seconds = if self.transcription.chunk_seconds > 0 {
+                self.transcription
+                    .max_recording_seconds
+                    .min(self.transcription.chunk_seconds)
+            } else {
+                self.transcription.max_recording_seconds
+            };
+            if per_call_seconds > u64::from(cap_seconds) {
+                anyhow::bail!(
+                    "the active model {} accepts at most {cap_seconds}s of audio per call, but the \
+                     per-call buffer is {per_call_seconds}s; select a model that accepts longer \
+                     recordings, lower transcription.max_recording_seconds, or lower \
+                     transcription.chunk_seconds",
+                    self.model.active_model,
+                );
+            }
+        }
         self.transcription.validate_decoding()?;
         if self.model.idle_unload.policy == IdleUnloadPolicy::AfterIdle {
             let seconds = self
@@ -1298,6 +1327,52 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.model.active_model = "whisper-tiny-q5_k_m".to_string();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn hard_capped_models_activate_under_the_default_config() {
+        // `select_model` saves the config, which validates it, so a user with
+        // the default config (600 s recording limit, 30 s chunk window) must be
+        // able to activate canary or cohere: chunking keeps every call at 30 s,
+        // well within the 400 s cap.
+        for id in ["canary-1b-v2-f16", "cohere-transcribe-03-2026-f16"] {
+            let mut config = Config::default();
+            config.model.active_model = id.to_string();
+            assert_eq!(config.transcription.max_recording_seconds, 600);
+            assert_eq!(config.transcription.chunk_seconds, 30);
+            config.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_a_recording_limit_above_a_hard_cap_models_input_window() {
+        let mut config = Config::default();
+        config.model.active_model = "canary-1b-v2-f16".to_string();
+
+        // Chunking is on by default, so every call is bounded by chunk_seconds
+        // and a recording limit above the cap is still fine.
+        config.transcription.max_recording_seconds = 500;
+        config.validate().unwrap();
+
+        // With chunking off the whole recording reaches the model, so the same
+        // limit is rejected.
+        config.transcription.chunk_seconds = 0;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("accepts at most 400s"), "{error}");
+        assert!(error.contains("canary-1b-v2-f16"), "{error}");
+
+        // A chunk window larger than the cap is rejected even with chunking on.
+        config.transcription.chunk_seconds = 600;
+        assert!(config.validate().is_err());
+
+        // At the cap it validates, and a no-practical-limit family is unaffected.
+        config.transcription.chunk_seconds = 400;
+        config.validate().unwrap();
+
+        config.model.active_model = "parakeet-tdt-0.6b-v2-f16".to_string();
+        config.transcription.max_recording_seconds = 500;
+        config.transcription.chunk_seconds = 0;
         config.validate().unwrap();
     }
 

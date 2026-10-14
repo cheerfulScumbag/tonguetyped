@@ -91,6 +91,10 @@ pub struct TranscriptionTimings {
 
 pub struct TranscriptionAttempt {
     pub result: anyhow::Result<String>,
+    /// The decode hit the model's generation budget before end-of-stream, so
+    /// `result`'s transcript is a partial one. Distinct from a plain failure:
+    /// the text is still delivered, but the user must be told it was cut off.
+    pub truncated: bool,
     pub timings: TranscriptionTimings,
 }
 
@@ -106,6 +110,7 @@ fn completion_feedback_event(outcome: &str) -> FeedbackEvent {
         "copied" => FeedbackEvent::Copied,
         "clipboard_fallback" => FeedbackEvent::ClipboardFallback,
         "submit_failed" => FeedbackEvent::SubmitFailed,
+        "truncated" => FeedbackEvent::Truncated,
         _ => FeedbackEvent::Success,
     }
 }
@@ -470,6 +475,7 @@ impl CoordinatorRuntime for ProductionRuntime {
                     timings.vad = vad_started.elapsed();
                     return TranscriptionAttempt {
                         result: Err(error),
+                        truncated: false,
                         timings,
                     };
                 }
@@ -480,6 +486,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         if samples.is_empty() {
             return TranscriptionAttempt {
                 result: Ok(String::new()),
+                truncated: false,
                 timings,
             };
         }
@@ -510,6 +517,7 @@ impl CoordinatorRuntime for ProductionRuntime {
                 timings.model_load = load_started.elapsed();
                 return TranscriptionAttempt {
                     result: Err(error),
+                    truncated: false,
                     timings,
                 };
             }
@@ -522,9 +530,16 @@ impl CoordinatorRuntime for ProductionRuntime {
         }
         timings.backend = engine.active_backend_info();
         let inference_started = Instant::now();
-        let result = engine.transcribe(&samples, &config.transcription);
+        let (result, truncated) = match engine.transcribe(&samples, &config.transcription) {
+            Ok(transcription) => (Ok(transcription.text), transcription.truncated),
+            Err(error) => (Err(error), false),
+        };
         timings.inference = inference_started.elapsed();
-        TranscriptionAttempt { result, timings }
+        TranscriptionAttempt {
+            result,
+            truncated,
+            timings,
+        }
     }
 
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<crate::output::Delivery> {
@@ -1141,6 +1156,7 @@ impl Coordinator {
 
             completion.transcription_attempted = true;
             let attempt = coordinator.runtime.transcribe(&samples, &config);
+            let truncated = attempt.truncated;
             {
                 let mut timing = timing.lock().unwrap();
                 timing.set_phase(Phase::Vad, attempt.timings.vad);
@@ -1259,6 +1275,8 @@ impl Coordinator {
             // clipboard cue is how the user learns to paste it themselves.
             if let Some(error) = output_error {
                 coordinator.settle_error(generation, error, &timing, "output_error");
+            } else if truncated {
+                coordinator.settle(generation, &timing, "truncated");
             } else if delivered != "success" {
                 coordinator.settle(generation, &timing, delivered);
             } else if history_failed {

@@ -555,7 +555,9 @@ transcribed in back-to-back chunks that each fit that window, with each chunk
 boundary snapped back to the quietest point before its limit so a split lands
 in a pause rather than through a word. This keeps memory and latency bounded
 for a long dictation instead of sending one unbounded buffer through the
-decoder. Set `chunk_seconds = 0` to decode the whole buffer in one call.
+decoder. Set `chunk_seconds = 0` to decode the whole buffer in one call; a
+hard-capped model (canary, cohere) is still split into windows within its
+per-call limit, so the whole file never reaches it in one request.
 
 The same inference path transcribes an existing audio file:
 
@@ -667,10 +669,21 @@ Vulkan, CUDA, ROCm, and Metal through one Rust binding for transcribe.cpp (the
 backend and never lets the library auto-select, so a fallback never silently
 substitutes a different model or family.
 
-**A curated catalog.** `src/catalog.rs` tracks every reviewed `family =
-"whisper"` GGUF model published by
-[handy-computer](https://huggingface.co/handy-computer), each pinned to a commit
-with an expected byte size and SHA-256.
+**A curated catalog.** `src/catalog.rs` tracks reviewed GGUF models from the
+offline families this project has checked against its VAD-then-single-buffer
+pipeline (whisper, parakeet, moonshine, canary, and cohere), published by
+[handy-computer](https://huggingface.co/handy-computer). Each entry is pinned to
+a commit with an expected byte size and SHA-256, and `tonguetyped model list`
+labels it with its family and language coverage. Families differ in how much
+audio one call accepts: whisper and parakeet take any length, moonshine can
+truncate output past about 48 s (keeping the partial transcript and reporting
+that it was cut short), and canary and
+cohere reject input past about 400 s, so `InferenceEngine::transcribe` always
+keeps each call within the active model's cap - splitting a hard-capped model's
+input into windows at most that limit even when `chunk_seconds = 0` - and
+`Config::validate` additionally refuses a config whose per-call buffer
+(`min(max_recording_seconds, chunk_seconds)`, or just `max_recording_seconds`
+with chunking off) would exceed it.
 
 **Benchmarking.** `examples/transcribe_benchmark.rs` measures cold load and warm
 inference on a 16 kHz mono WAV:

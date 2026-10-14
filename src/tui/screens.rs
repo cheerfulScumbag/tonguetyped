@@ -128,12 +128,16 @@ impl ModelScreen {
                 } else {
                     "-"
                 };
+                // Family and license live in the detail panel below; the list
+                // stays within an 80-column terminal and marks the language
+                // coverage a user needs to choose between families.
                 let text = format!(
-                    "{marker}{:<32} {:<8} {:>10}  {:<9}",
+                    "{marker}{:<32} {:<8} {:>8}  {:<9}  {:<13}",
                     row.id,
                     row.quant,
                     commands::human_size(row.size_bytes),
-                    status
+                    status,
+                    row.info.language_summary(),
                 );
                 let style = selection_style(highlighted);
                 Line::from(Span::styled(text, style))
@@ -146,9 +150,54 @@ impl ModelScreen {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(focus_border(self.focus == ModelFocus::Catalog))
-                    .title("Model catalog (MODEL ID / QUANT / SIZE / STATUS)"),
+                    .title("Model catalog (MODEL ID / QUANT / SIZE / STATUS / LANGUAGES)"),
             )
             .scroll((scroll, 0))
+    }
+
+    /// The selected model's capabilities, so a choice can be made on more than
+    /// the id: its family, language coverage, license, and how much audio it
+    /// accepts in the pipeline's single buffer.
+    pub(super) fn selected_detail_widget(&self) -> Paragraph<'static> {
+        let row = &self.rows[self.selected];
+        let label = Style::default().fg(Color::DarkGray);
+        let heading = Line::from(vec![
+            Span::styled("Family ", label),
+            Span::raw(row.info.family_label()),
+            Span::raw("   "),
+            Span::styled("Languages ", label),
+            Span::raw(row.info.language_summary()),
+            Span::raw("   "),
+            Span::styled("License ", label),
+            Span::raw(row.license_spdx),
+        ]);
+        let note = Line::from(vec![
+            Span::styled("Input limit ", label),
+            Span::raw(long_form_note(row.info.long_form)),
+        ]);
+        Paragraph::new(vec![heading, note]).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Selected model"),
+        )
+    }
+}
+
+/// One line describing a family's input-length behavior for the model screen's
+/// detail panel, so a hard-cap or soft-window model does not surprise a user.
+fn long_form_note(long_form: crate::catalog::LongForm) -> String {
+    match long_form {
+        crate::catalog::LongForm::Unbounded => {
+            "none; the model windows or encodes internally".to_string()
+        }
+        crate::catalog::LongForm::SoftWindow { window_seconds } => {
+            format!(
+                "any length, but output can truncate past about {window_seconds}s (partial kept)"
+            )
+        }
+        crate::catalog::LongForm::HardCap { cap_seconds } => {
+            format!("{cap_seconds}s per call; longer audio is always chunked to stay within it")
+        }
     }
 }
 
@@ -1641,5 +1690,45 @@ mod tests {
             text.contains("cuda unavailable"),
             "the unavailable backend should still be listed:\n{text}"
         );
+    }
+
+    fn rendered_widget(widget: impl ratatui::widgets::Widget, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(widget, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn model_detail_labels_language_coverage_and_a_hard_input_cap() {
+        let mut config = Config::default();
+        config.model.active_model = "canary-1b-v2-f16".to_string();
+        let screen = ModelScreen::new(&config, choices());
+        let text = rendered_widget(screen.selected_detail_widget(), 100, 4);
+        assert!(text.contains("Canary"), "{text}");
+        assert!(text.contains("25 languages"), "{text}");
+        assert!(text.contains("400s per call"), "{text}");
+    }
+
+    #[test]
+    fn model_detail_marks_a_soft_window_model() {
+        let mut config = Config::default();
+        config.model.active_model = "moonshine-base-q8_0".to_string();
+        let screen = ModelScreen::new(&config, choices());
+        let text = rendered_widget(screen.selected_detail_widget(), 100, 4);
+        assert!(text.contains("Moonshine"), "{text}");
+        assert!(text.contains("English"), "{text}");
+        assert!(text.contains("about 48s"), "{text}");
     }
 }

@@ -1404,7 +1404,7 @@ impl App {
             .constraints([
                 Constraint::Min(5),
                 Constraint::Length(screen.backend_widget_height()),
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -1436,7 +1436,7 @@ impl App {
                 );
             }
             None => {
-                frame.render_widget(Block::default().borders(Borders::ALL), chunks[1]);
+                frame.render_widget(screen.selected_detail_widget(), chunks[1]);
             }
         }
 

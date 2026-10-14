@@ -25,6 +25,10 @@ pub enum FeedbackEvent {
     /// `ClipboardFallback`: the text is already in the focused application, so
     /// nothing was copied and the user must not paste it again.
     SubmitFailed,
+    /// The transcript was delivered, but the model's decode limit cut it short
+    /// before end-of-stream, so words are missing. Distinct from `Success` so
+    /// the user learns the dictation is partial rather than complete.
+    Truncated,
     Cancelled,
     Error,
 }
@@ -223,6 +227,12 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
             "Text entered, but Enter failed",
             "normal",
         ),
+        FeedbackEvent::Truncated => (
+            "edit-cut-symbolic",
+            "dialog-question",
+            "Transcript cut short",
+            "normal",
+        ),
         FeedbackEvent::Cancelled => (
             "process-stop-symbolic",
             "dialog-warning",
@@ -261,6 +271,7 @@ mod tests {
             FeedbackEvent::Copied,
             FeedbackEvent::ClipboardFallback,
             FeedbackEvent::SubmitFailed,
+            FeedbackEvent::Truncated,
             FeedbackEvent::Cancelled,
             FeedbackEvent::Error,
         ];

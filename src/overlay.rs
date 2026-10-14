@@ -382,6 +382,7 @@ impl Phase {
             FeedbackEvent::Copied => Phase::Copied,
             FeedbackEvent::ClipboardFallback => Phase::ClipboardFallback,
             FeedbackEvent::SubmitFailed => Phase::SubmitFailed,
+            FeedbackEvent::Truncated => Phase::Error,
             FeedbackEvent::Cancelled => Phase::Cancelled,
             FeedbackEvent::Error => Phase::Error,
         }
@@ -2796,6 +2797,15 @@ mod tests {
             phase_color(Phase::Success),
             "a failed submit must not paint as a plain success"
         );
+    }
+
+    #[test]
+    fn truncated_event_maps_to_the_failure_cross_not_the_success_checkmark() {
+        let phase = Phase::from_event(FeedbackEvent::Truncated);
+        assert_eq!(phase, Phase::Error);
+        assert_ne!(phase, Phase::Success);
+        assert_eq!(phase.dwell(), Some(ERROR_DWELL));
+        assert!(!phase.is_animated());
     }
 
     #[test]

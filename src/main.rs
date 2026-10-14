@@ -127,8 +127,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::LastResult) => send_command(ipc::Request::GetLastResult).await?,
         Some(Commands::Transcribe { file }) => {
             let config = config::Config::load()?;
-            let transcript = transcribe::transcribe_file(&file, &config)?;
-            println!("{}", transcript.trim());
+            let transcription = transcribe::transcribe_file(&file, &config)?;
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            transcribe::write_transcript(&transcription, &mut stdout.lock(), &mut stderr.lock())?;
         }
         Some(Commands::Model { command }) => run_model_command(command).await?,
     }
@@ -146,8 +148,8 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
         ModelCommand::List => {
             let config = config::Config::load()?;
             println!(
-                "{:<32} {:<10} {:>10}  {:<11}  license",
-                "MODEL ID", "QUANT", "SIZE", "STATUS"
+                "{:<32} {:<10} {:>10}  {:<11}  {:<12} {:<14}  license",
+                "MODEL ID", "QUANT", "SIZE", "STATUS", "FAMILY", "LANGUAGES"
             );
             for entry in catalog::ENTRIES {
                 let installed = catalog::is_installed(entry.id);
@@ -156,12 +158,15 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                     (true, false) => "installed",
                     (false, _) => "-",
                 };
+                let info = entry.info();
                 println!(
-                    "{:<32} {:<10} {:>10}  {:<11}  {}",
+                    "{:<32} {:<10} {:>10}  {:<11}  {:<12} {:<14}  {}",
                     entry.id,
                     entry.quant,
                     commands::human_size(entry.size_bytes),
                     status,
+                    info.family_label(),
+                    info.language_summary(),
                     entry.license_spdx,
                 );
             }
