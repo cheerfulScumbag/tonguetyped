@@ -282,8 +282,9 @@ fn pattern_weight(pattern: &[Token]) -> usize {
 
 /// Matches `pattern` against `tokens` starting at `start`, returning the end
 /// index (exclusive). Word tokens compare case-insensitively; a whitespace
-/// separator token in the pattern matches any whitespace separator; any other
-/// separator must match exactly.
+/// separator token in the pattern matches any whitespace separator that holds
+/// no newline, so a multi-word key can never match across a line break; any
+/// other separator must match exactly.
 fn match_token_pattern(tokens: &[Token], start: usize, pattern: &[Token]) -> Option<usize> {
     if pattern.is_empty() || start + pattern.len() > tokens.len() {
         return None;
@@ -297,7 +298,7 @@ fn match_token_pattern(tokens: &[Token], start: usize, pattern: &[Token]) -> Opt
             }
             (Token::Sep(pattern_sep), Token::Sep(text)) => {
                 if is_all_whitespace(pattern_sep) {
-                    if !is_all_whitespace(text) {
+                    if !is_all_whitespace(text) || text.contains('\n') {
                         return None;
                     }
                 } else if pattern_sep != text {
@@ -311,7 +312,9 @@ fn match_token_pattern(tokens: &[Token], start: usize, pattern: &[Token]) -> Opt
 }
 
 /// Matches a phrase of plain words (`comma`, `new line`) against consecutive
-/// word tokens separated by whitespace, returning the end index (exclusive).
+/// word tokens separated by plain whitespace, returning the end index
+/// (exclusive). A separator with a newline is not joined, so a spoken phrase
+/// can never match across a line break.
 fn match_word_phrase(tokens: &[Token], start: usize, words: &[&str]) -> Option<usize> {
     let mut index = start;
     for (position, word) in words.iter().enumerate() {
@@ -321,7 +324,11 @@ fn match_word_phrase(tokens: &[Token], start: usize, words: &[&str]) -> Option<u
         }
         if position + 1 < words.len() {
             match tokens.get(index)? {
-                Token::Sep(separator) if is_all_whitespace(separator) => index += 1,
+                Token::Sep(separator)
+                    if is_all_whitespace(separator) && !separator.contains('\n') =>
+                {
+                    index += 1
+                }
                 _ => return None,
             }
         }
@@ -544,6 +551,16 @@ mod tests {
     }
 
     #[test]
+    fn a_replacement_key_never_matches_across_a_line_break() {
+        let mut config = config();
+        config
+            .replacements
+            .insert("vox type".to_string(), "Voxtype".to_string());
+        assert_eq!(post_process("vox\ntype", &config, "en"), "vox\ntype");
+        assert_eq!(post_process("vox type", &config, "en"), "Voxtype");
+    }
+
+    #[test]
     fn spoken_punctuation_joins_words_as_symbols() {
         let mut config = config();
         config.spoken_punctuation = true;
@@ -591,6 +608,17 @@ mod tests {
         config.spoken_punctuation = true;
         assert_eq!(post_process("open paren\nfoo", &config, "en"), "(\nfoo");
         assert_eq!(post_process("a equals\nb", &config, "en"), "a=\nb");
+    }
+
+    #[test]
+    fn a_spoken_phrase_never_matches_across_a_line_break() {
+        let mut config = config();
+        config.spoken_punctuation = true;
+        assert_eq!(
+            post_process("open\nparen foo", &config, "en"),
+            "open\nparen foo"
+        );
+        assert_eq!(post_process("open paren foo", &config, "en"), "(foo");
     }
 
     #[test]

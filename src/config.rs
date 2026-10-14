@@ -602,23 +602,26 @@ impl Default for TextConfig {
 pub(crate) const REPLACEMENT_ENTRY_SEPARATOR: &str = ";";
 pub(crate) const REPLACEMENT_ARROW: &str = "=>";
 
-/// Escapes the escape character and the entry separator in a replacement key
-/// or value so that either can hold them without corrupting the single-line
-/// form the configuration UIs round-trip.
+/// Escapes the escape character, the entry separator, and the arrow's `>` in a
+/// replacement key or value so that either can hold them without corrupting the
+/// single-line form the configuration UIs round-trip. Escaping the `>` breaks
+/// any `=>` the field holds, so it can never be read back as the arrow.
 fn escape_replacement_field(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
             '\\' => escaped.push_str("\\\\"),
             ';' => escaped.push_str("\\;"),
+            '>' => escaped.push_str("\\>"),
             other => escaped.push(other),
         }
     }
     escaped
 }
 
-/// Reverses [`escape_replacement_field`]: `\\` becomes `\` and `\;` becomes
-/// `;`. A backslash before any other character is left untouched.
+/// Reverses [`escape_replacement_field`]: `\\` becomes `\`, `\;` becomes `;`,
+/// and `\>` becomes `>`. A backslash before any other character is left
+/// untouched.
 fn unescape_replacement_field(text: &str) -> String {
     let mut unescaped = String::with_capacity(text.len());
     let mut characters = text.chars();
@@ -630,6 +633,7 @@ fn unescape_replacement_field(text: &str) -> String {
         match characters.next() {
             Some('\\') => unescaped.push('\\'),
             Some(';') => unescaped.push(';'),
+            Some('>') => unescaped.push('>'),
             Some(other) => {
                 unescaped.push('\\');
                 unescaped.push(other);
@@ -661,6 +665,21 @@ fn split_replacement_entries(raw: &str) -> Vec<String> {
     }
     entries.push(current);
     entries
+}
+
+/// Parses the value side of a replacement entry. The serializer puts one space
+/// after the arrow, which is dropped; a value that is only whitespace is kept
+/// instead of being trimmed to empty, so a replacement that maps a word to a
+/// space or a newline survives the round trip.
+fn parse_replacement_value(to: &str) -> String {
+    let value = to.strip_prefix(' ').unwrap_or(to);
+    if value.is_empty() {
+        String::new()
+    } else if value.chars().all(char::is_whitespace) {
+        value.to_string()
+    } else {
+        unescape_replacement_field(value.trim())
+    }
 }
 
 impl TextConfig {
@@ -709,14 +728,13 @@ impl TextConfig {
     }
 
     /// Parses the configuration UIs' single-line replacement field. Each entry
-    /// is `from => to`, separated by `;`, with `\` and the separator escaped by
-    /// a backslash. An empty field clears the table. Returns a message naming
-    /// the bad entry without changing anything.
+    /// is `from => to`, separated by `;`, with `\`, the separator, and the arrow's
+    /// `>` escaped by a backslash. An empty field clears the table. Returns a
+    /// message naming the bad entry without changing anything.
     pub(crate) fn apply_replacements_form(&mut self, raw: &str) -> Result<(), String> {
         let mut replacements = BTreeMap::new();
         for entry in split_replacement_entries(raw) {
-            let entry = entry.trim();
-            if entry.is_empty() {
+            if entry.trim().is_empty() {
                 continue;
             }
             let Some((from, to)) = entry.split_once(REPLACEMENT_ARROW) else {
@@ -731,7 +749,7 @@ impl TextConfig {
                     "A replacement's left side is empty (in {entry:?})."
                 ));
             }
-            replacements.insert(from, unescape_replacement_field(to.trim()));
+            replacements.insert(from, parse_replacement_value(to));
         }
         self.replacements = replacements;
         Ok(())
@@ -1445,6 +1463,25 @@ mod tests {
         reparsed.apply_replacements_form(&form).unwrap();
         assert_eq!(reparsed.replacements.get("a").unwrap(), "x; b => y");
         assert_eq!(reparsed.replacements.get("c\\d").unwrap(), "\\;");
+        assert_eq!(reparsed.replacements, text.replacements);
+    }
+
+    #[test]
+    fn text_replacements_form_round_trips_arrows_and_whitespace_values() {
+        let mut text = TextConfig::default();
+        text.replacements
+            .insert("a => b".to_string(), "c".to_string());
+        text.replacements
+            .insert("scratch that".to_string(), "\n".to_string());
+        text.replacements
+            .insert("pause".to_string(), " ".to_string());
+
+        let form = text.replacements_form_value();
+        let mut reparsed = TextConfig::default();
+        reparsed.apply_replacements_form(&form).unwrap();
+        assert_eq!(reparsed.replacements.get("a => b").unwrap(), "c");
+        assert_eq!(reparsed.replacements.get("scratch that").unwrap(), "\n");
+        assert_eq!(reparsed.replacements.get("pause").unwrap(), " ");
         assert_eq!(reparsed.replacements, text.replacements);
     }
 
