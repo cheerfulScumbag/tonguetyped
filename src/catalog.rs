@@ -22,9 +22,10 @@
 //!   failing.
 //! - canary and cohere reject input past their encoder table (about 400
 //!   seconds) before decoding ([`LongForm::HardCap`]), so
-//!   [`crate::config::Config::validate`] refuses a per-call buffer above the
-//!   active model's cap - that is `chunk_seconds` when chunking is on and
-//!   `max_recording_seconds` when it is off.
+//!   `InferenceEngine::transcribe` always splits a hard-capped model's input
+//!   into windows at most the cap - even when `chunk_seconds` is `0` - and
+//!   [`crate::config::Config::validate`] additionally refuses a config whose
+//!   live recording limit would exceed it.
 //!
 //! Diarization (`sortformer`) and streaming-only families stay out: neither
 //! produces a single offline transcript through `Session::run`.
@@ -1578,6 +1579,17 @@ pub fn variant_info(variant: &str) -> Option<&'static VariantInfo> {
 
 pub fn find(id: &str) -> Option<&'static CatalogModel> {
     ENTRIES.iter().find(|entry| entry.id == id)
+}
+
+/// The catalog entry installed at `path`, matched by the unique filename each
+/// entry pins (asserted by `entry_filenames_are_unique`). An engine is built
+/// from a catalog path and needs that model's input-length contract, so this
+/// recovers the entry from the path the engine already holds. A path the
+/// catalog does not know (a benchmark fixture or a hand-placed file) has no
+/// entry.
+pub fn entry_for_path(path: &std::path::Path) -> Option<&'static CatalogModel> {
+    let filename = path.file_name().and_then(|name| name.to_str())?;
+    ENTRIES.iter().find(|entry| entry.filename == filename)
 }
 
 /// Local path a catalog model is (or would be) installed at.

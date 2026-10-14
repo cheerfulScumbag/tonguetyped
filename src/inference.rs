@@ -415,11 +415,28 @@ const DECODE_SAMPLE_RATE: usize = 16_000;
 /// boundary, in samples (10 ms at 16 kHz).
 const CHUNK_PROBE_SAMPLES: usize = 160;
 
-/// The decode window in samples for `config`, or `None` when chunking is
-/// disabled (`chunk_seconds == 0`).
-fn chunk_window_samples(config: &crate::config::TranscriptionConfig) -> Option<usize> {
-    (config.chunk_seconds > 0)
-        .then(|| (config.chunk_seconds as usize).saturating_mul(DECODE_SAMPLE_RATE))
+/// The decode window in samples for `config` on a model with `long_form`, or
+/// `None` when neither chunking nor a hard cap bounds a call. Chunking bounds
+/// every call to `chunk_seconds`; a hard-capped family bounds every call to
+/// its cap regardless, so the file path cannot hand it an over-length buffer
+/// with chunking off. When both apply the smaller window wins.
+fn decode_window_samples(
+    config: &crate::config::TranscriptionConfig,
+    long_form: crate::catalog::LongForm,
+) -> Option<usize> {
+    let chunk = (config.chunk_seconds > 0)
+        .then(|| (config.chunk_seconds as usize).saturating_mul(DECODE_SAMPLE_RATE));
+    let cap = match long_form {
+        crate::catalog::LongForm::HardCap { cap_seconds } => {
+            Some((cap_seconds as usize).saturating_mul(DECODE_SAMPLE_RATE))
+        }
+        _ => None,
+    };
+    match (chunk, cap) {
+        (Some(chunk), Some(cap)) => Some(chunk.min(cap)),
+        (Some(chunk), None) => Some(chunk),
+        (None, cap) => cap,
+    }
 }
 
 /// Contiguous sample ranges covering `samples`, each at most `window` long. A
@@ -522,6 +539,11 @@ pub struct InferenceEngine {
     model_path: PathBuf,
     preference: BackendPreference,
     cancel: CancelToken,
+    /// The loaded model's input-length contract, recovered from the catalog by
+    /// `model_path`. A hard-capped family (canary, cohere) is always decoded
+    /// in windows at most its cap, so no call can exceed the limit even when
+    /// `transcription.chunk_seconds` is `0`.
+    long_form: crate::catalog::LongForm,
 }
 
 impl InferenceEngine {
@@ -537,11 +559,16 @@ impl InferenceEngine {
         preference: BackendPreference,
         cancel: CancelToken,
     ) -> Self {
+        let long_form = crate::catalog::entry_for_path(&model_path)
+            .map_or(crate::catalog::LongForm::Unbounded, |entry| {
+                entry.info().long_form
+            });
         InferenceEngine {
             session: None,
             model_path,
             preference,
             cancel,
+            long_form,
         }
     }
 
@@ -646,25 +673,26 @@ impl InferenceEngine {
     }
 
     /// Transcribe one buffer of 16 kHz mono audio, splitting it into bounded
-    /// chunks first when it is longer than `transcription.chunk_seconds`. This
-    /// is the one decode path shared by live dictation (`coordinator`) and the
-    /// file command (`crate::transcribe`): both hand their audio to this
-    /// method, which owns every `Session::run` call. Each chunk is decoded by
-    /// the same loaded session and the non-empty transcripts are joined with a
-    /// single space, so a long recording never sends one unbounded buffer
-    /// through the decoder.
+    /// chunks first when it is longer than `transcription.chunk_seconds` or
+    /// the active hard-capped model's limit. This is the one decode path
+    /// shared by live dictation (`coordinator`) and the file command
+    /// (`crate::transcribe`): both hand their audio to this method, which owns
+    /// every `Session::run` call. Each chunk is decoded by the same loaded
+    /// session and the non-empty transcripts are joined with a single space, so
+    /// a long recording never sends one unbounded buffer through the decoder.
     pub fn transcribe(
         &mut self,
         audio: &[f32],
         config: &crate::config::TranscriptionConfig,
     ) -> anyhow::Result<Transcription> {
+        let window = decode_window_samples(config, self.long_form);
         let loaded = self.session.as_mut().context("engine not loaded")?;
         if !loaded.warned_unsupported {
             loaded.warned_unsupported = loaded.decode_support.warn_unsupported(config);
         }
         let options = run_options(config, loaded.decode_support);
         let session = &mut loaded.session;
-        match chunk_window_samples(config) {
+        match window {
             Some(window) if audio.len() > window => {
                 let mut parts: Vec<String> = Vec::new();
                 let mut truncated = false;
@@ -1036,12 +1064,74 @@ mod tests {
     }
 
     #[test]
-    fn chunk_window_is_the_configured_seconds_and_none_when_disabled() {
+    fn decode_window_is_the_configured_seconds_and_none_when_unbounded_and_disabled() {
+        use crate::catalog::LongForm;
         assert_eq!(
-            chunk_window_samples(&config_with_chunk_seconds(30)),
+            decode_window_samples(&config_with_chunk_seconds(30), LongForm::Unbounded),
             Some(30 * 16_000)
         );
-        assert_eq!(chunk_window_samples(&config_with_chunk_seconds(0)), None);
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(0), LongForm::Unbounded),
+            None
+        );
+    }
+
+    #[test]
+    fn decode_window_is_narrowed_to_a_hard_cap_and_never_none() {
+        use crate::catalog::LongForm;
+        let cap = LongForm::HardCap { cap_seconds: 400 };
+        // Chunking on but configured wider than the cap: the cap wins.
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(600), cap),
+            Some(400 * 16_000)
+        );
+        // Chunking off: the cap still bounds every call.
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(0), cap),
+            Some(400 * 16_000)
+        );
+        // Chunking narrower than the cap: chunking wins.
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(30), cap),
+            Some(30 * 16_000)
+        );
+    }
+
+    #[test]
+    fn engine_reads_a_models_hard_cap_from_its_catalog_path() {
+        // Callers build the engine from `catalog::model_path`, so it recovers
+        // the family's input-length contract without threading it through.
+        let entry = crate::catalog::find("canary-1b-v2-f16").unwrap();
+        let engine = InferenceEngine::new(PathBuf::from(entry.filename), BackendPreference::Auto);
+        assert_eq!(engine.long_form, entry.info().long_form);
+
+        let unknown =
+            InferenceEngine::new(PathBuf::from("irrelevant.gguf"), BackendPreference::Auto);
+        assert_eq!(unknown.long_form, crate::catalog::LongForm::Unbounded);
+    }
+
+    #[test]
+    fn hard_capped_model_chunks_a_whole_file_even_when_chunking_is_off() {
+        // chunk_seconds = 0 must not hand a hard-capped model one over-length
+        // buffer: the engine still splits a whole file into capped windows.
+        let entry = crate::catalog::find("canary-1b-v2-f16").unwrap();
+        let crate::catalog::LongForm::HardCap { cap_seconds } = entry.info().long_form else {
+            panic!("canary-1b-v2-f16 should be hard-capped");
+        };
+        let window = decode_window_samples(&config_with_chunk_seconds(0), entry.info().long_form)
+            .expect("a hard-capped model always has a bounded window");
+        assert_eq!(window, cap_seconds as usize * 16_000);
+
+        let samples = vec![0.0_f32; window + 16_000];
+        let ranges = split_chunks(&samples, window);
+        assert!(ranges.len() > 1, "an over-cap file must be chunked");
+        assert_eq!(ranges.last().unwrap().end, samples.len());
+        for range in &ranges {
+            assert!(
+                range.end - range.start <= window,
+                "chunk {range:?} exceeds the cap"
+            );
+        }
     }
 
     #[test]

@@ -196,7 +196,7 @@ fn long_form_note(long_form: crate::catalog::LongForm) -> String {
             )
         }
         crate::catalog::LongForm::HardCap { cap_seconds } => {
-            format!("{cap_seconds}s per call; longer audio is chunked to stay within it")
+            format!("{cap_seconds}s per call; longer audio is always chunked to stay within it")
         }
     }
 }

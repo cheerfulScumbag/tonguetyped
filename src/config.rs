@@ -984,13 +984,13 @@ impl Config {
         {
             anyhow::bail!("max_recording_seconds is too large");
         }
-        // The pipeline hands the model one VAD-filtered buffer, so a family
-        // that rejects over-length input (canary, cohere) needs that buffer to
-        // stay within the family's single-call limit. Chunking bounds every
-        // call to `chunk_seconds`; when it is off the whole recording reaches
-        // the model. Every catalog entry has `VariantInfo` (see
-        // `catalog::VARIANTS`), so this reads the model's own limit rather than
-        // assuming whisper.
+        // A family that rejects over-length input (canary, cohere) is bounded
+        // to its cap by the engine on every call, including the file path with
+        // chunking off; this check additionally keeps the configured live
+        // recording limit within the cap. With chunking on that limit is
+        // `chunk_seconds`, otherwise `max_recording_seconds`. Every catalog
+        // entry has `VariantInfo` (see `catalog::VARIANTS`), so this reads the
+        // model's own limit rather than assuming whisper.
         let entry = crate::catalog::find(&self.model.active_model)
             .expect("the catalog check above already accepted this id");
         if let crate::catalog::LongForm::HardCap { cap_seconds } = entry.info().long_form {
