@@ -59,7 +59,7 @@ commands:
 # 1. Install - pick one (every channel is detailed under Installation):
 paru -S tonguetyped-bin                                 # Arch Linux (AUR)
 nix profile install github:cheerfulScumbag/tonguetyped  # Nix
-sudo apt install ./tonguetyped_*.deb                    # Debian / Ubuntu
+sudo apt install ./tonguetyped-gpu-vulkan_*.deb         # Debian / Ubuntu
 cargo build --release                                   # build from source
 
 # 2. Configure and start on login:
@@ -96,6 +96,15 @@ nix profile upgrade tonguetyped
 nix run github:cheerfulScumbag/tonguetyped -- daemon
 ```
 
+Every package carries the CPU backend as a fallback plus one GPU backend. The
+default is Vulkan; NVIDIA and AMD users can pick CUDA or ROCm instead (x86_64
+only):
+
+```sh
+nix profile install github:cheerfulScumbag/tonguetyped#gpu-cuda
+nix profile install github:cheerfulScumbag/tonguetyped#gpu-rocm
+```
+
 From a local checkout, use `nix profile install .` instead of the flake URL. The
 package ships the `tonguetyped` binary and the
 `io.github.cheerfulScumbag.tonguetyped.desktop` entry, and wraps the binary with
@@ -107,18 +116,26 @@ the `wtype`, `dotool`, `wl-clipboard`, and `canberra-gtk-play` helpers it needs.
 paru -S tonguetyped-bin   # or: yay -S tonguetyped-bin
 ```
 
-`tonguetyped-bin` repackages the prebuilt Linux binary and depends on `wtype`,
+`tonguetyped-bin` repackages the prebuilt Vulkan Linux binary (CPU fallback
+included) and depends on `wtype`,
 `dotool`, `wl-clipboard`, and `xdotool`, so typing works out of the box.
 
 ### Debian / Ubuntu (.deb)
 
-Download the `.deb` for your variant from the
+Each release ships one `.deb` per GPU backend, and every one also carries the
+CPU fallback: `tonguetyped-gpu-vulkan` (any Vulkan-capable GPU),
+`tonguetyped-gpu-cuda` (NVIDIA), and `tonguetyped-gpu-rocm` (AMD). Download the
+one for your GPU from the
 [latest release](https://github.com/cheerfulScumbag/tonguetyped/releases/latest)
 and install it:
 
 ```sh
-sudo apt install ./tonguetyped_*.deb   # or the tonguetyped-gpu-*.deb variant
+sudo apt install ./tonguetyped-gpu-vulkan_*.deb   # or -gpu-cuda / -gpu-rocm
 ```
+
+The variants replace one another, so installing a different one swaps the
+backend. The same three builds are attached as plain binaries
+(`tonguetyped-<tag>-linux-x86_64-gpu-<backend>`).
 
 The `.deb` recommends `wtype` and `wl-clipboard`. Debian does not package
 `dotool`, so KDE Wayland users must build it from source (see

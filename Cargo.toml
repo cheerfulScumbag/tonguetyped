@@ -1,6 +1,6 @@
 [package]
 name = "tonguetyped"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Local Linux dictation controlled from the terminal or a desktop-wide keyboard shortcut"
 repository = "https://github.com/cheerfulScumbag/tonguetyped"
@@ -8,6 +8,10 @@ license = "MIT"
 
 [package.metadata.deb]
 maintainer = "cheerfulScumbag <164391367+cheerfulScumbag@users.noreply.github.com>"
+extended-description = """\
+Privacy-focused offline dictation for Linux. Speech is transcribed on this
+machine with transcribe.cpp and typed into the focused application or written
+to text files. No account, no cloud, and no audio leaves the computer."""
 depends = "$auto"
 # wtype types through the Wayland virtual-keyboard protocol (wlroots
 # compositors only) and wl-clipboard provides the Wayland clipboard tools.
@@ -19,6 +23,28 @@ depends = "$auto"
 recommends = "wtype, wl-clipboard"
 section = "utils"
 priority = "optional"
+
+# One .deb per GPU backend (each also carries the CPU fallback). They all
+# install /usr/bin/tonguetyped, so each provides, conflicts with and replaces
+# the virtual `tonguetyped` package (the pre-0.2.2 bundled package's name):
+# installing one backend swaps out whichever was there before.
+[package.metadata.deb.variants.gpu-vulkan]
+name = "tonguetyped-gpu-vulkan"
+provides = "tonguetyped"
+conflicts = "tonguetyped"
+replaces = "tonguetyped"
+
+[package.metadata.deb.variants.gpu-cuda]
+name = "tonguetyped-gpu-cuda"
+provides = "tonguetyped"
+conflicts = "tonguetyped"
+replaces = "tonguetyped"
+
+[package.metadata.deb.variants.gpu-rocm]
+name = "tonguetyped-gpu-rocm"
+provides = "tonguetyped"
+conflicts = "tonguetyped"
+replaces = "tonguetyped"
 
 [[bin]]
 name = "tonguetyped"
