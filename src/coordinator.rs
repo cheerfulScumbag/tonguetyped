@@ -1275,10 +1275,10 @@ impl Coordinator {
             // clipboard cue is how the user learns to paste it themselves.
             if let Some(error) = output_error {
                 coordinator.settle_error(generation, error, &timing, "output_error");
-            } else if delivered != "success" {
-                coordinator.settle(generation, &timing, delivered);
             } else if truncated {
                 coordinator.settle(generation, &timing, "truncated");
+            } else if delivered != "success" {
+                coordinator.settle(generation, &timing, delivered);
             } else if history_failed {
                 coordinator.settle(generation, &timing, "history_error");
             } else {

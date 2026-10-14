@@ -760,6 +760,31 @@ async fn truncated_transcript_still_delivers_but_reports_a_cut_short_cue() {
 }
 
 #[tokio::test]
+async fn a_truncated_transcript_reports_the_cut_short_cue_across_delivery_modes() {
+    for delivery in [
+        Delivery::Inserted,
+        Delivery::Copied,
+        Delivery::CopiedAfterFailure("dotool failed with exit status: 1".to_string()),
+        Delivery::SubmitFailed("wtype failed with exit status: 1".to_string()),
+    ] {
+        let runtime = Arc::new(TestRuntime::default());
+        runtime.truncated_transcript.store(true, Ordering::SeqCst);
+        *runtime.delivery.lock().unwrap() = Some(delivery);
+        let feedback = Arc::new(RecordingFeedback::default());
+        let coordinator = coordinator_with_feedback(runtime, feedback.clone());
+
+        stop_and_wait(&coordinator).await;
+
+        // A partial transcript always surfaces the cutoff cue, whichever way
+        // the text was delivered: the delivery outcome must not hide it.
+        assert_eq!(
+            feedback.events.lock().unwrap().last(),
+            Some(&FeedbackEvent::Truncated)
+        );
+    }
+}
+
+#[tokio::test]
 async fn typing_fallback_to_the_clipboard_is_a_success_with_its_own_cue() {
     let runtime = Arc::new(TestRuntime::default());
     *runtime.delivery.lock().unwrap() = Some(Delivery::CopiedAfterFailure(
