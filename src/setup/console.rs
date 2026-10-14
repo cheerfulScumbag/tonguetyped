@@ -16,7 +16,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::io;
 use std::time::Duration;
@@ -34,12 +34,15 @@ const LOGO_HEIGHT: u16 = 8;
 const ACTIVATION_LABELS: [&str; 2] = crate::config::ACTIVATION_MODE_LABELS;
 const STARTUP_LABELS: [&str; 2] = crate::config::STARTUP_LABELS;
 const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
+const TRANSLATE_LABELS: [&str; 2] = crate::config::TRANSLATE_LABELS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepKind {
     Model,
     Downloading,
     InferenceBackend,
+    Translation,
+    Decoding,
     Microphone,
     Activation,
     Shortcut,
@@ -95,6 +98,10 @@ struct ConsoleState {
     model_selection: usize,
     inference_backend_values: Vec<&'static str>,
     inference_backend_selection: usize,
+    translate_selection: usize,
+    /// The vocabulary prompt followed by one field per `DECODE_KNOBS` knob.
+    decoding_fields: Vec<TextField>,
+    decoding_field: usize,
     mic_selection: usize,
     activation_selection: usize,
     output_labels: Vec<String>,
@@ -152,6 +159,11 @@ impl ConsoleState {
             .iter()
             .position(|name| *name == config.model.preferred_backend)
             .unwrap_or(0);
+        let translate_selection = usize::from(config.transcription.translate);
+        let decoding_fields = std::iter::once(config.transcription.initial_prompt.clone())
+            .chain(config.transcription.decoding_form_values())
+            .map(TextField::new)
+            .collect();
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = capabilities.output_labels();
@@ -189,6 +201,9 @@ impl ConsoleState {
             model_selection,
             inference_backend_values,
             inference_backend_selection,
+            translate_selection,
+            decoding_fields,
+            decoding_field: 0,
             mic_selection,
             activation_selection,
             output_labels,
@@ -258,14 +273,15 @@ impl ConsoleState {
             StepKind::Shortcut => self.handle_shortcut_key(key),
             StepKind::Confirm => self.handle_confirm_key(key),
             StepKind::Downloading => self.handle_downloading_key(key),
-            StepKind::HistoryRetention | StepKind::TranscriptFolder => {
+            StepKind::Decoding | StepKind::HistoryRetention | StepKind::TranscriptFolder => {
                 self.handle_text_step_key(key)
             }
             _ => self.handle_list_key(key),
         }
     }
 
-    /// The two free-text steps ("History retention", "Transcript folder").
+    /// The free-text steps ("Decoding", "History retention", "Transcript
+    /// folder").
     /// Unlike the list steps, `h`/`l`/`q` type literal characters here rather
     /// than retreat/advance/cancel, so Escape is the way back and Enter
     /// advances (validating the fields first).
@@ -291,6 +307,7 @@ impl ConsoleState {
 
     fn text_field_count(&self) -> usize {
         match self.step {
+            StepKind::Decoding => self.decoding_fields.len(),
             StepKind::HistoryRetention => self.retention_fields.len(),
             StepKind::TranscriptFolder => 1,
             _ => 0,
@@ -302,13 +319,17 @@ impl ConsoleState {
         if len == 0 {
             return;
         }
-        if self.step == StepKind::HistoryRetention {
-            self.retention_field = (self.retention_field as i32 + delta).clamp(0, len - 1) as usize;
-        }
+        let field = match self.step {
+            StepKind::Decoding => &mut self.decoding_field,
+            StepKind::HistoryRetention => &mut self.retention_field,
+            _ => return,
+        };
+        *field = (*field as i32 + delta).clamp(0, len - 1) as usize;
     }
 
     fn selected_text_field_mut(&mut self) -> &mut TextField {
         match self.step {
+            StepKind::Decoding => &mut self.decoding_fields[self.decoding_field],
             StepKind::HistoryRetention => &mut self.retention_fields[self.retention_field],
             StepKind::TranscriptFolder => &mut self.folder_field,
             _ => unreachable!("no text field for this step"),
@@ -431,6 +452,7 @@ impl ConsoleState {
         match self.step {
             StepKind::Model => self.model_values.len(),
             StepKind::InferenceBackend => self.inference_backend_values.len(),
+            StepKind::Translation => TRANSLATE_LABELS.len(),
             StepKind::Microphone => self.capabilities.microphones.len(),
             StepKind::Activation => ACTIVATION_LABELS.len(),
             StepKind::Output => self.output_labels.len(),
@@ -443,6 +465,7 @@ impl ConsoleState {
             StepKind::Shortcut
             | StepKind::Confirm
             | StepKind::Downloading
+            | StepKind::Decoding
             | StepKind::HistoryRetention
             | StepKind::TranscriptFolder => 0,
         }
@@ -452,6 +475,7 @@ impl ConsoleState {
         match self.step {
             StepKind::Model => &mut self.model_selection,
             StepKind::InferenceBackend => &mut self.inference_backend_selection,
+            StepKind::Translation => &mut self.translate_selection,
             StepKind::Microphone => &mut self.mic_selection,
             StepKind::Activation => &mut self.activation_selection,
             StepKind::Output => &mut self.output_selection,
@@ -464,6 +488,7 @@ impl ConsoleState {
             StepKind::Shortcut
             | StepKind::Confirm
             | StepKind::Downloading
+            | StepKind::Decoding
             | StepKind::HistoryRetention
             | StepKind::TranscriptFolder => {
                 unreachable!("no list selection for this step")
@@ -494,6 +519,8 @@ impl ConsoleState {
             steps.push(Downloading);
         }
         steps.push(InferenceBackend);
+        steps.push(Translation);
+        steps.push(Decoding);
         steps.push(Microphone);
         steps.push(Activation);
         steps.push(Shortcut);
@@ -544,6 +571,25 @@ impl ConsoleState {
                 let selected = self.inference_backend_values[self.inference_backend_selection];
                 if !self.backend_unavailable(selected) {
                     self.config.model.preferred_backend = selected.to_string();
+                }
+            }
+            StepKind::Translation => {
+                self.config.transcription.translate = self.translate_selection == 1;
+            }
+            StepKind::Decoding => {
+                let (prompt, knobs) = self
+                    .decoding_fields
+                    .split_first()
+                    .expect("the decoding step has a prompt field");
+                let knobs: [&str; crate::config::DECODE_KNOBS.len()] =
+                    std::array::from_fn(|index| knobs[index].value());
+                if let Err(message) = self
+                    .config
+                    .transcription
+                    .apply_decoding_form(prompt.value(), &knobs)
+                {
+                    self.error = Some(message);
+                    return Ok(ControlFlow::Continue);
                 }
             }
             StepKind::Microphone => {
@@ -743,6 +789,8 @@ impl ConsoleState {
             StepKind::Model => "Speech model",
             StepKind::Downloading => "Fetching speech model",
             StepKind::InferenceBackend => "Inference backend",
+            StepKind::Translation => "Translation",
+            StepKind::Decoding => "Decoding",
             StepKind::Microphone => "Microphone",
             StepKind::Activation => "Activation",
             StepKind::Shortcut => "Shortcut",
@@ -828,7 +876,9 @@ impl ConsoleState {
             StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
             StepKind::Downloading if !self.downloads_finished() => "Fetching...  Esc back  q quit",
             StepKind::Downloading => "Enter continue  Esc back  q quit",
-            StepKind::HistoryRetention => "↑/↓ field  ←/→ cursor  Enter continue  Esc back",
+            StepKind::Decoding | StepKind::HistoryRetention => {
+                "↑/↓ field  ←/→ cursor  Enter continue  Esc back"
+            }
             StepKind::TranscriptFolder => "←/→ cursor  Enter continue  Esc back",
             _ => "↑/↓ choose  Enter continue  Esc back  q quit",
         }
@@ -847,6 +897,16 @@ impl ConsoleState {
             ),
             StepKind::Downloading => self.render_downloading(frame, area),
             StepKind::InferenceBackend => self.render_inference_backend(frame, area),
+            StepKind::Translation => frame.render_widget(
+                list_paragraph(
+                    &TRANSLATE_LABELS.map(String::from),
+                    self.translate_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::Decoding => self.render_decoding(frame, area),
             StepKind::Microphone => self.render_microphone(frame, area),
             StepKind::Activation => frame.render_widget(
                 list_paragraph(
@@ -891,6 +951,7 @@ impl ConsoleState {
                 &["Maximum entries", "Maximum age (days)"],
                 &self.retention_fields,
                 self.retention_field,
+                &[],
             ),
             StepKind::TranscriptFolder => self.render_text_fields(
                 frame,
@@ -898,6 +959,7 @@ impl ConsoleState {
                 &["Folder"],
                 std::slice::from_ref(&self.folder_field),
                 0,
+                &[],
             ),
             StepKind::OverlayEnabled => frame.render_widget(
                 list_paragraph(
@@ -1165,9 +1227,31 @@ impl ConsoleState {
         );
     }
 
+    /// The decoding step: the vocabulary prompt and the Whisper decode knobs,
+    /// with a one-line explanation under the fields.
+    fn render_decoding(&self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+        let mut labels = vec![crate::config::INITIAL_PROMPT_LABEL];
+        labels.extend(crate::config::DECODE_KNOBS.iter().map(|knob| knob.label));
+        self.render_text_fields(
+            frame,
+            chunks[0],
+            &labels,
+            &self.decoding_fields,
+            self.decoding_field,
+            &crate::config::TranscriptionConfig::decoding_form_placeholders(),
+        );
+        frame.render_widget(Paragraph::new(crate::config::DECODING_HINT), chunks[1]);
+    }
+
     /// A labeled set of editable text fields, the selected one highlighted
-    /// with a reversed cursor cell - the console's counterpart to the
-    /// dashboard's `TextFieldsScreen` rendering.
+    /// with a reversed cursor cell and an empty one showing its dim
+    /// placeholder (indexed like `fields`; missing entries show nothing) -
+    /// the console's counterpart to the dashboard's `TextFieldsScreen`
+    /// rendering.
     fn render_text_fields(
         &self,
         frame: &mut Frame,
@@ -1175,6 +1259,7 @@ impl ConsoleState {
         labels: &[&str],
         fields: &[TextField],
         selected: usize,
+        placeholders: &[String],
     ) {
         let label_width = labels
             .iter()
@@ -1199,7 +1284,23 @@ impl ConsoleState {
                     format!("{marker}{label:<label_width$}  "),
                     style,
                 )];
-                if highlighted {
+                let placeholder = placeholders.get(index).filter(|_| field.value().is_empty());
+                let dim = Style::default().fg(Color::DarkGray);
+                if let Some(placeholder) = placeholder {
+                    // The cursor sits on the hint's first character so the
+                    // hint starts in the same column on every row.
+                    let mut chars = placeholder.chars();
+                    match chars.next().filter(|_| highlighted) {
+                        Some(first) => {
+                            spans.push(Span::styled(
+                                first.to_string(),
+                                dim.add_modifier(Modifier::REVERSED),
+                            ));
+                            spans.push(Span::styled(chars.as_str().to_string(), dim));
+                        }
+                        None => spans.push(Span::styled(placeholder.clone(), dim)),
+                    }
+                } else if highlighted {
                     let (before, cursor_char, after) = field.split_at_cursor();
                     spans.push(Span::raw(before));
                     spans.push(Span::styled(
@@ -1214,7 +1315,7 @@ impl ConsoleState {
             })
             .collect();
         frame.render_widget(
-            Paragraph::new(lines).block(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(self.step_title()),
@@ -1229,6 +1330,14 @@ impl ConsoleState {
             Line::from(format!(
                 "Backend:     {}",
                 crate::inference::backend_preference_label(&self.config.model.preferred_backend)
+            )),
+            Line::from(format!(
+                "Translation: {}",
+                self.config.transcription.translate_label()
+            )),
+            Line::from(format!(
+                "Decoding:    {}",
+                self.config.transcription.decoding_summary()
             )),
             Line::from(format!("Microphone:  {}", self.config.audio.microphone)),
             Line::from(format!(
@@ -1534,7 +1643,7 @@ mod tests {
         state.move_selection(1);
         state.advance().unwrap();
         assert_eq!(state.config.model.preferred_backend, "cpu");
-        assert_eq!(state.step, StepKind::Microphone);
+        assert_eq!(state.step, StepKind::Translation);
         assert_eq!(state.prev_step(), Some(StepKind::InferenceBackend));
     }
 

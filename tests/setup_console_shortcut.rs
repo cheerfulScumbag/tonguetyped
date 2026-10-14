@@ -271,6 +271,8 @@ fn advance_to_step(session: &mut Session, next: &str) {
 fn advance_to_shortcut_step(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
     advance_to_step(session, "Inference backend");
+    advance_to_step(session, "Translate speech into English");
+    advance_to_step(session, "Vocabulary prompt");
     advance_to_step(session, "Microphone");
     advance_to_step(session, "Activation");
     advance_to_step(session, "Shortcut");

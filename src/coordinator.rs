@@ -498,7 +498,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         }
         timings.backend = engine.active_backend_info();
         let inference_started = Instant::now();
-        let result = engine.transcribe(&samples, &config.transcription.language);
+        let result = engine.transcribe(&samples, &config.transcription);
         timings.inference = inference_started.elapsed();
         TranscriptionAttempt { result, timings }
     }

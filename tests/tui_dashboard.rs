@@ -283,9 +283,11 @@ const KEY_TAB: &[u8] = b"\t";
 const KEY_BACKSPACE: &[u8] = b"\x7f";
 const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 
-const SETTING_LABELS: [&str; 11] = [
+const SETTING_LABELS: [&str; 13] = [
     "Model",
     "Inference backend",
+    "Translation",
+    "Decoding",
     "Microphone",
     "Activation",
     "Shortcut",
@@ -309,21 +311,34 @@ const COMMAND_NAMES: [&str; 9] = [
     "shortcut-test",
 ];
 
-/// Home index of the first command row (after the eleven Settings rows), for
+/// Home index of the first command row (after the thirteen Settings rows), for
 /// tests that need to arrow down to a specific command.
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
+
+/// Moves the home selection from the first Settings row ("Model") down to
+/// the row labeled `label`, and waits until it is drawn selected.
+fn select_setting(session: &mut Session, label: &str) -> String {
+    let row = SETTING_LABELS
+        .iter()
+        .position(|candidate| *candidate == label)
+        .unwrap_or_else(|| panic!("{label:?} is not a Settings row"));
+    for _ in 0..row {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for(&format!("> {label}"), Duration::from_secs(3))
+}
 
 #[test]
 fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
-    // Tall enough for the eleven Settings rows plus every Commands row with no
-    // scrolling of either panel.
-    let session = Session::spawn(&sandbox, 100, 34);
+    // Tall enough for the thirteen Settings rows plus every Commands row with
+    // no scrolling of either panel.
+    let session = Session::spawn(&sandbox, 100, 36);
 
     // The pre-change baseline (see .superdesign/replica_html_template and the
     // dashboard task's report) listed 11 CLI commands with model/autostart
     // among them. The signed-off settings-menu redesign turns the home screen
-    // into two stacked panels with one selection cursor: eleven Settings rows
+    // into two stacked panels with one selection cursor: the Settings rows
     // with current values (model and autostart included) above the remaining
     // Commands. All of it must fit one normal terminal, no pagination.
     let screen = session.wait_for("Settings", Duration::from_secs(5));
@@ -381,7 +396,7 @@ fn pty_home_selection_crosses_from_the_settings_panel_into_the_commands_panel() 
         "expected Model selected:\n{initial}"
     );
 
-    // Walking down past all eleven settings rows lands on "setup", the first
+    // Walking down past every settings row lands on "setup", the first
     // command row - one cursor spans both panels.
     for _ in 0..FIRST_COMMAND_ROW {
         session.send(KEY_DOWN);
@@ -429,10 +444,7 @@ fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_ho
         "expected Model selected:\n{initial}"
     );
 
-    session.send(KEY_DOWN);
-    session.send(KEY_DOWN);
-    session.send(KEY_DOWN);
-    let after_down = session.wait_for("> Activation", Duration::from_secs(3));
+    let after_down = select_setting(&mut session, "Activation");
     assert!(
         !after_down.contains("> Model")
             && !after_down.contains("> Inference backend")
@@ -619,12 +631,7 @@ fn pty_activation_setting_changes_mode_and_persists_it() {
     let mut session = Session::spawn(&sandbox, 100, 32);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Activation is the fourth Settings row (Model, Inference backend,
-    // Microphone, Activation).
-    session.send(KEY_DOWN);
-    session.send(KEY_DOWN);
-    session.send(KEY_DOWN);
-    session.wait_for("> Activation", Duration::from_secs(3));
+    select_setting(&mut session, "Activation");
     session.send(KEY_ENTER);
 
     session.wait_for("> Hold the shortcut while speaking", Duration::from_secs(3));
@@ -656,7 +663,7 @@ fn pty_overlay_setting_cycles_position_and_persists_it() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Overlay is the eleventh and last Settings row.
+    // Overlay is the last Settings row.
     for _ in 0..SETTING_LABELS.len() - 1 {
         session.send(KEY_DOWN);
     }
@@ -746,11 +753,7 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Transcript folder is the eighth Settings row.
-    for _ in 0..7 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> Transcript folder", Duration::from_secs(3));
+    select_setting(&mut session, "Transcript folder");
     session.send(KEY_ENTER);
 
     let opened = session.wait_for("Folder", Duration::from_secs(3));
@@ -786,16 +789,95 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
 }
 
 #[test]
+fn pty_decoding_setting_persists_the_prompt_and_overrides_and_rejects_bad_numbers() {
+    let sandbox = Sandbox::new("decoding-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    let home = session.wait_for("Settings", Duration::from_secs(5));
+    assert!(
+        home.contains("Decoding           model defaults"),
+        "an untouched config should read as model defaults:\n{home}"
+    );
+
+    select_setting(&mut session, "Decoding");
+    session.send(KEY_ENTER);
+    let opened = session.wait_for("Vocabulary prompt", Duration::from_secs(3));
+    assert!(
+        opened.contains("model default (0.2)") && opened.contains("Whisper models only"),
+        "empty knobs should show their model defaults:\n{opened}"
+    );
+
+    session.send(b"TongueTyped, Wayland");
+    session.send(KEY_TAB);
+    session.send(b"hot");
+    session.send(KEY_ENTER);
+    session.wait_for(
+        "Temperature must be between 0 and 1, or empty for the model default.",
+        Duration::from_secs(3),
+    );
+    assert!(
+        !sandbox.config_contents().contains("TongueTyped, Wayland"),
+        "a rejected form must not be saved"
+    );
+
+    for _ in 0..3 {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(b"0.3");
+    session.send(KEY_ENTER);
+    session.wait_for("Decoding saved.", Duration::from_secs(3));
+
+    let config = sandbox.config_contents();
+    assert!(
+        config.contains("initial_prompt = \"TongueTyped, Wayland\""),
+        "{config}"
+    );
+    assert!(config.contains("temperature = 0.3"), "{config}");
+    assert!(!config.contains("no_speech_threshold"), "{config}");
+
+    session.send(KEY_ESC);
+    let home = session.wait_for("> Decoding", Duration::from_secs(3));
+    assert!(
+        home.contains("vocabulary prompt, 1 override"),
+        "the Home row should summarize the saved decoding settings:\n{home}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_translation_setting_persists_the_choice() {
+    let sandbox = Sandbox::new("translation-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Translation");
+    session.send(KEY_ENTER);
+    session.wait_for(
+        "> Transcribe in the spoken language",
+        Duration::from_secs(3),
+    );
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    session.wait_for("Translation saved.", Duration::from_secs(3));
+    assert!(sandbox.config_contents().contains("translate = true"));
+
+    session.send(KEY_ESC);
+    let home = session.wait_for("> Translation", Duration::from_secs(3));
+    assert!(
+        home.contains("Translate speech into English"),
+        "the Home row should show the saved choice:\n{home}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_history_retention_setting_persists_both_limits() {
     let sandbox = Sandbox::new("retention-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // History retention is the ninth Settings row.
-    for _ in 0..8 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> History retention", Duration::from_secs(3));
+    select_setting(&mut session, "History retention");
     session.send(KEY_ENTER);
 
     let opened = session.wait_for("Maximum entries", Duration::from_secs(3));
@@ -841,11 +923,7 @@ fn pty_shortcut_screen_offers_the_system_dialog_and_reports_portal_failures_inli
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Shortcut is the fifth Settings row.
-    for _ in 0..4 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> Shortcut", Duration::from_secs(3));
+    select_setting(&mut session, "Shortcut");
     session.send(KEY_ENTER);
 
     // No app-chosen default: with nothing bound the screen says so and the
@@ -878,10 +956,7 @@ fn pty_microphone_screen_lists_devices_with_a_level_panel() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Microphone is the third Settings row.
-    session.send(KEY_DOWN);
-    session.send(KEY_DOWN);
-    session.wait_for("> Microphone", Duration::from_secs(3));
+    select_setting(&mut session, "Microphone");
     session.send(KEY_ENTER);
 
     // Whether or not a real capture device opens in this environment, the
@@ -909,11 +984,7 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Transcript output is the sixth Settings row.
-    for _ in 0..5 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> Transcript output", Duration::from_secs(3));
+    select_setting(&mut session, "Transcript output");
     session.send(KEY_ENTER);
     let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
     assert!(
@@ -964,11 +1035,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Transcript output is the sixth Settings row.
-    for _ in 0..5 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> Transcript output", Duration::from_secs(3));
+    select_setting(&mut session, "Transcript output");
     session.send(KEY_ENTER);
 
     // The type choice stays listed and the warning names what to install.
@@ -1029,11 +1096,7 @@ fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Startup is the tenth Settings row.
-    for _ in 0..9 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> Startup", Duration::from_secs(3));
+    select_setting(&mut session, "Startup");
     session.send(KEY_ENTER);
 
     session.wait_for("> Start manually", Duration::from_secs(3));

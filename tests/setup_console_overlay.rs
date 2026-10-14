@@ -166,8 +166,8 @@ const KEY_TAB: &[u8] = b"\t";
 const KEY_BACKSPACE: &[u8] = b"\x7f";
 
 /// Advances through the setup console's early steps (Model, Inference
-/// backend, Microphone, Activation, Shortcut, Output, Startup, History
-/// retention, Transcript folder) with Enter, accepting every default, until
+/// backend, Translation, Decoding, Microphone, Activation, Shortcut, Output,
+/// Startup, History retention, Transcript folder) with Enter, accepting every default, until
 /// the Overlay step is reached.
 fn advance_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
@@ -177,8 +177,16 @@ fn advance_to_overlay_enabled(session: &mut Session) {
 }
 
 fn advance_from_inference_backend_to_overlay_enabled(session: &mut Session) {
-    session.send(KEY_ENTER); // Inference backend -> Microphone
+    session.send(KEY_ENTER); // Inference backend -> Translation
+    session.wait_for("Translate speech into English", Duration::from_secs(5));
+    session.send(KEY_ENTER); // Translation -> Decoding
+    session.wait_for("Vocabulary prompt", Duration::from_secs(5));
+    session.send(KEY_ENTER); // Decoding -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
+    advance_from_microphone_to_overlay_enabled(session);
+}
+
+fn advance_from_microphone_to_overlay_enabled(session: &mut Session) {
     session.send(KEY_ENTER); // Microphone -> Activation
     session.wait_for("Activation", Duration::from_secs(5));
     session.send(KEY_ENTER); // Activation -> Shortcut
@@ -302,6 +310,10 @@ fn pty_history_retention_and_transcript_folder_steps_persist_their_inputs() {
     session.wait_for("Speech model", Duration::from_secs(10));
     session.send(KEY_ENTER); // Model -> Inference backend
     session.wait_for("Inference backend", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Translation
+    session.wait_for("Translate speech into English", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Decoding
+    session.wait_for("Vocabulary prompt", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Activation
@@ -355,6 +367,65 @@ fn pty_history_retention_and_transcript_folder_steps_persist_their_inputs() {
         config.contains("transcript_folder = \"/tmp/tonguetyped-setup-folder\""),
         "{config}"
     );
+}
+
+#[test]
+fn pty_translation_and_decoding_steps_persist_their_inputs() {
+    let sandbox = Sandbox::new("decoding");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+
+    session.wait_for("Speech model", Duration::from_secs(10));
+    session.send(KEY_ENTER); // Model -> Inference backend
+    session.wait_for("Inference backend", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Translation
+    session.wait_for(
+        "> Transcribe in the spoken language",
+        Duration::from_secs(5),
+    );
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER); // -> Decoding
+
+    let decoding = session.wait_for("Vocabulary prompt", Duration::from_secs(5));
+    assert!(
+        decoding.contains("model default (0.6)") && decoding.contains("Whisper models only"),
+        "decoding step should show the knobs and their model defaults:\n{decoding}"
+    );
+    session.send(b"TongueTyped");
+    for _ in 0..5 {
+        session.send(KEY_TAB);
+    }
+    session.send(b"2");
+    session.send(KEY_ENTER);
+    session.wait_for(
+        "No-speech limit must be between 0 and 1",
+        Duration::from_secs(5),
+    );
+    session.send(KEY_BACKSPACE);
+    session.send(b"inf");
+    session.send(KEY_ENTER); // -> Microphone
+    session.wait_for("Microphone", Duration::from_secs(5));
+    advance_from_microphone_to_overlay_enabled(&mut session);
+    session.wait_for("Overlay", Duration::from_secs(5));
+    session.send(KEY_UP); // Disabled -> skip straight to Review
+    session.send(KEY_ENTER);
+
+    let confirm = session.wait_for("Write this configuration?", Duration::from_secs(5));
+    assert!(
+        confirm.contains("Translation: Translate speech into English")
+            && confirm.contains("Decoding:    vocabulary prompt, 1 override"),
+        "review should summarize translation and decoding:\n{confirm}"
+    );
+    session.send(KEY_ENTER); // save
+    session.wait_for_exit(Duration::from_secs(5));
+
+    let config = sandbox.config_contents();
+    assert!(config.contains("translate = true"), "{config}");
+    assert!(
+        config.contains("initial_prompt = \"TongueTyped\""),
+        "{config}"
+    );
+    assert!(config.contains("no_speech_threshold = inf"), "{config}");
+    assert!(!config.contains("temperature"), "{config}");
 }
 
 #[test]

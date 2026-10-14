@@ -399,6 +399,30 @@ written `0600`, `~/` expanded). Those files are write-once - TongueTyped never
 reads, monitors, or prunes them, so they outlive the database retention.
 TongueTyped never stores audio.
 
+### Vocabulary and translation
+
+Whisper misspells names, jargon and product terms it has rarely heard. The
+**Decoding** setting takes a vocabulary prompt: text the decoder reads as if it
+came just before your recording, which biases it toward the words it contains.
+Whisper also copies the prompt's style, so write a punctuated sentence ("I
+dictate in TongueTyped on KWin with dotool.") rather than a bare word list, or
+the transcript loses its punctuation too. **Translation** turns speech in any
+language into English text; the English-only `.en` models always transcribe.
+
+```toml
+[transcription]
+initial_prompt = "I dictate in TongueTyped on KWin with dotool."
+translate = false
+# Optional Whisper decode knobs; leave them out to keep the model defaults.
+temperature = 0.0                  # 0-1, first decoding temperature
+temperature_increment = 0.2        # 0-1, retry step; 0 turns the retry off
+compression_ratio_threshold = 2.4  # retry above this; inf turns it off
+logprob_threshold = -1.0           # retry below this; -inf turns it off
+no_speech_threshold = 0.6          # 0-1, treat as silence above this; inf turns it off
+```
+
+Run `tonguetyped reload` (or restart the daemon) after changing them.
+
 ### Models
 
 Models are GGUF files managed from a reviewed catalog:
