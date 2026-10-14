@@ -7,10 +7,11 @@
 //! transcription shares one decode path with dictation rather than carrying a
 //! second inference implementation. The engine is loaded once and reused for
 //! every chunk of a long file; the chunking itself lives in
-//! `InferenceEngine::transcribe`, driven by `transcription.chunk_seconds`.
+//! `InferenceEngine::transcribe`, driven by `transcription.chunk_seconds` and,
+//! for a hard-capped family (canary, cohere), always by the model's own cap.
 
 use crate::config::Config;
-use crate::inference::{BackendPreference, InferenceEngine};
+use crate::inference::{BackendPreference, InferenceEngine, Transcription};
 use anyhow::Context;
 use std::path::Path;
 
@@ -46,14 +47,15 @@ pub fn read_audio_file(path: &Path) -> anyhow::Result<Vec<f32>> {
         .with_context(|| format!("failed to resample {} to 16 kHz", path.display()))
 }
 
-/// Transcribe `path` and return the transcript text.
+/// Transcribe `path` and return the transcript text plus whether the model cut
+/// it short.
 ///
 /// VAD runs first when `transcription.vad_enabled` is set, exactly as the live
 /// dictation path does, so silence-only audio yields an empty string without
 /// loading the model. The inference engine is then loaded once for the whole
 /// file - including every chunk of a long one - and driven through the shared
 /// `InferenceEngine::transcribe` path.
-pub fn transcribe_file(path: &Path, config: &Config) -> anyhow::Result<String> {
+pub fn transcribe_file(path: &Path, config: &Config) -> anyhow::Result<Transcription> {
     let samples = read_audio_file(path)?;
     let samples = if config.transcription.vad_enabled {
         let models_dir = InferenceEngine::models_dir()?;
@@ -66,7 +68,7 @@ pub fn transcribe_file(path: &Path, config: &Config) -> anyhow::Result<String> {
         samples
     };
     if samples.is_empty() {
-        return Ok(String::new());
+        return Ok(Transcription::default());
     }
 
     let model_path = crate::catalog::model_path(&config.model.active_model)?;
@@ -81,7 +83,27 @@ pub fn transcribe_file(path: &Path, config: &Config) -> anyhow::Result<String> {
         BackendPreference::parse(&config.model.preferred_backend)?,
     );
     engine.load()?;
-    Ok(engine.transcribe(&samples, &config.transcription)?.text)
+    engine.transcribe(&samples, &config.transcription)
+}
+
+/// Write a finished transcript to `out` and, when the model cut it short, a
+/// clear warning to `err`. The CLI keeps stdout as pure transcript data, so
+/// the cut-short notice goes to stderr - the file-path counterpart of the live
+/// path's truncated cue, so a partial transcript is never silently emitted.
+pub fn write_transcript(
+    transcription: &Transcription,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    writeln!(out, "{}", transcription.text.trim())?;
+    if transcription.truncated {
+        writeln!(
+            err,
+            "warning: the active model's decode limit cut the transcript short; \
+             only a partial transcript was produced"
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -148,5 +170,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("failed to open audio file"), "{error}");
+    }
+
+    #[test]
+    fn write_transcript_warns_only_when_the_model_cut_it_short() {
+        let complete = Transcription {
+            text: "  hello world  ".to_string(),
+            truncated: false,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        write_transcript(&complete, &mut out, &mut err).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "hello world\n");
+        assert!(err.is_empty(), "a complete transcript must not warn");
+
+        let partial = Transcription {
+            text: "hello".to_string(),
+            truncated: true,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        write_transcript(&partial, &mut out, &mut err).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "hello\n");
+        let warning = String::from_utf8(err).unwrap();
+        assert!(warning.contains("partial transcript"), "{warning}");
     }
 }

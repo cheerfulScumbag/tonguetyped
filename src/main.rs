@@ -127,8 +127,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::LastResult) => send_command(ipc::Request::GetLastResult).await?,
         Some(Commands::Transcribe { file }) => {
             let config = config::Config::load()?;
-            let transcript = transcribe::transcribe_file(&file, &config)?;
-            println!("{}", transcript.trim());
+            let transcription = transcribe::transcribe_file(&file, &config)?;
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            transcribe::write_transcript(&transcription, &mut stdout.lock(), &mut stderr.lock())?;
         }
         Some(Commands::Model { command }) => run_model_command(command).await?,
     }

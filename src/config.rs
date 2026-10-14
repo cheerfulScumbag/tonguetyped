@@ -288,7 +288,9 @@ pub struct TranscriptionConfig {
     /// holds an unbounded buffer in memory or blocks for minutes on end.
     /// Chunk boundaries fall at the quietest point near each limit, so a
     /// split lands in a pause rather than through a word. `0` disables
-    /// chunking and always sends the whole buffer in one call.
+    /// chunking, so a model with no input ceiling decodes the whole buffer in
+    /// one call; a hard-capped family (canary, cohere) is still split into
+    /// windows within its cap regardless.
     #[serde(default = "default_chunk_seconds")]
     pub chunk_seconds: u64,
     /// Text the Whisper decoder reads as if it came just before the
@@ -1326,6 +1328,21 @@ mod tests {
 
         config.model.active_model = "whisper-tiny-q5_k_m".to_string();
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn hard_capped_models_activate_under_the_default_config() {
+        // `select_model` saves the config, which validates it, so a user with
+        // the default config (600 s recording limit, 30 s chunk window) must be
+        // able to activate canary or cohere: chunking keeps every call at 30 s,
+        // well within the 400 s cap.
+        for id in ["canary-1b-v2-f16", "cohere-transcribe-03-2026-f16"] {
+            let mut config = Config::default();
+            config.model.active_model = id.to_string();
+            assert_eq!(config.transcription.max_recording_seconds, 600);
+            assert_eq!(config.transcription.chunk_seconds, 30);
+            config.validate().unwrap();
+        }
     }
 
     #[test]
