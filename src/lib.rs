@@ -21,5 +21,6 @@ pub mod overlay;
 pub mod setup;
 pub mod status;
 pub mod text_input;
+pub mod transcribe;
 pub mod tui;
 pub mod vad;

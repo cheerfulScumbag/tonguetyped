@@ -4,7 +4,7 @@ use tonguetyped::cli::{
 };
 use tonguetyped::{
     activation, autostart, catalog, commands, config, daemon, doctor, ipc, model, setup, status,
-    tui,
+    transcribe, tui,
 };
 
 #[tokio::main]
@@ -17,7 +17,9 @@ async fn main() -> anyhow::Result<()> {
     // trying the next backend while loading a model from the Doctor or
     // Model screen) written straight to the same stderr would land askew of
     // whatever ratatui just drew and visibly corrupt the display. Every
-    // other subcommand still logs to stderr exactly as before.
+    // other subcommand logs to stderr, keeping stdout for its own data - the
+    // `transcribe` transcript, `status --format json`, `model list` rows -
+    // since the ONNX runtime behind VAD is chatty at `info` level.
     if cli.command.is_none() {
         tracing_subscriber::fmt()
             .with_env_filter(tracing_filter())
@@ -26,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(tracing_filter())
+            .with_writer(std::io::stderr)
             .init();
     }
 
@@ -122,6 +125,11 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Commands::Reload) => send_command(ipc::Request::ReloadConfig).await?,
         Some(Commands::LastResult) => send_command(ipc::Request::GetLastResult).await?,
+        Some(Commands::Transcribe { file }) => {
+            let config = config::Config::load()?;
+            let transcript = transcribe::transcribe_file(&file, &config)?;
+            println!("{}", transcript.trim());
+        }
         Some(Commands::Model { command }) => run_model_command(command).await?,
     }
 

@@ -232,6 +232,10 @@ fn home_items() -> Vec<HomeItem> {
                 command.get_name(),
                 "help" | "start" | "stop" | "model" | "autostart"
             )
+            // `transcribe` takes a file-path argument, so it is a terminal
+            // command rather than a dashboard action; there is no home-screen
+            // handler for it.
+            && command.get_name() != "transcribe"
         })
         .map(|command| HomeItem {
             name: command.get_name().to_string(),

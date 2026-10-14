@@ -297,6 +297,7 @@ shortcut dialog the setup wizard uses.
 | `tonguetyped status --format json [--follow] [--extended]` | Machine-readable status for status bars |
 | `tonguetyped reload` | Validate and reload the configuration |
 | `tonguetyped last-result` | Print the most recent transcription |
+| `tonguetyped transcribe <file>` | Transcribe a WAV file and print the transcript |
 | `tonguetyped doctor` | Check runtime dependencies, mic, model, and backends |
 | `tonguetyped shortcut-test` | Bind the shortcut and wait for you to press it |
 | `tonguetyped autostart enable` / `disable` | Toggle desktop-session autostart |
@@ -544,6 +545,29 @@ requests, and are re-verified against a pinned SHA-256 before going live; a
 corrupt download is deleted, not kept. The active model lives in
 `model.active_model` and is used by every backend alike - there is no separate
 CPU or GPU model.
+
+### Long recordings and file transcription
+
+A single live recording is capped by `transcription.max_recording_seconds`
+(600 s by default). Decoding is bounded separately: audio longer than
+`transcription.chunk_seconds` (30 s by default, Whisper's native window) is
+transcribed in back-to-back chunks that each fit that window, with each chunk
+boundary snapped back to the quietest point before its limit so a split lands
+in a pause rather than through a word. This keeps memory and latency bounded
+for a long dictation instead of sending one unbounded buffer through the
+decoder. Set `chunk_seconds = 0` to decode the whole buffer in one call.
+
+The same inference path transcribes an existing audio file:
+
+```sh
+tonguetyped transcribe recording.wav
+```
+
+`transcribe` reads a WAV (integer or float samples, any channel count or
+sample rate), downmixes it to mono, resamples it to 16 kHz, applies VAD when
+`transcription.vad_enabled` is set, and prints the transcript to stdout. It
+loads the configured model once and reuses it for every chunk of a long file,
+and does not need the daemon to be running.
 
 ---
 
