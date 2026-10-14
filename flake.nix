@@ -272,6 +272,12 @@
                       model.idle_unload.timeout_minutes = 5;
                       audio.feedback_volume = 0.5;
                       overlay.style = "pill";
+                      text = {
+                        spoken_punctuation = true;
+                        remove_fillers = true;
+                        post_process_timeout_seconds = 3;
+                        replacements."vox type" = "Voxtype";
+                      };
                     };
                   };
                 }
@@ -307,6 +313,12 @@
                 and .model == {idle_unload: {timeout_minutes: 5}}
                 and .audio == {feedback_volume: 0.5}
                 and .overlay == {style: "pill", position: "top-left"}
+                and .text == {
+                  spoken_punctuation: true,
+                  remove_fillers: true,
+                  post_process_timeout_seconds: 3,
+                  replacements: {"vox type": "Voxtype"}
+                }
               ' config.json
               test "$(stat -c %a $XDG_CONFIG_HOME/tonguetyped/config.toml)" = 600
               test ${pkgs.lib.escapeShellArg (builtins.toJSON service.wantedBy)} = '["graphical-session.target"]'

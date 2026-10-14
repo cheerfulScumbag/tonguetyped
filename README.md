@@ -277,11 +277,11 @@ tonguetyped
 ```
 
 The dashboard opens on a settings overview - one row each for Model, Inference
-backend, Translation, Decoding, Microphone, Activation, Shortcut, Transcript
-output, Typing backend, Transcript folder, History retention, Startup, Overlay,
-and Media pause - above a list of the remaining commands. Selecting a row opens
-a screen that edits just that area, with the same live microphone preview and
-shortcut dialog the setup wizard uses.
+backend, Translation, Decoding, Text processing, Microphone, Activation,
+Shortcut, Transcript output, Typing backend, Transcript folder, History
+retention, Startup, Overlay, and Media pause - above a list of the remaining
+commands. Selecting a row opens a screen that edits just that area, with the
+same live microphone preview and shortcut dialog the setup wizard uses.
 
 ### Commands
 
@@ -528,6 +528,35 @@ no_speech_threshold = 0.6          # 0-1, treat as silence above this; inf turns
 
 Run `tonguetyped reload` (or restart the daemon) after changing them.
 
+### Text processing
+
+A finished transcript can be cleaned up before it is typed, copied, or
+recorded. It is all local and off by default:
+
+```toml
+[text]
+spoken_punctuation = false           # "comma" -> ",", "new line" -> a newline, ...
+remove_fillers = false               # drop "um", "uh", ... (English dictation only)
+post_process_command = ""            # command: transcript on stdin, cleaned text on stdout
+post_process_timeout_seconds = 10    # kill the command after this and keep the text
+
+[text.replacements]
+"vox type" = "Voxtype"               # fix the same mistranscription every time
+```
+
+The replacement table is applied case-insensitively and only on whole words, so
+`vox type` never rewrites part of `vox typed`. Spoken punctuation turns spoken
+words into symbols (`comma`, `period`, `open paren`, `close brace`, `new line`,
+`equals`, and so on) for dictating code. Filler removal drops unambiguous
+English interjections (`um`, `uh`, `hmm`, ...), and runs only when
+`transcription.language` names English (`en`, `english`, or a regional form) -
+it is skipped for `auto` and every other language, so it can never delete a real
+word in a non-English dictation. The optional `post_process_command` runs last
+with the transcript on its stdin and the cleaned text on its stdout (a local LLM
+cleanup pipe, a `sed` script, ...); any error or a timeout past
+`post_process_timeout_seconds` falls back to the text without it. History and
+the transcript-folder export record exactly the processed text that was output.
+
 ### Models
 
 Models are GGUF files managed from a reviewed catalog:
@@ -646,6 +675,11 @@ method = "type"            # "none", "type", "clipboard", or "paste"
 typing_backend = "auto"    # "auto", "wtype", "enigo", or "dotool"
 auto_submit = false        # press Enter after "type" or "paste"
 paste_keys = "ctrl-v"      # "ctrl-v" or "shift-insert", for "paste"
+
+[text]
+spoken_punctuation = false # "comma" -> ",", "new line" -> a newline, ...
+remove_fillers = false     # drop "um", "uh", ... (English dictation only)
+post_process_command = ""  # command: transcript on stdin, cleaned text on stdout
 
 [overlay]
 enabled = true

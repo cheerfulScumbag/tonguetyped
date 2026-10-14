@@ -362,9 +362,9 @@ impl Ui {
 
     fn section(&self, output: &mut impl Write, step: usize, text: &str) -> io::Result<()> {
         if self.color {
-            writeln!(output, "\n\x1b[1m[{step}/6] {text}\x1b[0m")
+            writeln!(output, "\n\x1b[1m[{step}/7] {text}\x1b[0m")
         } else {
-            writeln!(output, "\n[{step}/6] {text}")
+            writeln!(output, "\n[{step}/7] {text}")
         }
     }
 
@@ -591,7 +591,88 @@ fn configure(
         config.output.auto_submit = submit == 1;
     }
 
-    ui.section(output, 6, "Startup")?;
+    ui.section(output, 6, "Text processing")?;
+    let mut text = config.text.clone();
+    loop {
+        let prompt = format!(
+            "Replacements ('from {} to', separated by '{}'; escape '{}', '>', and '\\' with '\\'; empty keeps, 'none' clears)",
+            crate::config::REPLACEMENT_ARROW,
+            crate::config::REPLACEMENT_ENTRY_SEPARATOR,
+            crate::config::REPLACEMENT_ENTRY_SEPARATOR
+        );
+        let Some(raw) = ask_text(
+            input,
+            output,
+            &prompt,
+            &text.replacements_form_value(),
+            "(none)",
+        )?
+        else {
+            return Ok(SetupOutcome::Cancelled);
+        };
+        match text.apply_replacements_form(&raw) {
+            Ok(()) => break,
+            Err(message) => writeln!(errors, "{message}")?,
+        }
+    }
+    let Some(spoken) = confirm(
+        input,
+        output,
+        errors,
+        "Turn spoken punctuation into symbols?",
+        text.spoken_punctuation,
+    )?
+    else {
+        return Ok(SetupOutcome::Cancelled);
+    };
+    text.spoken_punctuation = spoken;
+    let Some(fillers) = confirm(
+        input,
+        output,
+        errors,
+        "Remove filler words (English dictation only)?",
+        text.remove_fillers,
+    )?
+    else {
+        return Ok(SetupOutcome::Cancelled);
+    };
+    text.remove_fillers = fillers;
+    let Some(command) = ask_text(
+        input,
+        output,
+        "Cleanup command for the transcript (empty keeps, 'none' clears)",
+        text.post_process_command.trim(),
+        "(none)",
+    )?
+    else {
+        return Ok(SetupOutcome::Cancelled);
+    };
+    text.post_process_command = command.trim().to_string();
+    loop {
+        let Some(raw) = ask_text(
+            input,
+            output,
+            "Cleanup timeout in seconds",
+            &text.post_process_timeout_seconds.to_string(),
+            "10",
+        )?
+        else {
+            return Ok(SetupOutcome::Cancelled);
+        };
+        match raw.trim().parse::<u64>() {
+            Ok(value) if value > 0 => {
+                text.post_process_timeout_seconds = value;
+                break;
+            }
+            _ => writeln!(
+                errors,
+                "Timeout must be a whole number of seconds (at least 1)."
+            )?,
+        }
+    }
+    config.text = text;
+
+    ui.section(output, 7, "Startup")?;
     let startup_labels = [
         "Start manually".to_string(),
         "Start TongueTyped when you sign in".to_string(),
@@ -623,6 +704,11 @@ fn configure(
         }
     )?;
     writeln!(output, "  Output:      {}", output_summary(&config))?;
+    writeln!(
+        output,
+        "  Text:        {}",
+        config.text.processing_summary()
+    )?;
     writeln!(
         output,
         "  Autostart:   {}",
@@ -719,6 +805,39 @@ fn read_answer(input: &mut impl BufRead) -> io::Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(line.trim().to_string()))
+}
+
+/// Prompts for one line of free text, showing `current` (or `empty_label`
+/// when it is empty). An empty answer keeps `current`, the case-insensitive
+/// word `none` clears it, and anything else replaces it. `None` means
+/// end-of-input or a cancel, which aborts setup.
+fn ask_text(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    prompt: &str,
+    current: &str,
+    empty_label: &str,
+) -> anyhow::Result<Option<String>> {
+    let shown = if current.trim().is_empty() {
+        empty_label
+    } else {
+        current
+    };
+    write!(output, "{prompt} [current: {shown}]: ")?;
+    output.flush()?;
+    let Some(answer) = read_answer(input)? else {
+        return Ok(None);
+    };
+    if is_cancel(&answer) {
+        return Ok(None);
+    }
+    if answer.is_empty() {
+        Ok(Some(current.to_string()))
+    } else if answer.eq_ignore_ascii_case("none") {
+        Ok(Some(String::new()))
+    } else {
+        Ok(Some(answer))
+    }
 }
 
 fn is_cancel(answer: &str) -> bool {

@@ -2,8 +2,8 @@
 //! aren't just "run one action and show the result": the model screen
 //! (catalog activation + inference backend), the daemon actions, and the
 //! settings screens the home screen's Settings panel opens (inference
-//! backend, translation, decoding, microphone, activation, shortcut,
-//! transcript output, typing backend, startup, overlay).
+//! backend, translation, decoding, text processing, microphone, activation,
+//! shortcut, transcript output, typing backend, startup, overlay).
 //!
 //! Most settings screens here only mutate the in-memory `Config` they are
 //! handed (`apply`), and the caller (`tui::App`) owns `Config::save` so a
@@ -1053,6 +1053,167 @@ impl TextFieldsScreen {
     pub(super) fn result_line(&self, success: &str) -> Line<'static> {
         result_line(&self.result, success)
     }
+}
+
+/// The "Text processing" screen: the replacement table, the two opt-in passes
+/// (spoken punctuation and English-only filler removal), and the external
+/// cleanup command with its timeout. The three text rows are edited in place;
+/// Enter on a toggle row flips it. Every row is applied together, so a bad
+/// replacement entry or timeout saves nothing.
+pub(super) struct TextProcessingScreen {
+    pub replacements: TextField,
+    pub spoken_punctuation: bool,
+    pub remove_fillers: bool,
+    pub command: TextField,
+    pub timeout: TextField,
+    pub selected: usize,
+    pub result: Option<Result<(), String>>,
+}
+
+impl TextProcessingScreen {
+    pub(super) const ROW_REPLACEMENTS: usize = 0;
+    pub(super) const ROW_SPOKEN: usize = 1;
+    pub(super) const ROW_FILLERS: usize = 2;
+    pub(super) const ROW_COMMAND: usize = 3;
+    pub(super) const ROW_TIMEOUT: usize = 4;
+    pub(super) const ROWS: usize = 5;
+    const REPLACEMENTS_PLACEHOLDER: &'static str =
+        "vox type => Voxtype; tee vee => TV (';', '>', and '\\' escaped with '\\')";
+
+    pub(super) fn new(config: &Config) -> Self {
+        Self {
+            replacements: TextField::new(config.text.replacements_form_value()),
+            spoken_punctuation: config.text.spoken_punctuation,
+            remove_fillers: config.text.remove_fillers,
+            command: TextField::new(config.text.post_process_command.clone()),
+            timeout: TextField::new(config.text.post_process_timeout_seconds.to_string()),
+            selected: 0,
+            result: None,
+        }
+    }
+
+    pub(super) fn move_selection(&mut self, delta: i32) {
+        self.selected = (self.selected as i32 + delta).clamp(0, (Self::ROWS - 1) as i32) as usize;
+    }
+
+    pub(super) fn selected_text_field_mut(&mut self) -> Option<&mut TextField> {
+        match self.selected {
+            Self::ROW_REPLACEMENTS => Some(&mut self.replacements),
+            Self::ROW_COMMAND => Some(&mut self.command),
+            Self::ROW_TIMEOUT => Some(&mut self.timeout),
+            _ => None,
+        }
+    }
+
+    /// Flips the selected toggle row; a text row is left alone.
+    pub(super) fn toggle_selected(&mut self) {
+        match self.selected {
+            Self::ROW_SPOKEN => self.spoken_punctuation = !self.spoken_punctuation,
+            Self::ROW_FILLERS => self.remove_fillers = !self.remove_fillers,
+            _ => {}
+        }
+    }
+
+    pub(super) fn apply(&self, config: &mut Config) -> Result<(), String> {
+        let mut text = config.text.clone();
+        text.apply_replacements_form(self.replacements.value())?;
+        text.spoken_punctuation = self.spoken_punctuation;
+        text.remove_fillers = self.remove_fillers;
+        text.post_process_command = self.command.value().trim().to_string();
+        let timeout = self.timeout.value().trim();
+        let timeout: u64 = timeout
+            .parse()
+            .map_err(|_| "Timeout must be a whole number of seconds.".to_string())?;
+        if timeout == 0 {
+            return Err("Timeout must be at least 1 second.".to_string());
+        }
+        text.post_process_timeout_seconds = timeout;
+        text.validate().map_err(|error| error.to_string())?;
+        config.text = text;
+        Ok(())
+    }
+
+    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+        let rows: [(&str, bool, Vec<Span<'static>>); Self::ROWS] = [
+            (
+                "Replacements",
+                self.selected == Self::ROW_REPLACEMENTS,
+                text_row_value(
+                    &self.replacements,
+                    self.selected == Self::ROW_REPLACEMENTS,
+                    Self::REPLACEMENTS_PLACEHOLDER,
+                ),
+            ),
+            (
+                "Spoken punctuation",
+                self.selected == Self::ROW_SPOKEN,
+                toggle_row_value(self.spoken_punctuation),
+            ),
+            (
+                "Remove filler words",
+                self.selected == Self::ROW_FILLERS,
+                toggle_row_value(self.remove_fillers),
+            ),
+            (
+                "Cleanup command",
+                self.selected == Self::ROW_COMMAND,
+                text_row_value(
+                    &self.command,
+                    self.selected == Self::ROW_COMMAND,
+                    "empty disables it",
+                ),
+            ),
+            (
+                "Timeout (seconds)",
+                self.selected == Self::ROW_TIMEOUT,
+                text_row_value(&self.timeout, self.selected == Self::ROW_TIMEOUT, ""),
+            ),
+        ];
+        let lines: Vec<Line> = rows
+            .iter()
+            .map(|(label, selected, value)| {
+                let marker = if *selected { "> " } else { "  " };
+                let mut spans = vec![Span::styled(
+                    format!("{marker}{label:<20}"),
+                    selection_style(*selected),
+                )];
+                spans.extend(value.iter().cloned());
+                Line::from(spans)
+            })
+            .collect();
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Text processing"),
+        )
+    }
+
+    pub(super) fn result_line(&self) -> Line<'static> {
+        result_line(&self.result, "Text processing saved.")
+    }
+}
+
+/// The value half of a `TextProcessingScreen` text row: the field with its
+/// cursor when selected, or a dim placeholder when empty and unselected.
+fn text_row_value(field: &TextField, selected: bool, placeholder: &str) -> Vec<Span<'static>> {
+    if field.value().is_empty() && !placeholder.is_empty() && !selected {
+        vec![Span::styled(
+            placeholder.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        field_value_spans(field, selected)
+    }
+}
+
+/// The value half of a `TextProcessingScreen` toggle row.
+fn toggle_row_value(enabled: bool) -> Vec<Span<'static>> {
+    let (text, color) = if enabled {
+        ("on", Color::Green)
+    } else {
+        ("off", Color::DarkGray)
+    };
+    vec![Span::styled(text.to_string(), Style::default().fg(color))]
 }
 
 /// The value half of one `TextFieldsScreen` row. The selected field draws a

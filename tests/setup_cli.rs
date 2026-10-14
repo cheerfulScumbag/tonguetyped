@@ -12,6 +12,13 @@ fn root(name: &str) -> std::path::PathBuf {
     ))
 }
 
+/// Joins one answer per setup prompt, each newline-terminated.
+fn answers(lines: &[&str]) -> String {
+    let mut input = lines.join("\n");
+    input.push('\n');
+    input
+}
+
 fn run_setup(
     config_home: &std::path::Path,
     answers: &str,
@@ -61,9 +68,14 @@ fn setup_writes_a_complete_configuration_without_color() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    // Model, microphone, toggle, type, wtype, leave the text, autostart,
-    // confirm.
-    let output = run_setup(&root, "\n\n2\n2\n2\n\n2\n\n", Some(&bin), "KDE");
+    // Model, microphone, toggle, type, wtype, leave the text, text processing
+    // defaults, autostart, confirm.
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "2", "2", "2", "", "", "", "", "", "", "2", ""]),
+        Some(&bin),
+        "KDE",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -95,7 +107,12 @@ fn setup_writes_a_complete_configuration_without_color() {
         include_str!("../data/tonguetyped.desktop")
     );
 
-    let output = run_setup(&root, "\n\n\n\n\n\n1\n\n", Some(&bin), "KDE");
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "", "", "", "", "", "", "", "", "1", ""]),
+        Some(&bin),
+        "KDE",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -118,7 +135,12 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
     // helper and the compositor is KDE: the setup must refuse it with the
     // install warning, naming dotool (wtype cannot work on KWin), re-prompt,
     // then accept 1 (keep in TongueTyped) and finish normally.
-    let output = run_setup(&root, "\n\n\n2\n1\n\n\n", Some(&bin), "KDE");
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "2", "1", "", "", "", "", "", "", ""]),
+        Some(&bin),
+        "KDE",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -166,8 +188,13 @@ fn setup_configures_paste_and_enter_with_the_chosen_keys() {
     }
 
     // Model, microphone, hold, paste, automatic backend, Shift+Insert,
-    // press Enter, manual start, confirm.
-    let output = run_setup(&root, "\n\n\n4\n\n2\n2\n\n\n", Some(&bin), "sway");
+    // press Enter, text processing defaults, manual start, confirm.
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "4", "", "2", "2", "", "", "", "", "", "", ""]),
+        Some(&bin),
+        "sway",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -201,7 +228,12 @@ fn setup_refuses_the_clipboard_without_wl_copy_and_says_what_to_install() {
 
     // Answer 3 (clipboard) with no wl-copy on PATH: refused with the remedy,
     // then 1 (keep in TongueTyped) is accepted.
-    let output = run_setup(&root, "\n\n\n3\n1\n\n\n", Some(&bin), "KDE");
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "3", "1", "", "", "", "", "", "", ""]),
+        Some(&bin),
+        "KDE",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -225,7 +257,12 @@ fn setup_on_a_wlroots_compositor_names_wtype() {
     std::fs::create_dir_all(&bin).unwrap();
 
     // sway is wlroots, so the missing helper to name is wtype, not dotool.
-    let output = run_setup(&root, "\n\n\n2\n1\n\n\n", Some(&bin), "sway");
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "2", "1", "", "", "", "", "", "", ""]),
+        Some(&bin),
+        "sway",
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -235,6 +272,49 @@ fn setup_on_a_wlroots_compositor_names_wtype() {
     assert!(
         stdout.contains("install wtype"),
         "a wlroots compositor must be told to install wtype:\n{stdout}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn setup_clears_a_configured_command_and_replacements_with_none() {
+    let root = root("clear-none");
+    let directory = root.join("tonguetyped");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("config.toml"),
+        "[text]\npost_process_command = \"my-cleaner\"\npost_process_timeout_seconds = 7\n\n[text.replacements]\n\"vox type\" = \"Voxtype\"\n",
+    )
+    .unwrap();
+
+    // Model, microphone, activation, transcript output, then 'none' at the
+    // Replacements and Cleanup command prompts clears both; the empty timeout
+    // answer keeps 7; startup and the final confirm take their defaults.
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "", "none", "", "", "none", "", "", ""]),
+        None,
+        "KDE",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = std::fs::read_to_string(directory.join("config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert_eq!(
+        config.text.post_process_command, "",
+        "'none' must clear the cleanup command"
+    );
+    assert!(
+        config.text.replacements.is_empty(),
+        "'none' must clear the replacement table"
+    );
+    assert_eq!(
+        config.text.post_process_timeout_seconds, 7,
+        "an empty answer must keep the configured timeout"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -282,7 +362,12 @@ fn successful_write_leaves_only_the_complete_destination() {
     )
     .unwrap();
 
-    let output = run_setup(&root, "\n\n\n\n\n\n", None, "KDE");
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "", "", "", "", "", "", "", ""]),
+        None,
+        "KDE",
+    );
     assert!(output.status.success());
     let entries: Vec<_> = std::fs::read_dir(&directory)
         .unwrap()

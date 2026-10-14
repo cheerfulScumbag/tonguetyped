@@ -283,11 +283,12 @@ const KEY_TAB: &[u8] = b"\t";
 const KEY_BACKSPACE: &[u8] = b"\x7f";
 const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 
-const SETTING_LABELS: [&str; 14] = [
+const SETTING_LABELS: [&str; 15] = [
     "Model",
     "Inference backend",
     "Translation",
     "Decoding",
+    "Text processing",
     "Microphone",
     "Activation",
     "Shortcut",
@@ -320,7 +321,7 @@ fn setting_row(label: &str) -> usize {
         .unwrap()
 }
 
-/// Home index of the first command row (after the fourteen Settings rows), for
+/// Home index of the first command row (after the fifteen Settings rows), for
 /// tests that need to arrow down to a specific command.
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
 
@@ -337,12 +338,30 @@ fn select_setting(session: &mut Session, label: &str) -> String {
     session.wait_for(&format!("> {label}"), Duration::from_secs(3))
 }
 
+/// Waits until the dashboard has written `needle` into the sandbox's
+/// config.toml. Used where two saves of the same screen produce the same
+/// on-screen result line, so the result text alone cannot mark the second.
+fn wait_for_config(sandbox: &Sandbox, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let contents = sandbox.config_contents();
+        if contents.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "config never contained {needle:?}:\n{contents}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
-    // Tall enough for the fourteen Settings rows plus every Commands row with
+    // Tall enough for the fifteen Settings rows plus every Commands row with
     // no scrolling of either panel.
-    let session = Session::spawn(&sandbox, 100, 37);
+    let session = Session::spawn(&sandbox, 100, 38);
 
     // The pre-change baseline (see .superdesign/replica_html_template and the
     // dashboard task's report) listed 11 CLI commands with model/autostart
@@ -881,6 +900,134 @@ fn pty_translation_setting_persists_the_choice() {
 }
 
 #[test]
+fn pty_text_processing_screen_toggles_passes_and_persists_replacements() {
+    let sandbox = Sandbox::new("text-processing-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    let opened = session.wait_for("Spoken punctuation", Duration::from_secs(3));
+    assert!(
+        opened.contains("Replacements")
+            && opened.contains("Spoken punctuation")
+            && opened.contains("Remove filler words")
+            && opened.contains("Cleanup command"),
+        "the screen should list every text-processing setting:\n{opened}"
+    );
+
+    // Row 1 (Spoken punctuation): Enter flips it on and saves the form.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    wait_for_config(
+        &sandbox,
+        "spoken_punctuation = true",
+        Duration::from_secs(3),
+    );
+
+    // Row 2 (Remove filler words): flip it on too.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    wait_for_config(&sandbox, "remove_fillers = true", Duration::from_secs(3));
+
+    // Row 0 (Replacements): type an entry into the empty field and save.
+    session.send(KEY_UP);
+    session.send(KEY_UP);
+    session.send(b"vox type => Voxtype");
+    session.send(KEY_ENTER);
+    wait_for_config(
+        &sandbox,
+        "\"vox type\" = \"Voxtype\"",
+        Duration::from_secs(3),
+    );
+
+    session.send(KEY_ESC);
+    let home = session.wait_for("> Text processing", Duration::from_secs(3));
+    assert!(
+        home.contains("1 replacement, spoken punctuation, filler removal"),
+        "the Home row should summarize the saved settings:\n{home}"
+    );
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_text_processing_screen_round_trips_replacement_separator_and_backslash() {
+    let sandbox = Sandbox::new("text-processing-round-trip");
+    // A hand-written table whose value contains the form's own separator (`;`)
+    // and whose key contains a backslash - the exact shapes the escaped
+    // single-line form exists to protect. Applying an unrelated screen save
+    // must not silently rewrite them.
+    sandbox.write_config("[text.replacements]\n\"a\" = \"x; b => y\"\n\"c\\\\d\" = \"\\\\;\"\n");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // Enter on the Replacements row (the default selection) applies and saves
+    // the whole form without changing it.
+    session.send(KEY_ENTER);
+    session.wait_for("Text processing saved.", Duration::from_secs(3));
+
+    let contents = sandbox.config_contents();
+    assert!(
+        contents.contains("x; b => y"),
+        "a value containing ';' must round-trip intact:\n{contents}"
+    );
+    assert!(
+        contents.contains(r"c\d") && contents.contains(r"\;"),
+        "a key with a backslash and a value of '\\;' must round-trip intact:\n{contents}"
+    );
+    session.send(KEY_ESC);
+    session.wait_for("> Text processing", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_text_processing_screen_rejects_invalid_input_without_saving() {
+    let sandbox = Sandbox::new("text-processing-invalid");
+    sandbox.write_config("");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // A replacement entry without the '=>' arrow is rejected, and nothing is
+    // saved.
+    session.send(b"no arrow here");
+    session.send(KEY_ENTER);
+    let error = session.wait_for("Each replacement must be", Duration::from_secs(3));
+    assert!(error.contains("from => to"), "{error}");
+    assert!(!sandbox.config_contents().contains("no arrow here"));
+
+    session.send(KEY_ESC); // discard the bad form and return home
+    session.wait_for("> Text processing", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // A zero cleanup timeout is rejected as well.
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.send(KEY_BACKSPACE);
+    session.send(KEY_BACKSPACE);
+    session.send(b"0");
+    session.send(KEY_ENTER);
+    let error = session.wait_for("Timeout must be at least 1 second", Duration::from_secs(3));
+    assert!(error.contains("Timeout"), "{error}");
+    assert!(!sandbox
+        .config_contents()
+        .contains("post_process_timeout_seconds = 0"));
+
+    session.send(KEY_ESC);
+    session.wait_for("> Text processing", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_history_retention_setting_persists_both_limits() {
     let sandbox = Sandbox::new("retention-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
@@ -956,6 +1103,49 @@ fn pty_shortcut_screen_offers_the_system_dialog_and_reports_portal_failures_inli
     // The screen remains navigable afterwards.
     session.send(KEY_ESC);
     session.wait_for("Settings", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_text_processing_toggle_does_not_stick_after_a_failed_save() {
+    let sandbox = Sandbox::new("text-processing-toggle-revert");
+    sandbox.write_config("");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    session.wait_for("Spoken punctuation", Duration::from_secs(3));
+
+    // Leave an invalid replacement in the form, then press Enter on the Spoken
+    // punctuation row: the whole form fails to apply, so the toggle flip must
+    // not stick.
+    session.send(b"no arrow here");
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    let error = session.wait_for("Each replacement must be", Duration::from_secs(3));
+    assert!(error.contains("from => to"), "{error}");
+    assert!(!sandbox
+        .config_contents()
+        .contains("spoken_punctuation = true"));
+
+    // Clear the bad replacement, then Enter on the same toggle row again. A
+    // stale flip from the failed save would turn spoken punctuation back off
+    // here; the correct behavior is that this Enter turns it on and saves it.
+    session.send(KEY_UP);
+    for _ in 0.."no arrow here".len() {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    wait_for_config(
+        &sandbox,
+        "spoken_punctuation = true",
+        Duration::from_secs(3),
+    );
+
+    session.send(KEY_ESC);
+    session.wait_for("> Text processing", Duration::from_secs(3));
     session.quit_and_wait();
 }
 

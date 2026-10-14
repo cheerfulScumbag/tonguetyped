@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ pub struct Config {
     pub output: OutputConfig,
     #[serde(default)]
     pub transcription: TranscriptionConfig,
+    #[serde(default)]
+    pub text: TextConfig,
     #[serde(default)]
     pub history: HistoryConfig,
     #[serde(default)]
@@ -544,6 +547,232 @@ impl TranscriptionConfig {
     }
 }
 
+/// Text post-processing applied to every finished transcript before it is
+/// output or recorded: a replacement table for recurring mistranscriptions,
+/// opt-in spoken punctuation and filler-word removal, and an optional external
+/// command that cleans the text up (see `crate::text`). All of it is pure Rust
+/// and local - the external command is the user's own, run with the transcript
+/// on stdin and the cleaned text expected on stdout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextConfig {
+    /// A map of literal mistranscriptions to their corrections, applied to
+    /// the whole transcript, case-insensitively and only on word boundaries.
+    /// Written in TOML as a `[text.replacements]` table, e.g.
+    /// `"vox type" = "Voxtype"`.
+    #[serde(default)]
+    pub replacements: BTreeMap<String, String>,
+    /// Convert spoken punctuation to symbols (`"comma"` to `","`, `"new line"`
+    /// to a newline, brackets, braces, and so on). Off by default; useful when
+    /// dictating code.
+    #[serde(default = "default_false")]
+    pub spoken_punctuation: bool,
+    /// Drop filler words (`"um"`, `"uh"`, `"hmm"`, ...) from the transcript.
+    /// Off by default, and only ever applied when `transcription.language` is
+    /// English, so it can never delete real words in another language.
+    #[serde(default = "default_false")]
+    pub remove_fillers: bool,
+    /// An optional external command run after the pure-Rust passes: the
+    /// transcript is written to its stdin and the cleaned text is read back
+    /// from its stdout (a local LLM cleanup pipe, a `sed` script, ...). Empty
+    /// (the default) disables it. Any failure or `post_process_timeout_seconds`
+    /// timeout falls back to the transcript without the command.
+    #[serde(default)]
+    pub post_process_command: String,
+    /// How many seconds `post_process_command` may run before it is killed and
+    /// its output discarded.
+    #[serde(default = "default_post_process_timeout_seconds")]
+    pub post_process_timeout_seconds: u64,
+}
+
+impl Default for TextConfig {
+    fn default() -> Self {
+        Self {
+            replacements: BTreeMap::new(),
+            spoken_punctuation: false,
+            remove_fillers: false,
+            post_process_command: String::new(),
+            post_process_timeout_seconds: default_post_process_timeout_seconds(),
+        }
+    }
+}
+
+/// The separator both configuration UIs use between replacement entries in
+/// their single-line "Replacements" field, and between an entry's two sides.
+pub(crate) const REPLACEMENT_ENTRY_SEPARATOR: &str = ";";
+pub(crate) const REPLACEMENT_ARROW: &str = "=>";
+
+/// Escapes the escape character, the entry separator, and the arrow's `>` in a
+/// replacement key or value so that either can hold them without corrupting the
+/// single-line form the configuration UIs round-trip. Escaping the `>` breaks
+/// any `=>` the field holds, so it can never be read back as the arrow.
+fn escape_replacement_field(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            ';' => escaped.push_str("\\;"),
+            '>' => escaped.push_str("\\>"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// Reverses [`escape_replacement_field`]: `\\` becomes `\`, `\;` becomes `;`,
+/// and `\>` becomes `>`. A backslash before any other character is left
+/// untouched.
+fn unescape_replacement_field(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            unescaped.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('\\') => unescaped.push('\\'),
+            Some(';') => unescaped.push(';'),
+            Some('>') => unescaped.push('>'),
+            Some(other) => {
+                unescaped.push('\\');
+                unescaped.push(other);
+            }
+            None => unescaped.push('\\'),
+        }
+    }
+    unescaped
+}
+
+/// Splits the single-line replacement form on unescaped `;` separators,
+/// keeping each entry's escape sequences intact for
+/// [`unescape_replacement_field`]. The serializer writes one space after each
+/// separator, so that space is consumed here; that keeps a separator's spacing
+/// out of the next entry's leading whitespace, which is significant.
+fn split_replacement_entries(raw: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    let mut characters = raw.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => {
+                current.push('\\');
+                if let Some(next) = characters.next() {
+                    current.push(next);
+                }
+            }
+            ';' => {
+                entries.push(std::mem::take(&mut current));
+                if matches!(characters.clone().next(), Some(' ')) {
+                    characters.next();
+                }
+            }
+            other => current.push(other),
+        }
+    }
+    entries.push(current);
+    entries
+}
+
+impl TextConfig {
+    /// The one-line summary of the text-processing settings for the
+    /// configuration UIs, e.g. `2 replacements, spoken punctuation`, or `off`.
+    pub(crate) fn processing_summary(&self) -> String {
+        let mut parts = Vec::new();
+        let replacements = self.replacements.len();
+        if replacements > 0 {
+            parts.push(match replacements {
+                1 => "1 replacement".to_string(),
+                n => format!("{n} replacements"),
+            });
+        }
+        if self.spoken_punctuation {
+            parts.push("spoken punctuation".to_string());
+        }
+        if self.remove_fillers {
+            parts.push("filler removal".to_string());
+        }
+        if !self.post_process_command.trim().is_empty() {
+            parts.push("cleanup command".to_string());
+        }
+        if parts.is_empty() {
+            "off".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    /// The replacement table as the configuration UIs' single-line field:
+    /// each entry `from => to`, separated by `;`. A `\`, `;`, or `>` inside a
+    /// key or value is escaped with a backslash. A key that is empty or only
+    /// whitespace is ignored at match time, so it is omitted here too: the
+    /// form's parser rejects an empty left side, and the form must never emit
+    /// an entry it would then refuse.
+    pub(crate) fn replacements_form_value(&self) -> String {
+        self.replacements
+            .iter()
+            .filter(|(from, _)| !from.trim().is_empty())
+            .map(|(from, to)| {
+                format!(
+                    "{} {REPLACEMENT_ARROW} {}",
+                    escape_replacement_field(from),
+                    escape_replacement_field(to)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(&format!("{REPLACEMENT_ENTRY_SEPARATOR} "))
+    }
+
+    /// Parses the configuration UIs' single-line replacement field. Each entry
+    /// is `from => to`, separated by `;`, with `\`, the separator, and the arrow's
+    /// `>` escaped by a backslash. The one space the serializer writes on each
+    /// side of the arrow is the delimiter and is dropped; any other leading or
+    /// trailing whitespace in a key or value is significant and preserved, so
+    /// a value of `. `, ` `, or `\n` survives a save. An empty field clears the
+    /// table. Returns a message naming the bad entry without changing anything.
+    pub(crate) fn apply_replacements_form(&mut self, raw: &str) -> Result<(), String> {
+        let mut replacements = BTreeMap::new();
+        for entry in split_replacement_entries(raw) {
+            if entry.trim().is_empty() {
+                continue;
+            }
+            let Some((from, to)) = entry.split_once(REPLACEMENT_ARROW) else {
+                return Err(format!(
+                    "Each replacement must be 'from {REPLACEMENT_ARROW} to', separated by \
+                     '{REPLACEMENT_ENTRY_SEPARATOR}' (got {entry:?})."
+                ));
+            };
+            let from = unescape_replacement_field(from.strip_suffix(' ').unwrap_or(from));
+            if from.trim().is_empty() {
+                return Err(format!(
+                    "A replacement's left side is empty (in {entry:?})."
+                ));
+            }
+            let to = unescape_replacement_field(to.strip_prefix(' ').unwrap_or(to));
+            replacements.insert(from, to);
+        }
+        self.replacements = replacements;
+        Ok(())
+    }
+
+    /// Rejects a timeout that could never be waited on. The replacement table
+    /// is left alone: a hand-written empty key is simply ignored at match time.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        if self.post_process_timeout_seconds == 0 {
+            anyhow::bail!("text.post_process_timeout_seconds must be a positive integer");
+        }
+        if std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(
+                self.post_process_timeout_seconds,
+            ))
+            .is_none()
+        {
+            anyhow::bail!("text.post_process_timeout_seconds is too large");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryConfig {
@@ -757,6 +986,10 @@ fn default_max_recording_seconds() -> u64 {
 
 fn default_chunk_seconds() -> u64 {
     30
+}
+
+fn default_post_process_timeout_seconds() -> u64 {
+    10
 }
 
 fn default_max_entries() -> u64 {
@@ -1014,6 +1247,7 @@ impl Config {
             }
         }
         self.transcription.validate_decoding()?;
+        self.text.validate()?;
         if self.model.idle_unload.policy == IdleUnloadPolicy::AfterIdle {
             let seconds = self
                 .model
@@ -1156,6 +1390,132 @@ mod tests {
         let disabled: Config = toml::from_str("[transcription]\nchunk_seconds = 0\n").unwrap();
         disabled.validate().unwrap();
         assert_eq!(disabled.transcription.chunk_seconds, 0);
+    }
+
+    #[test]
+    fn text_processing_defaults_are_off_and_valid_and_round_trip() {
+        let config = Config::default();
+        config.validate().unwrap();
+        assert!(config.text.replacements.is_empty());
+        assert!(!config.text.spoken_punctuation);
+        assert!(!config.text.remove_fillers);
+        assert!(config.text.post_process_command.is_empty());
+        assert_eq!(config.text.post_process_timeout_seconds, 10);
+        assert_eq!(config.text.processing_summary(), "off");
+        // A default config must survive its own save: an empty replacement
+        // table must serialize back to something that loads unchanged.
+        let saved = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert!(reloaded.text.replacements.is_empty());
+        assert_eq!(reloaded.text.post_process_timeout_seconds, 10);
+
+        let loaded: Config = toml::from_str(
+            "[text]\nspoken_punctuation = true\nremove_fillers = true\n\
+             post_process_command = \"llm-clean\"\npost_process_timeout_seconds = 3\n\
+             [text.replacements]\n\"vox type\" = \"Voxtype\"\n",
+        )
+        .unwrap();
+        loaded.validate().unwrap();
+        assert!(loaded.text.spoken_punctuation);
+        assert!(loaded.text.remove_fillers);
+        assert_eq!(loaded.text.post_process_command, "llm-clean");
+        assert_eq!(loaded.text.post_process_timeout_seconds, 3);
+        assert_eq!(loaded.text.replacements.get("vox type").unwrap(), "Voxtype");
+        assert_eq!(
+            loaded.text.processing_summary(),
+            "1 replacement, spoken punctuation, filler removal, cleanup command"
+        );
+    }
+
+    #[test]
+    fn text_replacements_form_round_trips_and_rejects_bad_entries() {
+        let mut text = TextConfig::default();
+        text.apply_replacements_form("vox type => Voxtype; tee vee => TV")
+            .unwrap();
+        assert_eq!(text.replacements.get("vox type").unwrap(), "Voxtype");
+        assert_eq!(text.replacements.get("tee vee").unwrap(), "TV");
+        assert_eq!(
+            text.replacements_form_value(),
+            "tee vee => TV; vox type => Voxtype"
+        );
+
+        let error = text.apply_replacements_form("no arrow here").unwrap_err();
+        assert!(error.contains("from => to"), "{error}");
+        assert_eq!(
+            text.replacements.len(),
+            2,
+            "a bad form must not change the table"
+        );
+        text.apply_replacements_form("").unwrap();
+        assert!(text.replacements.is_empty());
+    }
+
+    #[test]
+    fn text_replacements_form_round_trips_separators_and_backslashes() {
+        let mut text = TextConfig::default();
+        text.replacements
+            .insert("a".to_string(), "x; b => y".to_string());
+        text.replacements
+            .insert("c\\d".to_string(), "\\;".to_string());
+
+        let form = text.replacements_form_value();
+        let mut reparsed = TextConfig::default();
+        reparsed.apply_replacements_form(&form).unwrap();
+        assert_eq!(reparsed.replacements.get("a").unwrap(), "x; b => y");
+        assert_eq!(reparsed.replacements.get("c\\d").unwrap(), "\\;");
+        assert_eq!(reparsed.replacements, text.replacements);
+    }
+
+    #[test]
+    fn text_replacements_form_round_trips_arrows_and_whitespace_values() {
+        let mut text = TextConfig::default();
+        text.replacements
+            .insert("a => b".to_string(), "c".to_string());
+        text.replacements
+            .insert("scratch that".to_string(), "\n".to_string());
+        text.replacements
+            .insert("pause".to_string(), " ".to_string());
+
+        let form = text.replacements_form_value();
+        let mut reparsed = TextConfig::default();
+        reparsed.apply_replacements_form(&form).unwrap();
+        assert_eq!(reparsed.replacements.get("a => b").unwrap(), "c");
+        assert_eq!(reparsed.replacements.get("scratch that").unwrap(), "\n");
+        assert_eq!(reparsed.replacements.get("pause").unwrap(), " ");
+        assert_eq!(reparsed.replacements, text.replacements);
+    }
+
+    #[test]
+    fn text_replacements_form_preserves_edge_whitespace_and_skips_blank_keys() {
+        let mut text = TextConfig::default();
+        text.replacements
+            .insert("period".to_string(), ". ".to_string());
+        text.replacements
+            .insert(" lead".to_string(), " x ".to_string());
+        text.replacements
+            .insert("trail ".to_string(), "y\t".to_string());
+        text.replacements
+            .insert(" ".to_string(), "blank-key".to_string());
+        text.replacements
+            .insert(String::new(), "empty-key".to_string());
+
+        let form = text.replacements_form_value();
+        let mut reparsed = TextConfig::default();
+        reparsed
+            .apply_replacements_form(&form)
+            .expect("the form must not emit an entry it then rejects");
+        assert_eq!(reparsed.replacements.get("period").unwrap(), ". ");
+        assert_eq!(reparsed.replacements.get(" lead").unwrap(), " x ");
+        assert_eq!(reparsed.replacements.get("trail ").unwrap(), "y\t");
+        assert!(!reparsed.replacements.contains_key(" "));
+        assert!(!reparsed.replacements.contains_key(""));
+    }
+
+    #[test]
+    fn rejects_a_zero_post_process_timeout() {
+        let mut config = Config::default();
+        config.text.post_process_timeout_seconds = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]
