@@ -166,9 +166,10 @@ const KEY_TAB: &[u8] = b"\t";
 const KEY_BACKSPACE: &[u8] = b"\x7f";
 
 /// Advances through the setup console's early steps (Model, Inference
-/// backend, Translation, Decoding, Microphone, Activation, Shortcut, Output,
-/// Startup, History retention, Transcript folder) with Enter, accepting every default, until
-/// the Overlay step is reached.
+/// backend, Translation, Decoding, Text processing, Text passes, Microphone,
+/// Activation, Shortcut, Output, Startup, History retention, Transcript
+/// folder) with Enter, accepting every default, until the Overlay step is
+/// reached.
 fn advance_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
     session.send(KEY_ENTER); // Model -> Inference backend
@@ -181,7 +182,11 @@ fn advance_from_inference_backend_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Translate speech into English", Duration::from_secs(5));
     session.send(KEY_ENTER); // Translation -> Decoding
     session.wait_for("Vocabulary prompt", Duration::from_secs(5));
-    session.send(KEY_ENTER); // Decoding -> Microphone
+    session.send(KEY_ENTER); // Decoding -> Text processing
+    session.wait_for("Text processing", Duration::from_secs(5));
+    session.send(KEY_ENTER); // Text processing -> Text passes
+    session.wait_for("Text passes", Duration::from_secs(5));
+    session.send(KEY_ENTER); // Text passes -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
     advance_from_microphone_to_overlay_enabled(session);
 }
@@ -314,6 +319,10 @@ fn pty_history_retention_and_transcript_folder_steps_persist_their_inputs() {
     session.wait_for("Translate speech into English", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Decoding
     session.wait_for("Vocabulary prompt", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Text processing
+    session.wait_for("Text processing", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Text passes
+    session.wait_for("Text passes", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Activation
@@ -402,6 +411,10 @@ fn pty_translation_and_decoding_steps_persist_their_inputs() {
     );
     session.send(KEY_BACKSPACE);
     session.send(b"inf");
+    session.send(KEY_ENTER); // -> Text processing
+    session.wait_for("Text processing", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Text passes
+    session.wait_for("Text passes", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Microphone
     session.wait_for("Microphone", Duration::from_secs(5));
     advance_from_microphone_to_overlay_enabled(&mut session);

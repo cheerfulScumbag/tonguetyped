@@ -9,10 +9,10 @@
 //! doc comment).
 //!
 //! The home screen is two stacked panels with one selection cursor: a
-//! fixed Settings panel listing the fourteen configuration areas (Model,
-//! Inference backend, Translation, Decoding, Microphone, Activation,
-//! Shortcut, Transcript output, Typing backend, Transcript folder, History
-//! retention, Startup, Overlay, Media pause)
+//! fixed Settings panel listing the fifteen configuration areas (Model,
+//! Inference backend, Translation, Decoding, Text processing, Microphone,
+//! Activation, Shortcut, Transcript output, Typing backend, Transcript folder,
+//! History retention, Startup, Overlay, Media pause)
 //! with their current values, and a Commands panel derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
@@ -154,7 +154,7 @@ struct HomeItem {
     about: String,
 }
 
-/// The fourteen configuration areas the home screen's Settings panel lists, in
+/// The fifteen configuration areas the home screen's Settings panel lists, in
 /// display order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingId {
@@ -162,6 +162,7 @@ enum SettingId {
     InferenceBackend,
     Translation,
     Decoding,
+    TextProcessing,
     Microphone,
     Activation,
     Shortcut,
@@ -175,11 +176,12 @@ enum SettingId {
 }
 
 impl SettingId {
-    const ALL: [SettingId; 14] = [
+    const ALL: [SettingId; 15] = [
         SettingId::Model,
         SettingId::InferenceBackend,
         SettingId::Translation,
         SettingId::Decoding,
+        SettingId::TextProcessing,
         SettingId::Microphone,
         SettingId::Activation,
         SettingId::Shortcut,
@@ -198,6 +200,7 @@ impl SettingId {
             SettingId::InferenceBackend => "Inference backend",
             SettingId::Translation => "Translation",
             SettingId::Decoding => "Decoding",
+            SettingId::TextProcessing => "Text processing",
             SettingId::Microphone => "Microphone",
             SettingId::Activation => "Activation",
             SettingId::Shortcut => "Shortcut",
@@ -212,8 +215,8 @@ impl SettingId {
     }
 }
 
-/// Fourteen settings rows plus the panel's two border rows.
-const SETTINGS_PANEL_HEIGHT: u16 = 16;
+/// Fifteen settings rows plus the panel's two border rows.
+const SETTINGS_PANEL_HEIGHT: u16 = 17;
 
 /// The dashboard's Commands panel, derived from the exact same clap metadata
 /// `--help` renders - see this module's doc comment. The implicit `help`
@@ -260,6 +263,7 @@ enum Screen {
     Microphone(screens::MicrophoneScreen),
     Activation(screens::ActivationScreen),
     Translation(screens::TranslationScreen),
+    TextProcessing(screens::TextProcessingScreen),
     Shortcut(screens::ShortcutScreen),
     TranscriptOutput(screens::OutputScreen),
     TypingBackend(screens::TypingBackendScreen),
@@ -527,6 +531,7 @@ impl App {
             Screen::Microphone(_) => self.handle_microphone_key(key),
             Screen::Activation(_) => self.handle_activation_key(key),
             Screen::Translation(_) => self.handle_translation_key(key),
+            Screen::TextProcessing(_) => self.handle_text_processing_key(key),
             Screen::Shortcut(_) => self.handle_shortcut_key(key),
             Screen::TranscriptOutput(_) => self.handle_output_key(key),
             Screen::TypingBackend(_) => self.handle_typing_backend_key(key),
@@ -595,6 +600,9 @@ impl App {
             SettingId::Decoding => {
                 Screen::TextFields(screens::TextFieldsScreen::decoding(&self.config))
             }
+            SettingId::TextProcessing => {
+                Screen::TextProcessing(screens::TextProcessingScreen::new(&self.config))
+            }
             SettingId::Microphone => {
                 let mut screen = screens::MicrophoneScreen::new(&self.capabilities, &self.config);
                 screen.start_preview();
@@ -635,6 +643,7 @@ impl App {
             Screen::Microphone(screen) => screen.result = Some(result),
             Screen::Activation(screen) => screen.result = Some(result),
             Screen::Translation(screen) => screen.result = Some(result),
+            Screen::TextProcessing(screen) => screen.result = Some(result),
             Screen::TranscriptOutput(screen) => screen.result = Some(result),
             Screen::TypingBackend(screen) => screen.result = Some(result),
             Screen::Overlay(screen) => screen.result = Some(result),
@@ -711,6 +720,73 @@ impl App {
                     screen.apply(&mut self.config);
                 }
                 self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    /// The "Text processing" screen: Up/Down/Tab move between rows, the
+    /// editing keys act on the selected text row, Enter flips a toggle row (or
+    /// just saves a text row) and applies the whole form. `q` types a literal
+    /// `q` on a text row since the fields accept free text; Ctrl+C quits.
+    fn handle_text_processing_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.screen = Screen::Home;
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            if let Screen::TextProcessing(screen) = &mut self.screen {
+                screen.toggle_selected();
+            }
+            let result = match &self.screen {
+                Screen::TextProcessing(screen) => screen.apply(&mut self.config),
+                _ => return,
+            };
+            let saved = result.is_ok();
+            if let Screen::TextProcessing(screen) = &mut self.screen {
+                screen.result = Some(result);
+            }
+            if saved {
+                self.save_settings_config();
+            }
+            return;
+        }
+        let Screen::TextProcessing(screen) = &mut self.screen else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Up | KeyCode::BackTab => screen.move_selection(-1),
+            KeyCode::Down | KeyCode::Tab => screen.move_selection(1),
+            KeyCode::Left => {
+                if let Some(field) = screen.selected_text_field_mut() {
+                    field.move_left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(field) = screen.selected_text_field_mut() {
+                    field.move_right();
+                }
+            }
+            KeyCode::Home => {
+                if let Some(field) = screen.selected_text_field_mut() {
+                    field.home();
+                }
+            }
+            KeyCode::End => {
+                if let Some(field) = screen.selected_text_field_mut() {
+                    field.end();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(field) = screen.selected_text_field_mut() {
+                    field.backspace();
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(field) = screen.selected_text_field_mut() {
+                    field.insert(c);
+                }
             }
             _ => {}
         }
@@ -1210,6 +1286,7 @@ impl App {
             Screen::Microphone(screen) => self.render_microphone(frame, area, screen),
             Screen::Activation(screen) => self.render_activation(frame, area, screen),
             Screen::Translation(screen) => self.render_translation(frame, area, screen),
+            Screen::TextProcessing(screen) => self.render_text_processing(frame, area, screen),
             Screen::Shortcut(screen) => self.render_shortcut(frame, area, screen),
             Screen::TranscriptOutput(screen) => self.render_output(frame, area, screen),
             Screen::TypingBackend(screen) => self.render_typing_backend(frame, area, screen),
@@ -1287,6 +1364,7 @@ impl App {
             SettingId::InferenceBackend => self.config.model.preferred_backend.clone(),
             SettingId::Translation => self.config.transcription.translate_label().to_string(),
             SettingId::Decoding => self.config.transcription.decoding_summary(),
+            SettingId::TextProcessing => self.config.text.processing_summary(),
             SettingId::Microphone => self
                 .capabilities
                 .microphone_label(&self.config.audio.microphone),
@@ -1573,6 +1651,35 @@ impl App {
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            chunks[3],
+        );
+    }
+
+    fn render_text_processing(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        screen: &screens::TextProcessingScreen,
+    ) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(6),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            Paragraph::new(
+                "Replacements: 'from => to' separated by ';'. Filler removal is English-only.",
+            ),
+            chunks[1],
+        );
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ row  ←/→ cursor  Enter apply  Esc back  Ctrl+C quit"),
             chunks[3],
         );
     }
@@ -2012,6 +2119,7 @@ mod tests {
                 "Inference backend",
                 "Translation",
                 "Decoding",
+                "Text processing",
                 "Microphone",
                 "Activation",
                 "Shortcut",

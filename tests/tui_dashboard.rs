@@ -283,11 +283,12 @@ const KEY_TAB: &[u8] = b"\t";
 const KEY_BACKSPACE: &[u8] = b"\x7f";
 const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 
-const SETTING_LABELS: [&str; 14] = [
+const SETTING_LABELS: [&str; 15] = [
     "Model",
     "Inference backend",
     "Translation",
     "Decoding",
+    "Text processing",
     "Microphone",
     "Activation",
     "Shortcut",
@@ -320,7 +321,7 @@ fn setting_row(label: &str) -> usize {
         .unwrap()
 }
 
-/// Home index of the first command row (after the fourteen Settings rows), for
+/// Home index of the first command row (after the fifteen Settings rows), for
 /// tests that need to arrow down to a specific command.
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
 
@@ -337,12 +338,30 @@ fn select_setting(session: &mut Session, label: &str) -> String {
     session.wait_for(&format!("> {label}"), Duration::from_secs(3))
 }
 
+/// Waits until the dashboard has written `needle` into the sandbox's
+/// config.toml. Used where two saves of the same screen produce the same
+/// on-screen result line, so the result text alone cannot mark the second.
+fn wait_for_config(sandbox: &Sandbox, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let contents = sandbox.config_contents();
+        if contents.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "config never contained {needle:?}:\n{contents}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
-    // Tall enough for the fourteen Settings rows plus every Commands row with
+    // Tall enough for the fifteen Settings rows plus every Commands row with
     // no scrolling of either panel.
-    let session = Session::spawn(&sandbox, 100, 37);
+    let session = Session::spawn(&sandbox, 100, 38);
 
     // The pre-change baseline (see .superdesign/replica_html_template and the
     // dashboard task's report) listed 11 CLI commands with model/autostart
@@ -877,6 +896,57 @@ fn pty_translation_setting_persists_the_choice() {
         "the Home row should show the saved choice:\n{home}"
     );
 
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_text_processing_screen_toggles_passes_and_persists_replacements() {
+    let sandbox = Sandbox::new("text-processing-setting");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Text processing");
+    session.send(KEY_ENTER);
+    let opened = session.wait_for("Spoken punctuation", Duration::from_secs(3));
+    assert!(
+        opened.contains("Replacements")
+            && opened.contains("Spoken punctuation")
+            && opened.contains("Remove filler words")
+            && opened.contains("Cleanup command"),
+        "the screen should list every text-processing setting:\n{opened}"
+    );
+
+    // Row 1 (Spoken punctuation): Enter flips it on and saves the form.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    wait_for_config(
+        &sandbox,
+        "spoken_punctuation = true",
+        Duration::from_secs(3),
+    );
+
+    // Row 2 (Remove filler words): flip it on too.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    wait_for_config(&sandbox, "remove_fillers = true", Duration::from_secs(3));
+
+    // Row 0 (Replacements): type an entry into the empty field and save.
+    session.send(KEY_UP);
+    session.send(KEY_UP);
+    session.send(b"vox type => Voxtype");
+    session.send(KEY_ENTER);
+    wait_for_config(
+        &sandbox,
+        "\"vox type\" = \"Voxtype\"",
+        Duration::from_secs(3),
+    );
+
+    session.send(KEY_ESC);
+    let home = session.wait_for("> Text processing", Duration::from_secs(3));
+    assert!(
+        home.contains("1 replacement, spoken punctuation, filler removal"),
+        "the Home row should summarize the saved settings:\n{home}"
+    );
     session.quit_and_wait();
 }
 

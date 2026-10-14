@@ -144,6 +144,13 @@ in
             max_recording_seconds = setting types.ints.positive "Longest single recording.";
             chunk_seconds = setting types.ints.unsigned "Decode window; audio longer than this is transcribed in chunks. 0 sends the whole buffer in one call, except a hard-capped model (canary, cohere), which is still split to stay within its limit.";
           };
+          text = section "The `[text]` table." {
+            replacements = setting (types.attrsOf types.str) "Map of mistranscriptions to corrections, e.g. `{ \"vox type\" = \"Voxtype\"; }`.";
+            spoken_punctuation = setting types.bool "Turn spoken punctuation words into symbols for dictating code.";
+            remove_fillers = setting types.bool "Drop filler words. Applied only when `transcription.language` is English.";
+            post_process_command = setting types.str "External command that cleans the transcript on stdin/stdout. Empty disables it.";
+            post_process_timeout_seconds = setting types.ints.positive "Seconds the cleanup command may run before it is killed and ignored.";
+          };
           history = section "The `[history]` table." {
             enabled = setting types.bool "Keep transcripts in the local history database.";
             max_entries = setting types.ints.unsigned "Entries to keep. 0 means no limit.";

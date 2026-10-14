@@ -1180,8 +1180,10 @@ impl Coordinator {
                     return;
                 }
             };
-            let trimmed = transcript.trim().to_string();
-            if trimmed.is_empty() {
+            let trimmed = transcript.trim();
+            let processed =
+                crate::text::post_process(trimmed, &config.text, &config.transcription.language);
+            if processed.trim().is_empty() {
                 coordinator.settle(generation, &timing, "empty");
                 return;
             }
@@ -1194,14 +1196,14 @@ impl Coordinator {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            *coordinator.last_result.lock().unwrap() = Some((trimmed.clone(), timestamp));
+            *coordinator.last_result.lock().unwrap() = Some((processed.clone(), timestamp));
             let output_started = timing.lock().unwrap().phase_started();
             let delivery = if config.transcription.trailing_space {
                 coordinator
                     .runtime
-                    .output(&format!("{} ", trimmed), &config)
+                    .output(&format!("{} ", processed), &config)
             } else {
-                coordinator.runtime.output(&trimmed, &config)
+                coordinator.runtime.output(&processed, &config)
             };
             timing
                 .lock()
@@ -1236,7 +1238,7 @@ impl Coordinator {
                     {
                         Ok(store) => {
                             if let Err(error) = store
-                                .insert(&trimmed, None, &config.transcription.language)
+                                .insert(&processed, None, &config.transcription.language)
                                 .and_then(|_| {
                                     store.prune(
                                         config.history.max_entries,
@@ -1260,7 +1262,7 @@ impl Coordinator {
                 // than blocking the finished dictation.
                 if !export_folder.is_empty() {
                     if let Err(error) =
-                        crate::history::export_transcript(&export_folder, &trimmed, timestamp)
+                        crate::history::export_transcript(&export_folder, &processed, timestamp)
                     {
                         tracing::error!("transcript export failed: {}", error);
                         history_failed = true;

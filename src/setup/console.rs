@@ -39,6 +39,15 @@ const STARTUP_LABELS: [&str; 2] = crate::config::STARTUP_LABELS;
 const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
 const TRANSLATE_LABELS: [&str; 2] = crate::config::TRANSLATE_LABELS;
 
+/// The two opt-in text passes as one four-way choice, in the order
+/// `text_pass_selection` stores them: `spoken + 2 * fillers`.
+const TEXT_PASS_LABELS: [&str; 4] = [
+    "No spoken punctuation or filler removal",
+    "Spoken punctuation only",
+    "Filler removal only (English dictation only)",
+    "Spoken punctuation and filler removal",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StepKind {
     Model,
@@ -46,6 +55,8 @@ enum StepKind {
     InferenceBackend,
     Translation,
     Decoding,
+    TextProcessing,
+    TextPasses,
     Microphone,
     Activation,
     Shortcut,
@@ -107,6 +118,12 @@ struct ConsoleState {
     /// The vocabulary prompt followed by one field per `DECODE_KNOBS` knob.
     decoding_fields: Vec<TextField>,
     decoding_field: usize,
+    /// The replacement table, cleanup command, and timeout - one field each.
+    text_processing_fields: Vec<TextField>,
+    text_processing_field: usize,
+    /// `spoken_punctuation` plus twice `remove_fillers`, indexed into
+    /// `TEXT_PASS_LABELS`.
+    text_pass_selection: usize,
     mic_selection: usize,
     activation_selection: usize,
     output_labels: Vec<String>,
@@ -171,6 +188,13 @@ impl ConsoleState {
             .chain(config.transcription.decoding_form_values())
             .map(TextField::new)
             .collect();
+        let text_processing_fields = vec![
+            TextField::new(config.text.replacements_form_value()),
+            TextField::new(config.text.post_process_command.clone()),
+            TextField::new(config.text.post_process_timeout_seconds.to_string()),
+        ];
+        let text_pass_selection = usize::from(config.text.spoken_punctuation)
+            + 2 * usize::from(config.text.remove_fillers);
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = capabilities.output_labels();
@@ -214,6 +238,9 @@ impl ConsoleState {
             translate_selection,
             decoding_fields,
             decoding_field: 0,
+            text_processing_fields,
+            text_processing_field: 0,
+            text_pass_selection,
             mic_selection,
             activation_selection,
             output_labels,
@@ -285,9 +312,10 @@ impl ConsoleState {
             StepKind::Shortcut => self.handle_shortcut_key(key),
             StepKind::Confirm => self.handle_confirm_key(key),
             StepKind::Downloading => self.handle_downloading_key(key),
-            StepKind::Decoding | StepKind::HistoryRetention | StepKind::TranscriptFolder => {
-                self.handle_text_step_key(key)
-            }
+            StepKind::Decoding
+            | StepKind::HistoryRetention
+            | StepKind::TranscriptFolder
+            | StepKind::TextProcessing => self.handle_text_step_key(key),
             _ => self.handle_list_key(key),
         }
     }
@@ -321,6 +349,7 @@ impl ConsoleState {
         match self.step {
             StepKind::Decoding => self.decoding_fields.len(),
             StepKind::HistoryRetention => self.retention_fields.len(),
+            StepKind::TextProcessing => self.text_processing_fields.len(),
             StepKind::TranscriptFolder => 1,
             _ => 0,
         }
@@ -334,6 +363,7 @@ impl ConsoleState {
         let field = match self.step {
             StepKind::Decoding => &mut self.decoding_field,
             StepKind::HistoryRetention => &mut self.retention_field,
+            StepKind::TextProcessing => &mut self.text_processing_field,
             _ => return,
         };
         *field = (*field as i32 + delta).clamp(0, len - 1) as usize;
@@ -343,6 +373,10 @@ impl ConsoleState {
         match self.step {
             StepKind::Decoding => &mut self.decoding_fields[self.decoding_field],
             StepKind::HistoryRetention => &mut self.retention_fields[self.retention_field],
+            StepKind::TextProcessing => {
+                let field = self.text_processing_field;
+                &mut self.text_processing_fields[field]
+            }
             StepKind::TranscriptFolder => &mut self.folder_field,
             _ => unreachable!("no text field for this step"),
         }
@@ -472,6 +506,7 @@ impl ConsoleState {
             StepKind::OutputPasteKeys => PasteKeys::ALL.len(),
             StepKind::OutputSubmit => AUTO_SUBMIT_LABELS.len(),
             StepKind::Startup => STARTUP_LABELS.len(),
+            StepKind::TextPasses => TEXT_PASS_LABELS.len(),
             StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
             StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
             StepKind::OverlayStyle => OVERLAY_STYLE_VALUES.len(),
@@ -480,6 +515,7 @@ impl ConsoleState {
             | StepKind::Confirm
             | StepKind::Downloading
             | StepKind::Decoding
+            | StepKind::TextProcessing
             | StepKind::HistoryRetention
             | StepKind::TranscriptFolder => 0,
         }
@@ -497,6 +533,7 @@ impl ConsoleState {
             StepKind::OutputPasteKeys => &mut self.paste_keys_selection,
             StepKind::OutputSubmit => &mut self.submit_selection,
             StepKind::Startup => &mut self.startup_selection,
+            StepKind::TextPasses => &mut self.text_pass_selection,
             StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
             StepKind::OverlayPosition => &mut self.overlay_position_selection,
             StepKind::OverlayStyle => &mut self.overlay_style_selection,
@@ -505,6 +542,7 @@ impl ConsoleState {
             | StepKind::Confirm
             | StepKind::Downloading
             | StepKind::Decoding
+            | StepKind::TextProcessing
             | StepKind::HistoryRetention
             | StepKind::TranscriptFolder => {
                 unreachable!("no list selection for this step")
@@ -541,6 +579,8 @@ impl ConsoleState {
         steps.push(InferenceBackend);
         steps.push(Translation);
         steps.push(Decoding);
+        steps.push(TextProcessing);
+        steps.push(TextPasses);
         steps.push(Microphone);
         steps.push(Activation);
         steps.push(Shortcut);
@@ -617,6 +657,31 @@ impl ConsoleState {
                     self.error = Some(message);
                     return Ok(ControlFlow::Continue);
                 }
+            }
+            StepKind::TextProcessing => {
+                let mut text = self.config.text.clone();
+                if let Err(message) =
+                    text.apply_replacements_form(self.text_processing_fields[0].value())
+                {
+                    self.error = Some(message);
+                    return Ok(ControlFlow::Continue);
+                }
+                text.post_process_command =
+                    self.text_processing_fields[1].value().trim().to_string();
+                let timeout = match self.text_processing_fields[2].value().trim().parse::<u64>() {
+                    Ok(value) if value > 0 => value,
+                    _ => {
+                        self.error =
+                            Some("Timeout must be a whole number of seconds (at least 1).".into());
+                        return Ok(ControlFlow::Continue);
+                    }
+                };
+                text.post_process_timeout_seconds = timeout;
+                self.config.text = text;
+            }
+            StepKind::TextPasses => {
+                self.config.text.spoken_punctuation = matches!(self.text_pass_selection, 1 | 3);
+                self.config.text.remove_fillers = matches!(self.text_pass_selection, 2 | 3);
             }
             StepKind::Microphone => {
                 self.config.audio.microphone =
@@ -821,6 +886,8 @@ impl ConsoleState {
             StepKind::InferenceBackend => "Inference backend",
             StepKind::Translation => "Translation",
             StepKind::Decoding => "Decoding",
+            StepKind::TextProcessing => "Text processing",
+            StepKind::TextPasses => "Text passes",
             StepKind::Microphone => "Microphone",
             StepKind::Activation => "Activation",
             StepKind::Shortcut => "Shortcut",
@@ -911,7 +978,7 @@ impl ConsoleState {
             StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
             StepKind::Downloading if !self.downloads_finished() => "Fetching...  Esc back  q quit",
             StepKind::Downloading => "Enter continue  Esc back  q quit",
-            StepKind::Decoding | StepKind::HistoryRetention => {
+            StepKind::Decoding | StepKind::HistoryRetention | StepKind::TextProcessing => {
                 "↑/↓ field  ←/→ cursor  Enter continue  Esc back"
             }
             StepKind::TranscriptFolder => "←/→ cursor  Enter continue  Esc back",
@@ -942,6 +1009,27 @@ impl ConsoleState {
                 area,
             ),
             StepKind::Decoding => self.render_decoding(frame, area),
+            StepKind::TextProcessing => self.render_text_fields(
+                frame,
+                area,
+                &["Replacements", "Cleanup command", "Timeout (seconds)"],
+                &self.text_processing_fields,
+                self.text_processing_field,
+                &[
+                    "vox type => Voxtype; tee vee => TV".to_string(),
+                    "empty disables it".to_string(),
+                    String::new(),
+                ],
+            ),
+            StepKind::TextPasses => frame.render_widget(
+                list_paragraph(
+                    &TEXT_PASS_LABELS.map(String::from),
+                    self.text_pass_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
             StepKind::Microphone => self.render_microphone(frame, area),
             StepKind::Activation => frame.render_widget(
                 list_paragraph(
@@ -1391,6 +1479,10 @@ impl ConsoleState {
             Line::from(format!(
                 "Decoding:    {}",
                 self.config.transcription.decoding_summary()
+            )),
+            Line::from(format!(
+                "Text:        {}",
+                self.config.text.processing_summary()
             )),
             Line::from(format!("Microphone:  {}", self.config.audio.microphone)),
             Line::from(format!(
