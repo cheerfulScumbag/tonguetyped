@@ -99,7 +99,7 @@ pub fn post_process(text: &str, config: &TextConfig, language: &str) -> String {
         result = apply_filler_removal(&result);
     }
     let command = config.post_process_command.trim();
-    if !command.is_empty() {
+    if !command.is_empty() && !result.trim().is_empty() {
         let timeout = Duration::from_secs(config.post_process_timeout_seconds);
         match run_external_command(command, &result, timeout) {
             Some(cleaned) => result = cleaned,
@@ -622,6 +622,23 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "a surviving pipeline stage must not keep the reader blocked"
         );
+    }
+
+    #[test]
+    fn the_external_command_is_skipped_when_the_passes_empty_the_text() {
+        let mut filler_config = config();
+        filler_config.remove_fillers = true;
+        filler_config.post_process_command = "echo hallucinated".to_string();
+        filler_config.post_process_timeout_seconds = 5;
+        assert_eq!(post_process("um", &filler_config, "en"), "");
+
+        let mut replacement_config = config();
+        replacement_config
+            .replacements
+            .insert("hello world".to_string(), String::new());
+        replacement_config.post_process_command = "echo hallucinated".to_string();
+        replacement_config.post_process_timeout_seconds = 5;
+        assert_eq!(post_process("hello world", &replacement_config, "en"), "");
     }
 
     #[test]
