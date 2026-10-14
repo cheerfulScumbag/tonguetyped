@@ -22,8 +22,9 @@
 //!   failing.
 //! - canary and cohere reject input past their encoder table (about 400
 //!   seconds) before decoding ([`LongForm::HardCap`]), so
-//!   [`crate::config::Config::validate`] refuses a `max_recording_seconds`
-//!   above the active model's cap.
+//!   [`crate::config::Config::validate`] refuses a per-call buffer above the
+//!   active model's cap - that is `chunk_seconds` when chunking is on and
+//!   `max_recording_seconds` when it is off.
 //!
 //! Diarization (`sortformer`) and streaming-only families stay out: neither
 //! produces a single offline transcript through `Session::run`.

@@ -985,20 +985,29 @@ impl Config {
             anyhow::bail!("max_recording_seconds is too large");
         }
         // The pipeline hands the model one VAD-filtered buffer, so a family
-        // that rejects over-length input (canary, cohere) needs the configured
-        // recording cap to stay within that family's single-buffer limit. Every
-        // catalog entry has `VariantInfo` (see `catalog::VARIANTS`), so this
-        // reads the model's own limit rather than assuming whisper.
+        // that rejects over-length input (canary, cohere) needs that buffer to
+        // stay within the family's single-call limit. Chunking bounds every
+        // call to `chunk_seconds`; when it is off the whole recording reaches
+        // the model. Every catalog entry has `VariantInfo` (see
+        // `catalog::VARIANTS`), so this reads the model's own limit rather than
+        // assuming whisper.
         let entry = crate::catalog::find(&self.model.active_model)
             .expect("the catalog check above already accepted this id");
         if let crate::catalog::LongForm::HardCap { cap_seconds } = entry.info().long_form {
-            if self.transcription.max_recording_seconds > u64::from(cap_seconds) {
+            let per_call_seconds = if self.transcription.chunk_seconds > 0 {
+                self.transcription
+                    .max_recording_seconds
+                    .min(self.transcription.chunk_seconds)
+            } else {
+                self.transcription.max_recording_seconds
+            };
+            if per_call_seconds > u64::from(cap_seconds) {
                 anyhow::bail!(
-                    "the active model {} accepts at most {cap_seconds}s of audio per call, but \
-                     transcription.max_recording_seconds is {}; select a model that accepts longer \
-                     recordings or lower the recording limit",
+                    "the active model {} accepts at most {cap_seconds}s of audio per call, but the \
+                     per-call buffer is {per_call_seconds}s; select a model that accepts longer \
+                     recordings, lower transcription.max_recording_seconds, or lower \
+                     transcription.chunk_seconds",
                     self.model.active_model,
-                    self.transcription.max_recording_seconds,
                 );
             }
         }
@@ -1323,17 +1332,30 @@ mod tests {
     fn rejects_a_recording_limit_above_a_hard_cap_models_input_window() {
         let mut config = Config::default();
         config.model.active_model = "canary-1b-v2-f16".to_string();
+
+        // Chunking is on by default, so every call is bounded by chunk_seconds
+        // and a recording limit above the cap is still fine.
         config.transcription.max_recording_seconds = 500;
+        config.validate().unwrap();
+
+        // With chunking off the whole recording reaches the model, so the same
+        // limit is rejected.
+        config.transcription.chunk_seconds = 0;
         let error = config.validate().unwrap_err().to_string();
         assert!(error.contains("accepts at most 400s"), "{error}");
         assert!(error.contains("canary-1b-v2-f16"), "{error}");
 
+        // A chunk window larger than the cap is rejected even with chunking on.
+        config.transcription.chunk_seconds = 600;
+        assert!(config.validate().is_err());
+
         // At the cap it validates, and a no-practical-limit family is unaffected.
-        config.transcription.max_recording_seconds = 400;
+        config.transcription.chunk_seconds = 400;
         config.validate().unwrap();
 
         config.model.active_model = "parakeet-tdt-0.6b-v2-f16".to_string();
         config.transcription.max_recording_seconds = 500;
+        config.transcription.chunk_seconds = 0;
         config.validate().unwrap();
     }
 

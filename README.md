@@ -676,8 +676,9 @@ labels it with its family and language coverage. Families differ in how much
 audio one call accepts: whisper and parakeet take any length, moonshine can
 truncate output past about 48 s (keeping the partial transcript and reporting
 that it was cut short), and canary and
-cohere reject input past about 400 s, so `Config::validate` keeps
-`max_recording_seconds` within the active model's limit.
+cohere reject input past about 400 s, so `Config::validate` keeps the per-call
+buffer within the active model's limit - that is `transcription.chunk_seconds`
+when chunking is on and `transcription.max_recording_seconds` when it is off.
 
 **Benchmarking.** `examples/transcribe_benchmark.rs` measures cold load and warm
 inference on a 16 kHz mono WAV:

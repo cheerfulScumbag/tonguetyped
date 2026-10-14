@@ -196,7 +196,7 @@ fn long_form_note(long_form: crate::catalog::LongForm) -> String {
             )
         }
         crate::catalog::LongForm::HardCap { cap_seconds } => {
-            format!("{cap_seconds}s per recording; longer recordings are rejected")
+            format!("{cap_seconds}s per call; longer audio is chunked to stay within it")
         }
     }
 }
@@ -1718,7 +1718,7 @@ mod tests {
         let text = rendered_widget(screen.selected_detail_widget(), 100, 4);
         assert!(text.contains("Canary"), "{text}");
         assert!(text.contains("25 languages"), "{text}");
-        assert!(text.contains("400s per recording"), "{text}");
+        assert!(text.contains("400s per call"), "{text}");
     }
 
     #[test]
