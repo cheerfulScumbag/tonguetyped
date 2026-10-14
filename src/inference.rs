@@ -575,6 +575,41 @@ fn merge_transcripts(chunks: &[Transcription]) -> String {
         .join(" ")
 }
 
+/// Folds one chunked call's per-chunk results into a single [`Transcription`],
+/// preserving whatever earlier chunks already decoded when a later chunk fails.
+/// A run the binding reports as a partial ([`run_result`] `Ok` with `truncated`)
+/// is kept as text; a hard failure with no partial stops the fold, and if any
+/// earlier chunk produced text the merged transcript is returned with
+/// `truncated` set (the dictation is incomplete but not thrown away). Only when
+/// no chunk produced text does the hard error propagate.
+fn accumulate_chunks(
+    results: impl IntoIterator<Item = anyhow::Result<Transcription>>,
+) -> anyhow::Result<Transcription> {
+    let mut chunks: Vec<Transcription> = Vec::new();
+    let mut truncated = false;
+    let mut produced = false;
+    for result in results {
+        match result {
+            Ok(chunk) => {
+                produced |= !chunk.text.trim().is_empty();
+                truncated |= chunk.truncated;
+                chunks.push(chunk);
+            }
+            Err(error) => {
+                if produced {
+                    truncated = true;
+                    break;
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(Transcription {
+        text: merge_transcripts(&chunks),
+        truncated,
+    })
+}
+
 pub struct InferenceEngine {
     session: Option<LoadedSession>,
     model_path: PathBuf,
@@ -745,15 +780,10 @@ impl InferenceEngine {
         let session = &mut loaded.session;
         match window {
             Some(window) if audio.len() > window => {
-                let mut chunks: Vec<Transcription> = Vec::new();
-                for range in split_chunks(audio, window) {
-                    chunks.push(run_result(session.run(&audio[range], &options))?);
-                }
-                let truncated = chunks.iter().any(|chunk| chunk.truncated);
-                Ok(Transcription {
-                    text: merge_transcripts(&chunks),
-                    truncated,
-                })
+                let results = split_chunks(audio, window)
+                    .into_iter()
+                    .map(|range| run_result(session.run(&audio[range], &options)));
+                accumulate_chunks(results)
             }
             _ => run_result(session.run(audio, &options)),
         }
@@ -1319,6 +1349,69 @@ mod tests {
         ];
         assert_eq!(merge_transcripts(&chunks), "the first part the second part");
         assert!(merge_transcripts(&[]).is_empty());
+    }
+
+    fn transcribed(text: &str) -> anyhow::Result<Transcription> {
+        run_result(Ok(transcribe_cpp::Transcript {
+            text: text.to_string(),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn a_later_chunk_failure_keeps_the_earlier_text_as_a_partial() {
+        // Chunk 1 decodes text, chunk 2 fails hard: the dictation is incomplete
+        // but the decoded text is returned (marked truncated) instead of lost.
+        let merged = accumulate_chunks(vec![
+            transcribed("the first part"),
+            run_result(Err(transcribe_cpp::Error::OutOfMemory(
+                "out of host memory".to_string(),
+            ))),
+        ])
+        .unwrap();
+        assert!(merged.truncated);
+        assert_eq!(merged.text, "the first part");
+    }
+
+    #[test]
+    fn a_later_chunk_failure_after_a_truncated_chunk_keeps_the_partial() {
+        // A partial chunk (OutputTruncated) kept, then a later hard failure: both
+        // the text and the incomplete marking survive.
+        let merged = accumulate_chunks(vec![
+            run_result(Err(transcribe_cpp::Error::OutputTruncated {
+                message: "max_length reached".to_string(),
+                partial: Some(Box::new(transcribe_cpp::Transcript {
+                    text: "half the dictation".to_string(),
+                    ..Default::default()
+                })),
+            })),
+            run_result(Err(transcribe_cpp::Error::Busy("model busy".to_string()))),
+        ])
+        .unwrap();
+        assert!(merged.truncated);
+        assert_eq!(merged.text, "half the dictation");
+    }
+
+    #[test]
+    fn a_chunk_failure_with_no_earlier_text_propagates() {
+        // Nothing decoded yet: a hard failure is still a failure, not an empty
+        // "success", and a leading silently-empty chunk does not count as text.
+        assert!(accumulate_chunks(vec![
+            transcribed("   "),
+            run_result(Err(transcribe_cpp::Error::InputTooLong("too long".to_string()))),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn successful_chunks_merge_untruncated_and_ordered() {
+        let merged = accumulate_chunks(vec![
+            transcribed("  the first part "),
+            transcribed("the second part"),
+        ])
+        .unwrap();
+        assert!(!merged.truncated);
+        assert_eq!(merged.text, "the first part the second part");
     }
 
     #[test]
