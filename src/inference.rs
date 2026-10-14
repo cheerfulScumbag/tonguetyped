@@ -322,6 +322,88 @@ fn non_empty(value: String) -> Option<String> {
 struct LoadedSession {
     session: transcribe_cpp::Session,
     backend: BackendInfo,
+    decode_support: DecodeSupport,
+    /// Whether `DecodeSupport::warn_unsupported` already logged for this
+    /// load, so a dropped option is reported once rather than per dictation.
+    warned_unsupported: bool,
+}
+
+/// Which of `TranscriptionConfig`'s decode options the loaded model can take,
+/// probed once when it loads. `run_options` drops an option the model cannot
+/// take rather than letting it fail every run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodeSupport {
+    /// Accepts the Whisper run extension (initial prompt, temperature and
+    /// thresholds).
+    pub whisper_options: bool,
+    /// Can translate into English (multilingual Whisper, not `.en`).
+    pub translate: bool,
+}
+
+impl DecodeSupport {
+    fn probe(model: &transcribe_cpp::Model) -> Self {
+        DecodeSupport {
+            whisper_options: model.supports(transcribe_cpp::Feature::InitialPrompt),
+            translate: model.capabilities().supports_translate,
+        }
+    }
+
+    /// Logs each configured decode option this model will ignore. Returns
+    /// whether anything was logged.
+    fn warn_unsupported(self, config: &crate::config::TranscriptionConfig) -> bool {
+        let mut warned = false;
+        if config.translate && !self.translate {
+            tracing::warn!(
+                "transcription.translate is set but this model cannot translate; transcribing instead"
+            );
+            warned = true;
+        }
+        let whisper_set = !config.initial_prompt.trim().is_empty()
+            || crate::config::DECODE_KNOBS
+                .iter()
+                .any(|knob| (knob.get)(config).is_some());
+        if whisper_set && !self.whisper_options {
+            tracing::warn!(
+                "this model takes no Whisper decode options; ignoring the vocabulary prompt and decode overrides"
+            );
+            warned = true;
+        }
+        warned
+    }
+}
+
+/// The per-run options for `config`. An untouched config produces exactly
+/// `RunOptions::default()` plus the language hint, so the decoder sees the
+/// same inputs it did before these options existed; the Whisper extension is
+/// attached only when at least one of its fields is set.
+pub(crate) fn run_options(
+    config: &crate::config::TranscriptionConfig,
+    support: DecodeSupport,
+) -> transcribe_cpp::RunOptions {
+    let language = &config.language;
+    let task = if config.translate && support.translate {
+        transcribe_cpp::Task::Translate
+    } else {
+        transcribe_cpp::Task::Transcribe
+    };
+    let prompt = config.initial_prompt.trim();
+    let whisper = transcribe_cpp::WhisperRunOptions {
+        initial_prompt: (!prompt.is_empty()).then(|| prompt.to_string()),
+        temperature: config.temperature.map(|value| value as f32),
+        temperature_inc: config.temperature_increment.map(|value| value as f32),
+        compression_ratio_thold: config.compression_ratio_threshold.map(|value| value as f32),
+        logprob_thold: config.logprob_threshold.map(|value| value as f32),
+        no_speech_thold: config.no_speech_threshold.map(|value| value as f32),
+        ..Default::default()
+    };
+    let family = (support.whisper_options && whisper != Default::default())
+        .then_some(transcribe_cpp::RunExtension::Whisper(whisper));
+    transcribe_cpp::RunOptions {
+        task,
+        language: (language != "auto").then(|| language.to_string()),
+        family,
+        ..Default::default()
+    }
 }
 
 pub struct InferenceEngine {
@@ -413,6 +495,8 @@ impl InferenceEngine {
                     session.set_cancel_token(&self.cancel);
                     self.session = Some(LoadedSession {
                         backend: describe_loaded_backend(&model),
+                        decode_support: DecodeSupport::probe(&model),
+                        warned_unsupported: false,
                         session,
                     });
                     return Ok(());
@@ -450,12 +534,16 @@ impl InferenceEngine {
         self.session = None;
     }
 
-    pub fn transcribe(&mut self, audio: &[f32], language: &str) -> anyhow::Result<String> {
+    pub fn transcribe(
+        &mut self,
+        audio: &[f32],
+        config: &crate::config::TranscriptionConfig,
+    ) -> anyhow::Result<String> {
         let loaded = self.session.as_mut().context("engine not loaded")?;
-        let options = transcribe_cpp::RunOptions {
-            language: (language != "auto").then(|| language.to_string()),
-            ..Default::default()
-        };
+        if !loaded.warned_unsupported {
+            loaded.warned_unsupported = loaded.decode_support.warn_unsupported(config);
+        }
+        let options = run_options(config, loaded.decode_support);
         let transcript = loaded
             .session
             .run(audio, &options)
@@ -528,6 +616,125 @@ mod tests {
     fn cpu_thread_count_does_not_exceed_available_logical_cpus() {
         assert_eq!(cpu_thread_count(8, 16), 8);
         assert_eq!(cpu_thread_count(8, 4), 4);
+    }
+
+    const WHISPER: DecodeSupport = DecodeSupport {
+        whisper_options: true,
+        translate: true,
+    };
+
+    #[test]
+    fn default_decode_config_produces_the_pre_existing_run_options() {
+        // Exactly what `transcribe` built before the decode options existed:
+        // the language hint on top of the binding's defaults, no extension.
+        let config = crate::config::TranscriptionConfig::default();
+        assert_eq!(
+            run_options(&config, WHISPER),
+            transcribe_cpp::RunOptions {
+                language: None,
+                ..Default::default()
+            }
+        );
+
+        let english = crate::config::TranscriptionConfig {
+            language: "en".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_options(&english, WHISPER),
+            transcribe_cpp::RunOptions {
+                language: Some("en".to_string()),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn whitespace_only_prompt_attaches_no_extension() {
+        let config = crate::config::TranscriptionConfig {
+            initial_prompt: "  \t ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(run_options(&config, WHISPER).family, None);
+    }
+
+    #[test]
+    fn decode_config_maps_onto_the_binding_options() {
+        let config = crate::config::TranscriptionConfig {
+            language: "de".to_string(),
+            initial_prompt: "  TongueTyped, Wayland, KWin ".to_string(),
+            translate: true,
+            temperature: Some(0.1),
+            temperature_increment: Some(0.0),
+            compression_ratio_threshold: Some(f64::INFINITY),
+            logprob_threshold: Some(f64::NEG_INFINITY),
+            no_speech_threshold: Some(0.8),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_options(&config, WHISPER),
+            transcribe_cpp::RunOptions {
+                task: transcribe_cpp::Task::Translate,
+                language: Some("de".to_string()),
+                family: Some(transcribe_cpp::RunExtension::Whisper(
+                    transcribe_cpp::WhisperRunOptions {
+                        initial_prompt: Some("TongueTyped, Wayland, KWin".to_string()),
+                        temperature: Some(0.1),
+                        temperature_inc: Some(0.0),
+                        compression_ratio_thold: Some(f32::INFINITY),
+                        logprob_thold: Some(f32::NEG_INFINITY),
+                        no_speech_thold: Some(0.8),
+                        ..Default::default()
+                    }
+                )),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_single_knob_attaches_only_that_override() {
+        let config = crate::config::TranscriptionConfig {
+            no_speech_threshold: Some(0.3),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_options(&config, WHISPER).family,
+            Some(transcribe_cpp::RunExtension::Whisper(
+                transcribe_cpp::WhisperRunOptions {
+                    no_speech_thold: Some(0.3),
+                    ..Default::default()
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn options_the_model_cannot_take_are_dropped_instead_of_failing_the_run() {
+        let config = crate::config::TranscriptionConfig {
+            initial_prompt: "TongueTyped".to_string(),
+            translate: true,
+            temperature: Some(0.4),
+            ..Default::default()
+        };
+        // An English-only Whisper model: no translation, prompt still applies.
+        let english_only = DecodeSupport {
+            whisper_options: true,
+            translate: false,
+        };
+        let options = run_options(&config, english_only);
+        assert_eq!(options.task, transcribe_cpp::Task::Transcribe);
+        assert!(options.family.is_some());
+
+        // A family without the Whisper extension gets none of it.
+        let other_family = DecodeSupport {
+            whisper_options: false,
+            translate: false,
+        };
+        assert_eq!(
+            run_options(&config, other_family),
+            transcribe_cpp::RunOptions::default()
+        );
     }
 
     fn engine(preference: BackendPreference) -> InferenceEngine {

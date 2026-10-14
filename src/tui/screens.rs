@@ -2,8 +2,8 @@
 //! aren't just "run one action and show the result": the model screen
 //! (catalog activation + inference backend), the daemon actions, and the
 //! settings screens the home screen's Settings panel opens (inference
-//! backend, microphone, activation, shortcut, transcript output, typing
-//! backend, startup, overlay).
+//! backend, translation, decoding, microphone, activation, shortcut,
+//! transcript output, typing backend, startup, overlay).
 //!
 //! Most settings screens here only mutate the in-memory `Config` they are
 //! handed (`apply`), and the caller (`tui::App`) owns `Config::save` so a
@@ -20,7 +20,7 @@ use crate::setup::Capabilities;
 use crate::text_input::TextField;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
 
 /// Which of the model screen's two lists the arrow keys and Enter act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,6 +447,39 @@ impl ActivationScreen {
     }
 }
 
+/// Translation: transcribe in the spoken language vs translate into English.
+pub(super) struct TranslationScreen {
+    pub selected: usize,
+    pub result: Option<Result<(), String>>,
+}
+
+impl TranslationScreen {
+    pub(super) fn new(config: &Config) -> Self {
+        Self {
+            selected: usize::from(config.transcription.translate),
+            result: None,
+        }
+    }
+
+    pub(super) fn move_selection(&mut self, delta: i32) {
+        let next = (self.selected as i32 + delta).clamp(0, 1) as usize;
+        self.selected = next;
+    }
+
+    pub(super) fn apply(&mut self, config: &mut Config) {
+        config.transcription.translate = self.selected == 1;
+    }
+
+    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+        let rows = crate::config::TRANSLATE_LABELS.map(String::from);
+        selection_list("Translation", &rows, self.selected)
+    }
+
+    pub(super) fn result_line(&self) -> Line<'static> {
+        result_line(&self.result, "Translation saved.")
+    }
+}
+
 /// The Shortcut screen: the binding the desktop reports and the two actions
 /// that talk to the desktop's global-shortcuts portal. TongueTyped never
 /// picks a key, so setting one always goes through the portal's native
@@ -740,13 +773,17 @@ impl OverlayScreen {
 }
 
 /// A screen of labeled single-line text fields with one selection cursor,
-/// shared by the "History retention" (two numeric fields) and "Transcript
-/// folder" (one path field) screens. Editing keys act on the selected field;
-/// Escape returns home; Enter runs the screen's own `apply`.
+/// shared by the "History retention" (two numeric fields), "Transcript
+/// folder" (one path field) and "Decoding" (a prompt and five numbers)
+/// screens. Editing keys act on the selected field; Escape returns home;
+/// Enter runs the screen's own `apply`.
 pub(super) struct TextFieldsScreen {
     pub title: &'static str,
     pub hint: &'static str,
     pub fields: Vec<(&'static str, TextField)>,
+    /// Dim text shown in place of an empty field, indexed like `fields`;
+    /// missing entries show nothing.
+    pub placeholders: Vec<String>,
     pub selected: usize,
     pub result: Option<Result<(), String>>,
     apply: fn(&TextFieldsScreen, &mut Config) -> Result<(), String>,
@@ -769,6 +806,7 @@ impl TextFieldsScreen {
                     TextField::new(config.history.max_age_days.to_string()),
                 ),
             ],
+            placeholders: Vec::new(),
             selected: 0,
             result: None,
             apply: apply_history_retention,
@@ -785,9 +823,36 @@ impl TextFieldsScreen {
                 "Folder",
                 TextField::new(config.history.transcript_folder.clone()),
             )],
+            placeholders: Vec::new(),
             selected: 0,
             result: None,
             apply: apply_transcript_folder,
+        }
+    }
+
+    /// The "Decoding" screen: the vocabulary prompt and the Whisper decode
+    /// knobs in `config::DECODE_KNOBS`, where an empty number keeps the
+    /// model default shown beside it.
+    pub(super) fn decoding(config: &Config) -> Self {
+        let transcription = &config.transcription;
+        let mut fields = vec![(
+            crate::config::INITIAL_PROMPT_LABEL,
+            TextField::new(transcription.initial_prompt.clone()),
+        )];
+        fields.extend(
+            crate::config::DECODE_KNOBS
+                .iter()
+                .zip(transcription.decoding_form_values())
+                .map(|(knob, value)| (knob.label, TextField::new(value))),
+        );
+        Self {
+            title: "Decoding",
+            hint: crate::config::DECODING_HINT,
+            fields,
+            placeholders: crate::config::TranscriptionConfig::decoding_form_placeholders(),
+            selected: 0,
+            result: None,
+            apply: apply_decoding,
         }
     }
 
@@ -825,11 +890,20 @@ impl TextFieldsScreen {
                     format!("{marker}{label:<label_width$}  "),
                     selection_style(selected),
                 )];
-                spans.extend(field_value_spans(field, selected));
+                match self
+                    .placeholders
+                    .get(index)
+                    .filter(|_| field.value().is_empty())
+                {
+                    Some(placeholder) => spans.extend(placeholder_spans(placeholder, selected)),
+                    None => spans.extend(field_value_spans(field, selected)),
+                }
                 Line::from(spans)
             })
             .collect();
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(self.title))
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(self.title))
     }
 
     pub(super) fn result_line(&self, success: &str) -> Line<'static> {
@@ -854,6 +928,21 @@ fn field_value_spans(field: &TextField, selected: bool) -> Vec<Span<'static>> {
         ),
         Span::raw(after),
     ]
+}
+
+/// The dim hint drawn in place of an empty text field. When the field is
+/// selected its first character carries the cursor, so the hint starts in
+/// the same column on every row.
+fn placeholder_spans(text: &str, selected: bool) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut chars = text.chars();
+    match chars.next().filter(|_| selected) {
+        Some(first) => vec![
+            Span::styled(first.to_string(), dim.add_modifier(Modifier::REVERSED)),
+            Span::styled(chars.as_str().to_string(), dim),
+        ],
+        None => vec![Span::styled(text.to_string(), dim)],
+    }
 }
 
 fn parse_retention_number(raw: &str) -> Result<u64, String> {
@@ -889,6 +978,18 @@ fn apply_transcript_folder(screen: &TextFieldsScreen, config: &mut Config) -> Re
     }
     config.history.transcript_folder = expanded.to_string_lossy().into_owned();
     Ok(())
+}
+
+fn apply_decoding(screen: &TextFieldsScreen, config: &mut Config) -> Result<(), String> {
+    let (prompt, knobs) = screen
+        .fields
+        .split_first()
+        .expect("the decoding screen has a prompt field");
+    let knobs: [&str; crate::config::DECODE_KNOBS.len()] =
+        std::array::from_fn(|index| knobs[index].1.value());
+    config
+        .transcription
+        .apply_decoding_form(prompt.1.value(), &knobs)
 }
 
 fn overlay_style_label(style: &str) -> &'static str {

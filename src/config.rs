@@ -254,6 +254,30 @@ pub struct TranscriptionConfig {
     pub trailing_space: bool,
     #[serde(default = "default_max_recording_seconds")]
     pub max_recording_seconds: u64,
+    /// Text the Whisper decoder reads as if it came just before the
+    /// recording, which biases it toward the names, jargon and product terms
+    /// it contains. Whisper also copies the prompt's style, so a punctuated
+    /// sentence keeps punctuation in the transcript where a bare word list
+    /// drops it. Empty (the default) sends no prompt at all.
+    #[serde(default)]
+    pub initial_prompt: String,
+    /// Translate the speech into English instead of transcribing it in the
+    /// spoken language. Ignored by models that cannot translate (the `.en`
+    /// models).
+    #[serde(default = "default_false")]
+    pub translate: bool,
+    /// The Whisper decode knobs in `DECODE_KNOBS`. Each is absent by default,
+    /// which keeps the model's own value; see `DECODE_KNOBS` for the ranges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_increment: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression_ratio_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprob_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_speech_threshold: Option<f64>,
 }
 
 impl Default for TranscriptionConfig {
@@ -263,7 +287,220 @@ impl Default for TranscriptionConfig {
             language: default_language(),
             trailing_space: true,
             max_recording_seconds: default_max_recording_seconds(),
+            initial_prompt: String::new(),
+            translate: false,
+            temperature: None,
+            temperature_increment: None,
+            compression_ratio_threshold: None,
+            logprob_threshold: None,
+            no_speech_threshold: None,
         }
+    }
+}
+
+/// One optional numeric Whisper decode knob in `TranscriptionConfig`: its
+/// TOML key, the label both configuration UIs show, and the values it
+/// accepts. A knob that is unset keeps the model's own default.
+pub(crate) struct DecodeKnob {
+    pub key: &'static str,
+    pub label: &'static str,
+    /// The value transcribe.cpp uses when the knob is unset.
+    pub model_default: &'static str,
+    /// The accepted values, worded to follow "must be".
+    pub range: &'static str,
+    accepts: fn(f64) -> bool,
+    pub get: fn(&TranscriptionConfig) -> Option<f64>,
+    pub set: fn(&mut TranscriptionConfig, Option<f64>),
+}
+
+impl DecodeKnob {
+    pub fn accepts(&self, value: f64) -> bool {
+        (self.accepts)(value)
+    }
+}
+
+/// The numeric Whisper decode knobs, in the order both configuration UIs
+/// list them. The thresholds take `inf` (`-inf` for the log-probability
+/// one) to turn that check off, as transcribe.cpp's own sentinels do.
+pub(crate) const DECODE_KNOBS: [DecodeKnob; 5] = [
+    DecodeKnob {
+        key: "temperature",
+        label: "Temperature",
+        model_default: "0",
+        range: "between 0 and 1",
+        accepts: |value| (0.0..=1.0).contains(&value),
+        get: |config| config.temperature,
+        set: |config, value| config.temperature = value,
+    },
+    DecodeKnob {
+        key: "temperature_increment",
+        label: "Temperature step",
+        model_default: "0.2",
+        range: "between 0 and 1 (0 turns the retry off)",
+        accepts: |value| (0.0..=1.0).contains(&value),
+        get: |config| config.temperature_increment,
+        set: |config, value| config.temperature_increment = value,
+    },
+    DecodeKnob {
+        key: "compression_ratio_threshold",
+        label: "Compression limit",
+        model_default: "2.4",
+        range: "above 0, or inf to turn it off",
+        accepts: |value| value > 0.0,
+        get: |config| config.compression_ratio_threshold,
+        set: |config, value| config.compression_ratio_threshold = value,
+    },
+    DecodeKnob {
+        key: "logprob_threshold",
+        label: "Log-prob limit",
+        model_default: "-1",
+        range: "0 or below, or -inf to turn it off",
+        accepts: |value| value <= 0.0,
+        get: |config| config.logprob_threshold,
+        set: |config, value| config.logprob_threshold = value,
+    },
+    DecodeKnob {
+        key: "no_speech_threshold",
+        label: "No-speech limit",
+        model_default: "0.6",
+        range: "between 0 and 1, or inf to turn it off",
+        accepts: |value| (0.0..=1.0).contains(&value) || value == f64::INFINITY,
+        get: |config| config.no_speech_threshold,
+        set: |config, value| config.no_speech_threshold = value,
+    },
+];
+
+/// The label both configuration UIs give `TranscriptionConfig::initial_prompt`.
+pub(crate) const INITIAL_PROMPT_LABEL: &str = "Vocabulary prompt";
+
+/// The dim text both configuration UIs show in an empty vocabulary prompt.
+pub(crate) const INITIAL_PROMPT_PLACEHOLDER: &str =
+    "a sentence with your terms, e.g. I dictate in TongueTyped on KWin.";
+
+/// The one-line note both configuration UIs show under the decoding fields.
+pub(crate) const DECODING_HINT: &str =
+    "Whisper models only. Thresholds take inf (log-prob: -inf) to turn off.";
+
+/// The `TranscriptionConfig::translate` choices as both configuration UIs
+/// label them, in order (index 0 = transcribe, index 1 = translate).
+pub(crate) const TRANSLATE_LABELS: [&str; 2] = [
+    "Transcribe in the spoken language",
+    "Translate speech into English",
+];
+
+impl TranscriptionConfig {
+    /// Why `initial_prompt` cannot be sent to the decoder, if it cannot: an
+    /// interior NUL cannot cross the C boundary, and transcribe.cpp rejects a
+    /// `<|...|>` special-token tag at run time, which would fail every
+    /// dictation instead of failing here.
+    fn initial_prompt_error(&self) -> Option<&'static str> {
+        let prompt = &self.initial_prompt;
+        if prompt.contains('\0') {
+            return Some("must not contain a NUL character");
+        }
+        let has_tag = prompt
+            .match_indices("<|")
+            .any(|(start, _)| prompt[start + 2..].contains("|>"));
+        has_tag.then_some("must not contain a <|...|> tag")
+    }
+
+    fn validate_decoding(&self) -> anyhow::Result<()> {
+        if let Some(problem) = self.initial_prompt_error() {
+            anyhow::bail!("transcription.initial_prompt {problem}");
+        }
+        for knob in &DECODE_KNOBS {
+            if let Some(value) = (knob.get)(self) {
+                if !knob.accepts(value) {
+                    anyhow::bail!("transcription.{} must be {}", knob.key, knob.range);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the configuration UIs' decoding form: the vocabulary prompt
+    /// followed by one entry per `DECODE_KNOBS` knob, where an empty entry
+    /// keeps the model default. Changes nothing and returns a message naming
+    /// the field when any entry is invalid.
+    pub(crate) fn apply_decoding_form(
+        &mut self,
+        prompt: &str,
+        knobs: &[&str; DECODE_KNOBS.len()],
+    ) -> Result<(), String> {
+        let mut candidate = self.clone();
+        candidate.initial_prompt = prompt.trim().to_string();
+        if let Some(problem) = candidate.initial_prompt_error() {
+            return Err(format!("{INITIAL_PROMPT_LABEL} {problem}."));
+        }
+        for (knob, raw) in DECODE_KNOBS.iter().zip(knobs) {
+            let raw = raw.trim();
+            let value = if raw.is_empty() {
+                None
+            } else {
+                match raw.parse::<f64>() {
+                    Ok(value) if knob.accepts(value) => Some(value),
+                    _ => {
+                        return Err(format!(
+                            "{} must be {}, or empty for the model default.",
+                            knob.label, knob.range
+                        ))
+                    }
+                }
+            };
+            (knob.set)(&mut candidate, value);
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    /// The decoding form's starting text for each `DECODE_KNOBS` knob: the
+    /// configured value, or empty for the model default.
+    pub(crate) fn decoding_form_values(&self) -> [String; DECODE_KNOBS.len()] {
+        DECODE_KNOBS.each_ref().map(|knob| {
+            (knob.get)(self)
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        })
+    }
+
+    /// A one-line summary of the decoding settings for the configuration
+    /// UIs, e.g. `vocabulary prompt, 2 overrides`.
+    pub(crate) fn decoding_summary(&self) -> String {
+        let overrides = DECODE_KNOBS
+            .iter()
+            .filter(|knob| (knob.get)(self).is_some())
+            .count();
+        let mut parts = Vec::new();
+        if !self.initial_prompt.trim().is_empty() {
+            parts.push("vocabulary prompt".to_string());
+        }
+        match overrides {
+            0 => {}
+            1 => parts.push("1 override".to_string()),
+            n => parts.push(format!("{n} overrides")),
+        }
+        if parts.is_empty() {
+            "model defaults".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    /// The dim text for each empty decoding-form field, in form order: the
+    /// vocabulary prompt, then each `DECODE_KNOBS` knob's model default.
+    pub(crate) fn decoding_form_placeholders() -> Vec<String> {
+        std::iter::once(INITIAL_PROMPT_PLACEHOLDER.to_string())
+            .chain(
+                DECODE_KNOBS
+                    .iter()
+                    .map(|knob| format!("model default ({})", knob.model_default)),
+            )
+            .collect()
+    }
+
+    /// The `TRANSLATE_LABELS` entry for the current `translate` choice.
+    pub(crate) fn translate_label(&self) -> &'static str {
+        TRANSLATE_LABELS[usize::from(self.translate)]
     }
 }
 
@@ -695,6 +932,7 @@ impl Config {
         {
             anyhow::bail!("max_recording_seconds is too large");
         }
+        self.transcription.validate_decoding()?;
         if self.model.idle_unload.policy == IdleUnloadPolicy::AfterIdle {
             let seconds = self
                 .model
@@ -819,6 +1057,145 @@ mod tests {
             unlimited.history.retention_summary(),
             "unlimited entries, unlimited age"
         );
+    }
+
+    #[test]
+    fn decode_options_default_to_off_and_stay_out_of_a_saved_file() {
+        let config = Config::default();
+        assert!(config.transcription.initial_prompt.is_empty());
+        assert!(!config.transcription.translate);
+        for knob in &DECODE_KNOBS {
+            assert_eq!((knob.get)(&config.transcription), None, "{}", knob.key);
+        }
+        assert_eq!(config.transcription.decoding_summary(), "model defaults");
+
+        // An unset knob is omitted rather than written as a value, so the
+        // model default stays in charge after a save.
+        let saved = toml::to_string_pretty(&config).unwrap();
+        for knob in &DECODE_KNOBS {
+            assert!(!saved.contains(knob.key), "{saved}");
+        }
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.transcription.temperature, None);
+    }
+
+    #[test]
+    fn decode_options_round_trip_through_toml() {
+        let config: Config = toml::from_str(
+            "[transcription]\ninitial_prompt = \"TongueTyped, KWin\"\ntranslate = true\n\
+             temperature = 0.2\ntemperature_increment = 0.0\n\
+             compression_ratio_threshold = inf\nlogprob_threshold = -inf\n\
+             no_speech_threshold = 0.5\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let transcription = &config.transcription;
+        assert_eq!(transcription.initial_prompt, "TongueTyped, KWin");
+        assert!(transcription.translate);
+        assert_eq!(transcription.temperature, Some(0.2));
+        assert_eq!(transcription.temperature_increment, Some(0.0));
+        assert_eq!(
+            transcription.compression_ratio_threshold,
+            Some(f64::INFINITY)
+        );
+        assert_eq!(transcription.logprob_threshold, Some(f64::NEG_INFINITY));
+        assert_eq!(transcription.no_speech_threshold, Some(0.5));
+        assert_eq!(
+            transcription.decoding_summary(),
+            "vocabulary prompt, 5 overrides"
+        );
+
+        let saved: Config = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!(saved.transcription.temperature, Some(0.2));
+        assert_eq!(
+            saved.transcription.logprob_threshold,
+            Some(f64::NEG_INFINITY)
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_decode_options() {
+        let rejected: [(&str, f64); 9] = [
+            ("temperature", -0.1),
+            ("temperature", 1.5),
+            ("temperature", f64::NAN),
+            ("temperature_increment", f64::INFINITY),
+            ("compression_ratio_threshold", 0.0),
+            ("logprob_threshold", 0.5),
+            ("no_speech_threshold", 1.2),
+            ("no_speech_threshold", f64::NEG_INFINITY),
+            ("compression_ratio_threshold", f64::NAN),
+        ];
+        for (key, value) in rejected {
+            let knob = DECODE_KNOBS.iter().find(|knob| knob.key == key).unwrap();
+            let mut config = Config::default();
+            (knob.set)(&mut config.transcription, Some(value));
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(key), "{key} = {value}: {error}");
+        }
+
+        let mut config = Config::default();
+        config.transcription.initial_prompt = "say <|en|> please".to_string();
+        assert!(config.validate().is_err());
+        config.transcription.initial_prompt = "nul\0byte".to_string();
+        assert!(config.validate().is_err());
+        config.transcription.initial_prompt = "a <| b, c |> d".to_string();
+        assert!(config.validate().is_err());
+        config.transcription.initial_prompt = "x <| y and a|b > c".to_string();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn decoding_form_parses_blank_numbers_as_model_defaults() {
+        let mut transcription = TranscriptionConfig {
+            temperature: Some(0.3),
+            ..Default::default()
+        };
+        assert_eq!(
+            transcription.decoding_form_values(),
+            ["0.3", "", "", "", ""].map(String::from)
+        );
+        transcription
+            .apply_decoding_form(" TongueTyped ", &["", "0", "inf", "-2", " 0.4 "])
+            .unwrap();
+        assert_eq!(transcription.initial_prompt, "TongueTyped");
+        assert_eq!(transcription.temperature, None);
+        assert_eq!(transcription.temperature_increment, Some(0.0));
+        assert_eq!(
+            transcription.compression_ratio_threshold,
+            Some(f64::INFINITY)
+        );
+        assert_eq!(transcription.logprob_threshold, Some(-2.0));
+        assert_eq!(transcription.no_speech_threshold, Some(0.4));
+        assert_eq!(
+            transcription.decoding_form_values(),
+            ["", "0", "inf", "-2", "0.4"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn decoding_form_rejects_bad_input_without_changing_anything() {
+        let mut transcription = TranscriptionConfig::default();
+        let error = transcription
+            .apply_decoding_form("TongueTyped", &["warm", "", "", "", ""])
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Temperature must be between 0 and 1, or empty for the model default."
+        );
+        let error = transcription
+            .apply_decoding_form("", &["", "", "", "1", ""])
+            .unwrap_err();
+        assert!(
+            error.starts_with("Log-prob limit must be 0 or below"),
+            "{error}"
+        );
+        let error = transcription
+            .apply_decoding_form("<|en|>", &["", "", "", "", ""])
+            .unwrap_err();
+        assert!(error.starts_with(INITIAL_PROMPT_LABEL), "{error}");
+        assert!(transcription.initial_prompt.is_empty());
+        assert_eq!(transcription.temperature, None);
     }
 
     #[test]

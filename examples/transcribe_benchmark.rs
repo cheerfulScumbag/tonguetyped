@@ -6,6 +6,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use tonguetyped::config::TranscriptionConfig;
 use tonguetyped::inference::{BackendPreference, InferenceEngine};
 
 #[derive(Parser)]
@@ -77,6 +78,10 @@ fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| args.model.clone());
 
+    let transcription = TranscriptionConfig {
+        language: "en".to_string(),
+        ..Default::default()
+    };
     let mut runs = Vec::with_capacity(args.runs);
     for run in 1..=args.runs {
         let vad_started = Instant::now();
@@ -91,7 +96,7 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_default();
 
         let started = Instant::now();
-        let _transcript = engine.transcribe(&run_samples, "en")?;
+        let _transcript = engine.transcribe(&run_samples, &transcription)?;
         let inference_seconds = started.elapsed().as_secs_f64();
         runs.push(BenchmarkRun {
             run,

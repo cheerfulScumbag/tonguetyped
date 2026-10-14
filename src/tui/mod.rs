@@ -9,9 +9,10 @@
 //! doc comment).
 //!
 //! The home screen is two stacked panels with one selection cursor: a
-//! fixed Settings panel listing the eleven configuration areas (Model,
-//! Inference backend, Microphone, Activation, Shortcut, Transcript output,
-//! Typing backend, Transcript folder, History retention, Startup, Overlay)
+//! fixed Settings panel listing the thirteen configuration areas (Model,
+//! Inference backend, Translation, Decoding, Microphone, Activation,
+//! Shortcut, Transcript output, Typing backend, Transcript folder, History
+//! retention, Startup, Overlay)
 //! with their current values, and a Commands panel derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
@@ -153,12 +154,14 @@ struct HomeItem {
     about: String,
 }
 
-/// The eleven configuration areas the home screen's Settings panel lists, in
-/// display order.
+/// The thirteen configuration areas the home screen's Settings panel lists,
+/// in display order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingId {
     Model,
     InferenceBackend,
+    Translation,
+    Decoding,
     Microphone,
     Activation,
     Shortcut,
@@ -171,9 +174,11 @@ enum SettingId {
 }
 
 impl SettingId {
-    const ALL: [SettingId; 11] = [
+    const ALL: [SettingId; 13] = [
         SettingId::Model,
         SettingId::InferenceBackend,
+        SettingId::Translation,
+        SettingId::Decoding,
         SettingId::Microphone,
         SettingId::Activation,
         SettingId::Shortcut,
@@ -189,6 +194,8 @@ impl SettingId {
         match self {
             SettingId::Model => "Model",
             SettingId::InferenceBackend => "Inference backend",
+            SettingId::Translation => "Translation",
+            SettingId::Decoding => "Decoding",
             SettingId::Microphone => "Microphone",
             SettingId::Activation => "Activation",
             SettingId::Shortcut => "Shortcut",
@@ -202,8 +209,8 @@ impl SettingId {
     }
 }
 
-/// Eleven settings rows plus the panel's two border rows.
-const SETTINGS_PANEL_HEIGHT: u16 = 13;
+/// Thirteen settings rows plus the panel's two border rows.
+const SETTINGS_PANEL_HEIGHT: u16 = 15;
 
 /// The dashboard's Commands panel, derived from the exact same clap metadata
 /// `--help` renders - see this module's doc comment. The implicit `help`
@@ -245,6 +252,7 @@ enum Screen {
     Daemon(screens::DaemonScreen),
     Microphone(screens::MicrophoneScreen),
     Activation(screens::ActivationScreen),
+    Translation(screens::TranslationScreen),
     Shortcut(screens::ShortcutScreen),
     TranscriptOutput(screens::OutputScreen),
     TypingBackend(screens::TypingBackendScreen),
@@ -510,6 +518,7 @@ impl App {
             Screen::Daemon(_) => self.handle_daemon_key(key),
             Screen::Microphone(_) => self.handle_microphone_key(key),
             Screen::Activation(_) => self.handle_activation_key(key),
+            Screen::Translation(_) => self.handle_translation_key(key),
             Screen::Shortcut(_) => self.handle_shortcut_key(key),
             Screen::TranscriptOutput(_) => self.handle_output_key(key),
             Screen::TypingBackend(_) => self.handle_typing_backend_key(key),
@@ -571,6 +580,12 @@ impl App {
                 &self.config,
                 crate::inference::backend_choices(),
             )),
+            SettingId::Translation => {
+                Screen::Translation(screens::TranslationScreen::new(&self.config))
+            }
+            SettingId::Decoding => {
+                Screen::TextFields(screens::TextFieldsScreen::decoding(&self.config))
+            }
             SettingId::Microphone => {
                 let mut screen = screens::MicrophoneScreen::new(&self.capabilities, &self.config);
                 screen.start_preview();
@@ -607,6 +622,7 @@ impl App {
         match &mut self.screen {
             Screen::Microphone(screen) => screen.result = Some(result),
             Screen::Activation(screen) => screen.result = Some(result),
+            Screen::Translation(screen) => screen.result = Some(result),
             Screen::TranscriptOutput(screen) => screen.result = Some(result),
             Screen::TypingBackend(screen) => screen.result = Some(result),
             Screen::Overlay(screen) => screen.result = Some(result),
@@ -655,6 +671,30 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Screen::Activation(screen) = &mut self.screen {
+                    screen.apply(&mut self.config);
+                }
+                self.save_settings_config();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_translation_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Screen::Translation(screen) = &mut self.screen {
+                    screen.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Screen::Translation(screen) = &mut self.screen {
+                    screen.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Screen::Translation(screen) = &mut self.screen {
                     screen.apply(&mut self.config);
                 }
                 self.save_settings_config();
@@ -740,7 +780,8 @@ impl App {
         }
     }
 
-    /// The text-field screens ("Transcript folder", "History retention"):
+    /// The text-field screens ("Decoding", "Transcript folder", "History
+    /// retention"):
     /// Up/Down/Tab move between fields, the editing keys act on the selected
     /// field, and Enter runs the screen's `apply`. `q` types a literal `q`
     /// here instead of quitting, since the fields accept free text; Ctrl+C
@@ -1131,6 +1172,7 @@ impl App {
             Screen::Daemon(screen) => self.render_daemon(frame, area, screen),
             Screen::Microphone(screen) => self.render_microphone(frame, area, screen),
             Screen::Activation(screen) => self.render_activation(frame, area, screen),
+            Screen::Translation(screen) => self.render_translation(frame, area, screen),
             Screen::Shortcut(screen) => self.render_shortcut(frame, area, screen),
             Screen::TranscriptOutput(screen) => self.render_output(frame, area, screen),
             Screen::TypingBackend(screen) => self.render_typing_backend(frame, area, screen),
@@ -1205,6 +1247,8 @@ impl App {
         match setting {
             SettingId::Model => self.config.model.active_model.clone(),
             SettingId::InferenceBackend => self.config.model.preferred_backend.clone(),
+            SettingId::Translation => self.config.transcription.translate_label().to_string(),
+            SettingId::Decoding => self.config.transcription.decoding_summary(),
             SettingId::Microphone => self
                 .capabilities
                 .microphone_label(&self.config.audio.microphone),
@@ -1446,6 +1490,33 @@ impl App {
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
             chunks[2],
+        );
+    }
+
+    fn render_translation(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        screen: &screens::TranslationScreen,
+    ) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            Paragraph::new("Translation needs a multilingual model; .en models always transcribe."),
+            chunks[1],
+        );
+        frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
+        frame.render_widget(
+            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            chunks[3],
         );
     }
 
@@ -1860,6 +1931,8 @@ mod tests {
             vec![
                 "Model",
                 "Inference backend",
+                "Translation",
+                "Decoding",
                 "Microphone",
                 "Activation",
                 "Shortcut",
