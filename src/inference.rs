@@ -406,6 +406,74 @@ pub(crate) fn run_options(
     }
 }
 
+/// The rate every buffer reaching `InferenceEngine::transcribe` is already at -
+/// the live capture path resamples to it and the file path does the same - so
+/// `transcription.chunk_seconds` converts to a sample count with it.
+const DECODE_SAMPLE_RATE: usize = 16_000;
+
+/// The shortest window the chunk splitter analyses when hunting for a quiet
+/// boundary, in samples (10 ms at 16 kHz).
+const CHUNK_PROBE_SAMPLES: usize = 160;
+
+/// The decode window in samples for `config`, or `None` when chunking is
+/// disabled (`chunk_seconds == 0`).
+fn chunk_window_samples(config: &crate::config::TranscriptionConfig) -> Option<usize> {
+    (config.chunk_seconds > 0)
+        .then(|| (config.chunk_seconds as usize).saturating_mul(DECODE_SAMPLE_RATE))
+}
+
+/// Contiguous sample ranges covering `samples`, each at most `window` long. A
+/// limit that falls before the end is nudged back to the quietest
+/// `CHUNK_PROBE_SAMPLES` window in the preceding tenth of the window (at least
+/// one probe long), so a split lands in a pause rather than through the middle
+/// of a word. `window == 0`, or audio no longer than `window`, yields a single
+/// range covering everything.
+pub(crate) fn split_chunks(samples: &[f32], window: usize) -> Vec<std::ops::Range<usize>> {
+    if window == 0 || samples.len() <= window {
+        return std::iter::once(0..samples.len()).collect();
+    }
+    let search = (window / 10).max(CHUNK_PROBE_SAMPLES);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < samples.len() {
+        let limit = start + window;
+        if limit >= samples.len() {
+            ranges.push(start..samples.len());
+            break;
+        }
+        let low = limit
+            .saturating_sub(search)
+            .max(start + CHUNK_PROBE_SAMPLES);
+        let split = quietest_boundary(samples, low, limit);
+        ranges.push(start..split);
+        start = split;
+    }
+    ranges
+}
+
+/// The offset in `[low, high]` whose following `CHUNK_PROBE_SAMPLES` window has
+/// the least energy. Returns `high` when the range is too short to probe.
+fn quietest_boundary(samples: &[f32], low: usize, high: usize) -> usize {
+    if high <= low + CHUNK_PROBE_SAMPLES {
+        return high;
+    }
+    let mut best_at = high;
+    let mut best_energy = f32::INFINITY;
+    let mut at = low;
+    while at + CHUNK_PROBE_SAMPLES <= high {
+        let energy: f32 = samples[at..at + CHUNK_PROBE_SAMPLES]
+            .iter()
+            .map(|sample| sample * sample)
+            .sum();
+        if energy < best_energy {
+            best_energy = energy;
+            best_at = at;
+        }
+        at += CHUNK_PROBE_SAMPLES;
+    }
+    best_at
+}
+
 pub struct InferenceEngine {
     session: Option<LoadedSession>,
     model_path: PathBuf,
@@ -534,6 +602,14 @@ impl InferenceEngine {
         self.session = None;
     }
 
+    /// Transcribe one buffer of 16 kHz mono audio, splitting it into bounded
+    /// chunks first when it is longer than `transcription.chunk_seconds`. This
+    /// is the one decode path shared by live dictation (`coordinator`) and the
+    /// file command (`crate::transcribe`): both hand their audio to this
+    /// method, which owns every `Session::run` call. Each chunk is decoded by
+    /// the same loaded session and the non-empty transcripts are joined with a
+    /// single space, so a long recording never sends one unbounded buffer
+    /// through the decoder.
     pub fn transcribe(
         &mut self,
         audio: &[f32],
@@ -544,11 +620,29 @@ impl InferenceEngine {
             loaded.warned_unsupported = loaded.decode_support.warn_unsupported(config);
         }
         let options = run_options(config, loaded.decode_support);
-        let transcript = loaded
-            .session
-            .run(audio, &options)
-            .context("transcription failed")?;
-        Ok(transcript.text)
+        let session = &mut loaded.session;
+        match chunk_window_samples(config) {
+            Some(window) if audio.len() > window => {
+                let mut parts: Vec<String> = Vec::new();
+                for range in split_chunks(audio, window) {
+                    let text = session
+                        .run(&audio[range], &options)
+                        .context("transcription failed")?
+                        .text;
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        parts.push(text.to_string());
+                    }
+                }
+                Ok(parts.join(" "))
+            }
+            _ => {
+                let transcript = session
+                    .run(audio, &options)
+                    .context("transcription failed")?;
+                Ok(transcript.text)
+            }
+        }
     }
 
     /// The GGUF file backing the loaded engine - always the exact path passed
@@ -859,5 +953,72 @@ mod tests {
                 assert_eq!(info.device, "not loaded");
             }
         }
+    }
+
+    fn config_with_chunk_seconds(seconds: u64) -> crate::config::TranscriptionConfig {
+        crate::config::TranscriptionConfig {
+            chunk_seconds: seconds,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chunk_window_is_the_configured_seconds_and_none_when_disabled() {
+        assert_eq!(
+            chunk_window_samples(&config_with_chunk_seconds(30)),
+            Some(30 * 16_000)
+        );
+        assert_eq!(chunk_window_samples(&config_with_chunk_seconds(0)), None);
+    }
+
+    #[test]
+    fn audio_no_longer_than_the_window_is_one_chunk() {
+        let samples = vec![0.0_f32; 1_000];
+        assert_eq!(
+            split_chunks(&samples, 2_000),
+            std::iter::once(0..1_000).collect::<Vec<_>>()
+        );
+        // A zero window means chunking is disabled: everything stays one range.
+        assert_eq!(
+            split_chunks(&samples, 0),
+            std::iter::once(0..1_000).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn audio_past_the_window_splits_into_bounded_contiguous_chunks() {
+        let window = 4_000;
+        let samples = vec![1.0_f32; window * 5 + 123];
+        let ranges = split_chunks(&samples, window);
+        assert!(ranges.len() > 1, "long audio must be chunked");
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, samples.len());
+        for (previous, range) in ranges.iter().zip(ranges.iter().skip(1)) {
+            assert_eq!(previous.end, range.start, "chunks must be contiguous");
+        }
+        for range in &ranges {
+            assert!(
+                range.end - range.start <= window,
+                "chunk {:?} exceeds the window",
+                range
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_boundary_lands_in_the_quiet_gap_before_the_limit() {
+        let window = 2_000;
+        let mut samples = vec![1.0_f32; 5_000];
+        // A pause straddling the first chunk's limit at sample 2_000.
+        for sample in &mut samples[1_700..2_000] {
+            *sample = 0.0;
+        }
+        let ranges = split_chunks(&samples, window);
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(
+            ranges[0].end, 1_800,
+            "the split should snap back into the quiet gap, not cut at the limit"
+        );
+        assert_eq!(ranges[1].start, 1_800);
     }
 }

@@ -253,6 +253,42 @@ fn finish_resampling(
     Ok(())
 }
 
+/// Resample a single-channel buffer from `source_rate` to `target_rate`,
+/// finalizing the resampler's trailing delay so the result is exactly the
+/// resampled length (rounded up), the same way the live capture path does on
+/// stop. Used by the file-transcription path (`crate::transcribe`), which
+/// reads a whole file at once instead of streaming it.
+pub fn resample_mono(
+    samples: &[f32],
+    source_rate: u32,
+    target_rate: u32,
+) -> anyhow::Result<Vec<f32>> {
+    if source_rate == target_rate || samples.is_empty() {
+        return Ok(samples.to_vec());
+    }
+    let mut resampler =
+        FftFixedIn::<f32>::new(source_rate as usize, target_rate as usize, 1024, 1, 1)?;
+    let chunk = resampler.input_frames_next();
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index + chunk <= samples.len() {
+        let input = vec![samples[index..index + chunk].to_vec()];
+        let processed = resampler.process(&input, None)?;
+        output.extend_from_slice(&processed[0]);
+        index += chunk;
+    }
+    let mut pending = samples[index..].to_vec();
+    finish_resampling(
+        &mut resampler,
+        &mut pending,
+        &mut output,
+        samples.len(),
+        source_rate,
+        target_rate,
+    )?;
+    Ok(output)
+}
+
 struct CaptureState {
     channels: usize,
     buffer: Arc<Mutex<Vec<f32>>>,
@@ -317,7 +353,7 @@ impl CaptureState {
     }
 }
 
-fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
+pub(crate) fn downmix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
         return samples.to_vec();
     }
@@ -590,6 +626,20 @@ mod tests {
         let oversampled = input_config_rank(cpal::SampleFormat::I16, 48_000, 48_000, 16_000);
 
         assert!(oversampled > undersampled);
+    }
+
+    #[test]
+    fn resamples_a_whole_buffer_to_the_target_rate() {
+        let input: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.05).sin()).collect();
+        let output = resample_mono(&input, 48_000, 16_000).unwrap();
+        assert_eq!(output.len(), 1_600);
+        assert!(output.iter().any(|sample| sample.abs() > f32::EPSILON));
+    }
+
+    #[test]
+    fn a_matching_rate_is_returned_untouched() {
+        let input = vec![0.25_f32; 320];
+        assert_eq!(resample_mono(&input, 16_000, 16_000).unwrap(), input);
     }
 
     // cpal 0.15.3's ALSA backend can panic its background worker thread on some

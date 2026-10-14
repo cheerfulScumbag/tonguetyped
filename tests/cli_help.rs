@@ -16,6 +16,10 @@ const ALL_COMMANDS_WITH_DESCRIPTIONS: &[(&str, &str)] = &[
     ("status", "Get daemon status"),
     ("reload", "Reload daemon configuration"),
     ("last-result", "Return the most recent transcription"),
+    (
+        "transcribe",
+        "Transcribe an audio file (WAV) and print the transcript",
+    ),
     ("doctor", "Run system diagnostics"),
     (
         "shortcut-test",

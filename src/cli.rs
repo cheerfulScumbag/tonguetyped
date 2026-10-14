@@ -5,6 +5,7 @@
 //! for the dashboard's first page.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +57,11 @@ pub enum Commands {
     Reload,
     /// Return the most recent transcription
     LastResult,
+    /// Transcribe an audio file (WAV) and print the transcript
+    Transcribe {
+        /// Path to the audio file
+        file: PathBuf,
+    },
     /// Run system diagnostics
     Doctor {
         /// Send a test line through the configured output method

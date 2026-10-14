@@ -282,6 +282,15 @@ pub struct TranscriptionConfig {
     pub trailing_space: bool,
     #[serde(default = "default_max_recording_seconds")]
     pub max_recording_seconds: u64,
+    /// Longest audio window handed to the decoder in one `run` call, in
+    /// seconds. A recording (or file) longer than this is decoded in
+    /// back-to-back chunks that each fit the window, so one decode never
+    /// holds an unbounded buffer in memory or blocks for minutes on end.
+    /// Chunk boundaries fall at the quietest point near each limit, so a
+    /// split lands in a pause rather than through a word. `0` disables
+    /// chunking and always sends the whole buffer in one call.
+    #[serde(default = "default_chunk_seconds")]
+    pub chunk_seconds: u64,
     /// Text the Whisper decoder reads as if it came just before the
     /// recording, which biases it toward the names, jargon and product terms
     /// it contains. Whisper also copies the prompt's style, so a punctuated
@@ -315,6 +324,7 @@ impl Default for TranscriptionConfig {
             language: default_language(),
             trailing_space: true,
             max_recording_seconds: default_max_recording_seconds(),
+            chunk_seconds: default_chunk_seconds(),
             initial_prompt: String::new(),
             translate: false,
             temperature: None,
@@ -740,7 +750,11 @@ fn default_language() -> String {
 }
 
 fn default_max_recording_seconds() -> u64 {
-    120
+    600
+}
+
+fn default_chunk_seconds() -> u64 {
+    30
 }
 
 fn default_max_entries() -> u64 {
@@ -1071,7 +1085,8 @@ mod tests {
         let config = Config::default();
         config.validate().unwrap();
         assert!(!config.audio.feedback_sounds);
-        assert_eq!(config.transcription.max_recording_seconds, 120);
+        assert_eq!(config.transcription.max_recording_seconds, 600);
+        assert_eq!(config.transcription.chunk_seconds, 30);
         assert_eq!(config.model.active_model, crate::catalog::DEFAULT_MODEL_ID);
         assert_eq!(config.model.preferred_backend, "auto");
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
@@ -1098,6 +1113,20 @@ mod tests {
             unlimited.history.retention_summary(),
             "unlimited entries, unlimited age"
         );
+    }
+
+    #[test]
+    fn chunk_seconds_round_trips_and_can_be_disabled() {
+        let config: Config = toml::from_str("[transcription]\nchunk_seconds = 45\n").unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.transcription.chunk_seconds, 45);
+        let saved: Config = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!(saved.transcription.chunk_seconds, 45);
+
+        // 0 is the documented "no chunking" value and stays valid.
+        let disabled: Config = toml::from_str("[transcription]\nchunk_seconds = 0\n").unwrap();
+        disabled.validate().unwrap();
+        assert_eq!(disabled.transcription.chunk_seconds, 0);
     }
 
     #[test]
