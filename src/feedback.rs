@@ -20,6 +20,11 @@ pub enum FeedbackEvent {
     /// Typing or pasting failed, so the transcript was left on the clipboard
     /// instead. Distinct from `Copied` so the user learns typing is broken.
     ClipboardFallback,
+    /// The transcript was inserted, but the trailing Enter (`auto_submit`)
+    /// failed, so it may not have been submitted. Distinct from
+    /// `ClipboardFallback`: the text is already in the focused application, so
+    /// nothing was copied and the user must not paste it again.
+    SubmitFailed,
     Cancelled,
     Error,
 }
@@ -212,6 +217,12 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
             "Typing failed, copied to clipboard",
             "normal",
         ),
+        FeedbackEvent::SubmitFailed => (
+            "dialog-warning-symbolic",
+            "alarm-clock",
+            "Text entered, but Enter failed",
+            "normal",
+        ),
         FeedbackEvent::Cancelled => (
             "process-stop-symbolic",
             "dialog-warning",
@@ -249,6 +260,7 @@ mod tests {
             FeedbackEvent::NoSpeech,
             FeedbackEvent::Copied,
             FeedbackEvent::ClipboardFallback,
+            FeedbackEvent::SubmitFailed,
             FeedbackEvent::Cancelled,
             FeedbackEvent::Error,
         ];

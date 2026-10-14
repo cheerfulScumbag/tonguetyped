@@ -141,6 +141,8 @@ const NO_SPEECH_DWELL: Duration = Duration::from_millis(1400);
 const COPIED_DWELL: Duration = Duration::from_millis(1200);
 // As long as an error: typing is broken and the user has to paste by hand.
 const CLIPBOARD_FALLBACK_DWELL: Duration = Duration::from_millis(1800);
+// Longer than `Success`: the text is in, but Enter was not pressed.
+const SUBMIT_FAILED_DWELL: Duration = Duration::from_millis(1800);
 const CANCELLED_DWELL: Duration = Duration::from_millis(900);
 const ERROR_DWELL: Duration = Duration::from_millis(1800);
 
@@ -153,6 +155,9 @@ const NO_SPEECH_COLOR: (u8, u8, u8) = (0xE8, 0x9A, 0x2B);
 const COPIED_COLOR: (u8, u8, u8) = (0x0C, 0x96, 0x88);
 // Deep orange: a warning stronger than `NoSpeech`'s amber, short of an error.
 const CLIPBOARD_FALLBACK_COLOR: (u8, u8, u8) = (0xE8, 0x70, 0x1E);
+// Violet: the text landed (like `Success`) but the submit did not, so it is
+// neither a plain success nor an error.
+const SUBMIT_FAILED_COLOR: (u8, u8, u8) = (0x7E, 0x57, 0xC2);
 const CANCELLED_COLOR: (u8, u8, u8) = (0x86, 0x8E, 0x96);
 const ERROR_COLOR: (u8, u8, u8) = (0xC9, 0x2A, 0x2A);
 const GLYPH_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
@@ -362,6 +367,7 @@ enum Phase {
     NoSpeech,
     Copied,
     ClipboardFallback,
+    SubmitFailed,
     Cancelled,
     Error,
 }
@@ -375,6 +381,7 @@ impl Phase {
             FeedbackEvent::NoSpeech => Phase::NoSpeech,
             FeedbackEvent::Copied => Phase::Copied,
             FeedbackEvent::ClipboardFallback => Phase::ClipboardFallback,
+            FeedbackEvent::SubmitFailed => Phase::SubmitFailed,
             FeedbackEvent::Cancelled => Phase::Cancelled,
             FeedbackEvent::Error => Phase::Error,
         }
@@ -387,6 +394,7 @@ impl Phase {
             Phase::NoSpeech => Some(NO_SPEECH_DWELL),
             Phase::Copied => Some(COPIED_DWELL),
             Phase::ClipboardFallback => Some(CLIPBOARD_FALLBACK_DWELL),
+            Phase::SubmitFailed => Some(SUBMIT_FAILED_DWELL),
             Phase::Cancelled => Some(CANCELLED_DWELL),
             Phase::Error => Some(ERROR_DWELL),
         }
@@ -1555,6 +1563,7 @@ fn phase_color(phase: Phase) -> (u8, u8, u8) {
         Phase::NoSpeech => NO_SPEECH_COLOR,
         Phase::Copied => COPIED_COLOR,
         Phase::ClipboardFallback => CLIPBOARD_FALLBACK_COLOR,
+        Phase::SubmitFailed => SUBMIT_FAILED_COLOR,
         Phase::Cancelled => CANCELLED_COLOR,
         Phase::Error => ERROR_COLOR,
     }
@@ -1650,7 +1659,7 @@ fn paint_badge(
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             glyph_checkmark(
                 canvas,
@@ -1761,7 +1770,7 @@ fn paint_minimal(
                 color,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(
                 canvas,
                 cx,
@@ -1858,7 +1867,7 @@ fn paint_pill(
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(
                 canvas,
                 cx,
@@ -1952,7 +1961,7 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(
                 canvas,
                 button_cx,
@@ -2169,7 +2178,7 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
                 GLYPH_COLOR,
             );
         }
-        Phase::Success => {
+        Phase::Success | Phase::SubmitFailed => {
             glyph_checkmark(canvas, cx, cy, radius * 0.42, radius * 0.16, GLYPH_COLOR);
         }
         Phase::NoSpeech => {
@@ -2389,6 +2398,7 @@ pub fn render_frame_pixels(
         "no-speech" => Phase::NoSpeech,
         "copied" => Phase::Copied,
         "clipboard-fallback" => Phase::ClipboardFallback,
+        "submit-failed" => Phase::SubmitFailed,
         "cancelled" => Phase::Cancelled,
         "error" => Phase::Error,
         _ => Phase::Recording,
@@ -2774,6 +2784,21 @@ mod tests {
     }
 
     #[test]
+    fn submit_failure_maps_to_its_own_dwelling_static_phase() {
+        assert_eq!(
+            Phase::from_event(FeedbackEvent::SubmitFailed),
+            Phase::SubmitFailed
+        );
+        assert_eq!(Phase::SubmitFailed.dwell(), Some(SUBMIT_FAILED_DWELL));
+        assert!(!Phase::SubmitFailed.is_animated());
+        assert_ne!(
+            phase_color(Phase::SubmitFailed),
+            phase_color(Phase::Success),
+            "a failed submit must not paint as a plain success"
+        );
+    }
+
+    #[test]
     fn every_phase_paints_distinguishable_pixels_in_every_style() {
         for style in ALL_STYLES {
             let mut seen = Vec::new();
@@ -2784,6 +2809,7 @@ mod tests {
                 Phase::NoSpeech,
                 Phase::Copied,
                 Phase::ClipboardFallback,
+                Phase::SubmitFailed,
                 Phase::Cancelled,
                 Phase::Error,
             ] {
@@ -2912,6 +2938,7 @@ mod tests {
             Phase::NoSpeech,
             Phase::Copied,
             Phase::ClipboardFallback,
+            Phase::SubmitFailed,
             Phase::Cancelled,
             Phase::Error,
         ] {

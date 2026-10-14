@@ -209,6 +209,12 @@ pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<String> {
         Delivery::CopiedAfterFailure(error) => {
             format!("Typing failed ({error}); copied the test text to the clipboard instead.")
         }
+        Delivery::SubmitFailed(error) if config.output.method == OutputMethod::Paste => {
+            format!("Pasted the test text, but pressing Enter failed ({error}).")
+        }
+        Delivery::SubmitFailed(error) => {
+            format!("Typed the test text, but pressing Enter failed ({error}).")
+        }
     })
 }
 

@@ -97,18 +97,21 @@ fn completion_feedback_event(outcome: &str) -> FeedbackEvent {
         "empty" => FeedbackEvent::NoSpeech,
         "copied" => FeedbackEvent::Copied,
         "clipboard_fallback" => FeedbackEvent::ClipboardFallback,
+        "submit_failed" => FeedbackEvent::SubmitFailed,
         _ => FeedbackEvent::Success,
     }
 }
 
 /// The completion outcome a delivery reports when nothing else went wrong.
-/// A fallback is still a success: the transcript reached the clipboard.
+/// A fallback is still a success: the transcript reached the clipboard. A
+/// failed submit is not: the text was inserted but the Enter was not.
 fn delivery_outcome(delivery: &crate::output::Delivery) -> &'static str {
     use crate::output::Delivery;
     match delivery {
         Delivery::Kept | Delivery::Inserted => "success",
         Delivery::Copied => "copied",
         Delivery::CopiedAfterFailure(_) => "clipboard_fallback",
+        Delivery::SubmitFailed(_) => "submit_failed",
     }
 }
 
@@ -1171,10 +1174,14 @@ impl Coordinator {
                 .finish_phase(Phase::Output, output_started);
             let (output_error, delivered) = match delivery {
                 Ok(delivery) => {
-                    if let crate::output::Delivery::CopiedAfterFailure(error) = &delivery {
-                        tracing::warn!(
+                    match &delivery {
+                        crate::output::Delivery::CopiedAfterFailure(error) => tracing::warn!(
                             "typing failed, transcript copied to the clipboard instead: {error}"
-                        );
+                        ),
+                        crate::output::Delivery::SubmitFailed(error) => tracing::warn!(
+                            "transcript inserted, but the trailing Enter failed: {error}"
+                        ),
+                        _ => {}
                     }
                     (None, delivery_outcome(&delivery))
                 }

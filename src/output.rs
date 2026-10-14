@@ -23,6 +23,10 @@ pub enum Delivery {
     /// Typing or pasting failed with this error, and the transcript was left
     /// on the clipboard instead so it is not lost.
     CopiedAfterFailure(String),
+    /// The transcript was inserted, but the trailing Enter (`auto_submit`)
+    /// failed with this error. The text is already in the focused application,
+    /// so it is never copied to the clipboard.
+    SubmitFailed(String),
 }
 
 pub fn output_text(text: &str, config: &OutputConfig) -> anyhow::Result<Delivery> {
@@ -36,10 +40,14 @@ pub fn output_text(text: &str, config: &OutputConfig) -> anyhow::Result<Delivery
 }
 
 /// The three desktop actions output needs, split out so the mode and
-/// fallback decisions in `deliver` are testable without a session.
+/// fallback decisions in `deliver` are testable without a session. Insertion
+/// and submission are separate steps: a failed `press_enter` means the text
+/// already reached the application, so it must not trigger the clipboard
+/// fallback the way a failed `type_text` or `press_paste` does.
 trait Desktop {
-    fn type_text(&self, text: &str, auto_submit: bool) -> anyhow::Result<()>;
-    fn press_paste(&self, keys: PasteKeys, auto_submit: bool) -> anyhow::Result<()>;
+    fn type_text(&self, text: &str) -> anyhow::Result<()>;
+    fn press_paste(&self, keys: PasteKeys) -> anyhow::Result<()>;
+    fn press_enter(&self) -> anyhow::Result<()>;
     fn copy(&self, text: &str) -> anyhow::Result<()>;
 }
 
@@ -52,8 +60,13 @@ fn deliver(text: &str, config: &OutputConfig, desktop: &impl Desktop) -> anyhow:
             );
             Ok(Delivery::Kept)
         }
-        OutputMethod::Type => match desktop.type_text(text, config.auto_submit) {
-            Ok(()) => Ok(Delivery::Inserted),
+        OutputMethod::Type => match desktop.type_text(text) {
+            Ok(()) => {
+                if let Some(failure) = press_enter_if_requested(config.auto_submit, desktop) {
+                    return Ok(failure);
+                }
+                Ok(Delivery::Inserted)
+            }
             Err(typing) => match desktop.copy(text) {
                 Ok(()) => Ok(Delivery::CopiedAfterFailure(format!("{typing:#}"))),
                 Err(copy) => {
@@ -69,11 +82,34 @@ fn deliver(text: &str, config: &OutputConfig, desktop: &impl Desktop) -> anyhow:
         // transcript on the clipboard with nothing more to do.
         OutputMethod::Paste => {
             desktop.copy(text)?;
-            match desktop.press_paste(config.paste_keys, config.auto_submit) {
-                Ok(()) => Ok(Delivery::Inserted),
+            match desktop.press_paste(config.paste_keys) {
+                Ok(()) => {
+                    if config.auto_submit {
+                        // Applications read the clipboard asynchronously after
+                        // the paste keys, so an Enter sent straight away can
+                        // submit before the text arrives.
+                        std::thread::sleep(PASTE_SETTLE);
+                    }
+                    if let Some(failure) = press_enter_if_requested(config.auto_submit, desktop) {
+                        return Ok(failure);
+                    }
+                    Ok(Delivery::Inserted)
+                }
                 Err(paste) => Ok(Delivery::CopiedAfterFailure(format!("{paste:#}"))),
             }
         }
+    }
+}
+
+/// Presses Enter for `auto_submit`, reporting a failure as `SubmitFailed`: the
+/// text is already inserted, so it is never copied to the clipboard.
+fn press_enter_if_requested(auto_submit: bool, desktop: &impl Desktop) -> Option<Delivery> {
+    if !auto_submit {
+        return None;
+    }
+    match desktop.press_enter() {
+        Ok(()) => None,
+        Err(enter) => Some(Delivery::SubmitFailed(format!("{enter:#}"))),
     }
 }
 
@@ -96,12 +132,16 @@ impl SystemDesktop<'_> {
 }
 
 impl Desktop for SystemDesktop<'_> {
-    fn type_text(&self, text: &str, auto_submit: bool) -> anyhow::Result<()> {
-        type_text(text, &self.resolved_backend()?, auto_submit)
+    fn type_text(&self, text: &str) -> anyhow::Result<()> {
+        type_text(text, &self.resolved_backend()?)
     }
 
-    fn press_paste(&self, keys: PasteKeys, auto_submit: bool) -> anyhow::Result<()> {
-        press_paste(keys, &self.resolved_backend()?, auto_submit)
+    fn press_paste(&self, keys: PasteKeys) -> anyhow::Result<()> {
+        press_paste(keys, &self.resolved_backend()?)
+    }
+
+    fn press_enter(&self) -> anyhow::Result<()> {
+        press_enter(&self.resolved_backend()?)
     }
 
     fn copy(&self, text: &str) -> anyhow::Result<()> {
@@ -109,7 +149,7 @@ impl Desktop for SystemDesktop<'_> {
     }
 }
 
-fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()> {
+fn type_text(text: &str, backend: &str) -> anyhow::Result<()> {
     match backend {
         "wtype" => {
             let mut child = Command::new("wtype")
@@ -122,20 +162,11 @@ fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()>
                 stdin.write_all(text.as_bytes())?;
             }
             require_success("wtype", child.wait()?)?;
-            if auto_submit {
-                require_success(
-                    "wtype",
-                    Command::new("wtype").args(["-k", "Return"]).status()?,
-                )?;
-            }
         }
         "enigo" => {
             use enigo::{Enigo, Keyboard, Settings};
             let mut enigo = Enigo::new(&Settings::default())?;
             enigo.text(text)?;
-            if auto_submit {
-                enigo.key(enigo::Key::Return, enigo::Direction::Click)?;
-            }
         }
         "dotool" => {
             let mut child = Command::new("dotool")
@@ -143,7 +174,7 @@ fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()>
                 .spawn()
                 .context("failed to spawn dotool")?;
             if let Some(mut stdin) = child.stdin.take() {
-                write_dotool_commands(&mut stdin, text, auto_submit)?;
+                write_dotool_commands(&mut stdin, text)?;
             }
             require_success("dotool", child.wait()?)?;
         }
@@ -155,13 +186,49 @@ fn type_text(text: &str, backend: &str, auto_submit: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Presses `keys` through the typing helper, then Enter after
-/// `PASTE_SETTLE` when `auto_submit` is set.
-fn press_paste(keys: PasteKeys, backend: &str, auto_submit: bool) -> anyhow::Result<()> {
+/// Presses Enter to submit through the typing helper.
+fn press_enter(backend: &str) -> anyhow::Result<()> {
+    match backend {
+        "wtype" => {
+            require_success(
+                "wtype",
+                Command::new("wtype")
+                    .args(["-k", "Return"])
+                    .status()
+                    .context("failed to spawn wtype")?,
+            )?;
+        }
+        "enigo" => {
+            use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+            let mut enigo = Enigo::new(&Settings::default())?;
+            enigo.key(Key::Return, Direction::Click)?;
+        }
+        "dotool" => {
+            use std::io::Write;
+            let mut child = Command::new("dotool")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to spawn dotool")?;
+            if let Some(mut stdin) = child.stdin.take() {
+                writeln!(stdin, "key enter")?;
+            }
+            require_success("dotool", child.wait()?)?;
+        }
+        _ => {
+            anyhow::bail!("unsupported typing backend: {}", backend);
+        }
+    }
+
+    Ok(())
+}
+
+/// Presses `keys` through the typing helper. Enter is a separate step
+/// (`press_enter`), so a delivered paste is distinguishable from a failed one.
+fn press_paste(keys: PasteKeys, backend: &str) -> anyhow::Result<()> {
     match backend {
         "wtype" => {
             let status = Command::new("wtype")
-                .args(wtype_paste_args(keys, auto_submit))
+                .args(wtype_paste_args(keys))
                 .status()
                 .context("failed to spawn wtype")?;
             require_success("wtype", status)?;
@@ -177,10 +244,6 @@ fn press_paste(keys: PasteKeys, backend: &str, auto_submit: bool) -> anyhow::Res
             let pressed = enigo.key(key, Direction::Click);
             enigo.key(modifier, Direction::Release)?;
             pressed?;
-            if auto_submit {
-                std::thread::sleep(PASTE_SETTLE);
-                enigo.key(Key::Return, Direction::Click)?;
-            }
         }
         "dotool" => {
             use std::io::Write;
@@ -189,14 +252,8 @@ fn press_paste(keys: PasteKeys, backend: &str, auto_submit: bool) -> anyhow::Res
                 .spawn()
                 .context("failed to spawn dotool")?;
             if let Some(mut stdin) = child.stdin.take() {
-                // dotool runs each line as it arrives, so the pause between
-                // the two writes reaches the keyboard as a real pause.
                 writeln!(stdin, "key {}", dotool_paste_keys(keys))?;
                 stdin.flush()?;
-                if auto_submit {
-                    std::thread::sleep(PASTE_SETTLE);
-                    writeln!(stdin, "key enter")?;
-                }
             }
             require_success("dotool", child.wait()?)?;
         }
@@ -207,24 +264,15 @@ fn press_paste(keys: PasteKeys, backend: &str, auto_submit: bool) -> anyhow::Res
     Ok(())
 }
 
-fn wtype_paste_args(keys: PasteKeys, auto_submit: bool) -> Vec<String> {
+fn wtype_paste_args(keys: PasteKeys) -> Vec<String> {
     let (modifier, key) = match keys {
         PasteKeys::CtrlV => ("ctrl", "v"),
         PasteKeys::ShiftInsert => ("shift", "Insert"),
     };
-    let mut args: Vec<String> = ["-M", modifier, "-k", key, "-m", modifier]
+    ["-M", modifier, "-k", key, "-m", modifier]
         .into_iter()
         .map(str::to_string)
-        .collect();
-    if auto_submit {
-        args.extend([
-            "-s".to_string(),
-            PASTE_SETTLE.as_millis().to_string(),
-            "-k".to_string(),
-            "Return".to_string(),
-        ]);
-    }
-    args
+        .collect()
 }
 
 fn dotool_paste_keys(keys: PasteKeys) -> &'static str {
@@ -517,19 +565,12 @@ fn device_is_writable(path: &std::path::Path) -> bool {
     std::fs::OpenOptions::new().write(true).open(path).is_ok()
 }
 
-fn write_dotool_commands(
-    writer: &mut impl std::io::Write,
-    text: &str,
-    auto_submit: bool,
-) -> std::io::Result<()> {
+fn write_dotool_commands(writer: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
     for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
             writeln!(writer, "key enter")?;
         }
         writeln!(writer, "type {line}")?;
-    }
-    if auto_submit {
-        writeln!(writer, "key enter")?;
     }
     Ok(())
 }
@@ -569,27 +610,32 @@ mod tests {
     struct FakeDesktop {
         fail_typing: bool,
         fail_paste: bool,
+        fail_enter: bool,
         fail_copy: bool,
         actions: std::cell::RefCell<Vec<String>>,
     }
 
     impl Desktop for FakeDesktop {
-        fn type_text(&self, text: &str, auto_submit: bool) -> anyhow::Result<()> {
-            self.actions
-                .borrow_mut()
-                .push(format!("type {text:?} submit={auto_submit}"));
+        fn type_text(&self, text: &str) -> anyhow::Result<()> {
+            self.actions.borrow_mut().push(format!("type {text:?}"));
             if self.fail_typing {
                 anyhow::bail!("dotool failed with exit status: 1");
             }
             Ok(())
         }
 
-        fn press_paste(&self, keys: PasteKeys, auto_submit: bool) -> anyhow::Result<()> {
-            self.actions
-                .borrow_mut()
-                .push(format!("paste {keys} submit={auto_submit}"));
+        fn press_paste(&self, keys: PasteKeys) -> anyhow::Result<()> {
+            self.actions.borrow_mut().push(format!("paste {keys}"));
             if self.fail_paste {
                 anyhow::bail!("no typing helper is available");
+            }
+            Ok(())
+        }
+
+        fn press_enter(&self) -> anyhow::Result<()> {
+            self.actions.borrow_mut().push("enter".to_string());
+            if self.fail_enter {
+                anyhow::bail!("wtype failed with exit status: 1");
             }
             Ok(())
         }
@@ -614,11 +660,7 @@ mod tests {
     fn each_method_performs_only_its_own_actions() {
         let cases = [
             (OutputMethod::None, Delivery::Kept, vec![]),
-            (
-                OutputMethod::Type,
-                Delivery::Inserted,
-                vec!["type \"hi\" submit=false"],
-            ),
+            (OutputMethod::Type, Delivery::Inserted, vec!["type \"hi\""]),
             (
                 OutputMethod::Clipboard,
                 Delivery::Copied,
@@ -627,7 +669,7 @@ mod tests {
             (
                 OutputMethod::Paste,
                 Delivery::Inserted,
-                vec!["copy \"hi\"", "paste Ctrl+V submit=false"],
+                vec!["copy \"hi\"", "paste Ctrl+V"],
             ),
         ];
         for (method, delivery, actions) in cases {
@@ -656,7 +698,7 @@ mod tests {
         );
         assert_eq!(
             *desktop.actions.borrow(),
-            vec!["copy \"hi\"", "paste Shift+Insert submit=true"]
+            vec!["copy \"hi\"", "paste Shift+Insert", "enter"]
         );
     }
 
@@ -678,8 +720,54 @@ mod tests {
         );
         assert_eq!(
             *desktop.actions.borrow(),
-            vec!["type \"hi\" submit=true", "copy \"hi\""],
+            vec!["type \"hi\"", "copy \"hi\""],
             "the fallback copies the same text and presses nothing"
+        );
+    }
+
+    #[test]
+    fn a_failed_enter_after_typing_never_touches_the_clipboard() {
+        let desktop = FakeDesktop {
+            fail_enter: true,
+            ..FakeDesktop::default()
+        };
+        let config = OutputConfig {
+            method: OutputMethod::Type,
+            auto_submit: true,
+            ..OutputConfig::default()
+        };
+        let delivery = deliver("hi", &config, &desktop).unwrap();
+        assert_eq!(
+            delivery,
+            Delivery::SubmitFailed("wtype failed with exit status: 1".to_string())
+        );
+        assert_eq!(
+            *desktop.actions.borrow(),
+            vec!["type \"hi\"", "enter"],
+            "the text is already typed, so the clipboard is left untouched"
+        );
+    }
+
+    #[test]
+    fn a_failed_enter_after_pasting_is_not_a_paste_failure() {
+        let desktop = FakeDesktop {
+            fail_enter: true,
+            ..FakeDesktop::default()
+        };
+        let config = OutputConfig {
+            method: OutputMethod::Paste,
+            auto_submit: true,
+            ..OutputConfig::default()
+        };
+        let delivery = deliver("hi", &config, &desktop).unwrap();
+        assert_eq!(
+            delivery,
+            Delivery::SubmitFailed("wtype failed with exit status: 1".to_string())
+        );
+        assert_eq!(
+            *desktop.actions.borrow(),
+            vec!["copy \"hi\"", "paste Ctrl+V", "enter"],
+            "the paste was delivered, so only the submit failed"
         );
     }
 
@@ -693,7 +781,7 @@ mod tests {
         assert!(matches!(delivery, Delivery::CopiedAfterFailure(_)));
         assert_eq!(
             *desktop.actions.borrow(),
-            vec!["copy \"hi\"", "paste Ctrl+V submit=false"],
+            vec!["copy \"hi\"", "paste Ctrl+V"],
             "the text is on the clipboard already, so nothing is copied twice"
         );
     }
@@ -779,12 +867,12 @@ mod tests {
     #[test]
     fn paste_keys_reach_each_helper_in_its_own_syntax() {
         assert_eq!(
-            wtype_paste_args(PasteKeys::CtrlV, false),
+            wtype_paste_args(PasteKeys::CtrlV),
             ["-M", "ctrl", "-k", "v", "-m", "ctrl"]
         );
         assert_eq!(
-            wtype_paste_args(PasteKeys::ShiftInsert, true),
-            ["-M", "shift", "-k", "Insert", "-m", "shift", "-s", "200", "-k", "Return"]
+            wtype_paste_args(PasteKeys::ShiftInsert),
+            ["-M", "shift", "-k", "Insert", "-m", "shift"]
         );
         assert_eq!(dotool_paste_keys(PasteKeys::CtrlV), "ctrl+v");
         assert_eq!(dotool_paste_keys(PasteKeys::ShiftInsert), "shift+insert");
@@ -934,10 +1022,10 @@ mod tests {
     #[test]
     fn dotool_encodes_newlines_as_keys() {
         let mut commands = Vec::new();
-        write_dotool_commands(&mut commands, "notes\nkey ctrl+a", true).unwrap();
+        write_dotool_commands(&mut commands, "notes\nkey ctrl+a").unwrap();
         assert_eq!(
             String::from_utf8(commands).unwrap(),
-            "type notes\nkey enter\ntype key ctrl+a\nkey enter\n"
+            "type notes\nkey enter\ntype key ctrl+a\n"
         );
     }
 }

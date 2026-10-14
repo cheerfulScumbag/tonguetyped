@@ -391,7 +391,10 @@ applies to `type` and `paste` only.
 
 If the typing helper fails during `type` or `paste`, the transcript is left on
 the clipboard instead and the overlay shows "Typing failed, copied to
-clipboard", so you can paste it yourself. The clipboard helper is `wl-copy` from
+clipboard", so you can paste it yourself. If the text was inserted but the
+`auto_submit` Enter could not be pressed, it is not copied - it is already in
+the application - and the overlay shows a distinct "Text entered, but Enter
+failed" cue. The clipboard helper is `wl-copy` from
 `wl-clipboard` on Wayland and `xclip` on X11. `tonguetyped doctor --test-type`
 sends a test line through the configured method and says where it went.
 

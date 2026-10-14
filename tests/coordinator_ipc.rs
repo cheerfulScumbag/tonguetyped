@@ -456,6 +456,7 @@ async fn latency_records_terminal_outcomes_once() {
         ("output_error", Some("output_error")),
         ("copied", Some("copied")),
         ("clipboard_fallback", Some("clipboard_fallback")),
+        ("submit_failed", Some("submit_failed")),
     ] {
         let runtime = Arc::new(TestRuntime::default());
         match configure {
@@ -468,6 +469,11 @@ async fn latency_records_terminal_outcomes_once() {
             Some("clipboard_fallback") => {
                 *runtime.delivery.lock().unwrap() = Some(Delivery::CopiedAfterFailure(
                     "dotool failed with exit status: 1".to_string(),
+                ))
+            }
+            Some("submit_failed") => {
+                *runtime.delivery.lock().unwrap() = Some(Delivery::SubmitFailed(
+                    "wtype failed with exit status: 1".to_string(),
                 ))
             }
             _ => {}
@@ -754,6 +760,36 @@ async fn clipboard_mode_reports_a_copied_cue() {
         feedback.events.lock().unwrap().last(),
         Some(&FeedbackEvent::Copied)
     );
+}
+
+#[tokio::test]
+async fn a_failed_submit_reports_its_own_cue_not_the_clipboard_fallback() {
+    let runtime = Arc::new(TestRuntime::default());
+    *runtime.delivery.lock().unwrap() = Some(Delivery::SubmitFailed(
+        "wtype failed with exit status: 1".to_string(),
+    ));
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime.clone(), feedback.clone());
+
+    stop_and_wait(&coordinator).await;
+
+    // The text was inserted, so the cue must not tell the user to paste it
+    // again the way the clipboard fallback does.
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![
+            FeedbackEvent::Recording,
+            FeedbackEvent::Processing,
+            FeedbackEvent::SubmitFailed,
+        ]
+    );
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            operation_error: None,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]

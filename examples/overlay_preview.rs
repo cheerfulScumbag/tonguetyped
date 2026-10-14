@@ -89,6 +89,7 @@ fn main() {
             "no-speech" => FeedbackEvent::NoSpeech,
             "copied" => FeedbackEvent::Copied,
             "clipboard-fallback" => FeedbackEvent::ClipboardFallback,
+            "submit-failed" => FeedbackEvent::SubmitFailed,
             "cancelled" => FeedbackEvent::Cancelled,
             "error" => FeedbackEvent::Error,
             other => {

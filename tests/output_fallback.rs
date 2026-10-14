@@ -16,6 +16,27 @@ impl Sandbox {
     /// and a `dotool` stub that saves its commands to `dotool.log`, then
     /// exits with `dotool_status`.
     fn new(name: &str, output: &str, dotool_status: u8) -> Self {
+        Self::build(name, output, |log| {
+            format!(
+                "#!/bin/sh\n{}echo 'dotool: failed to open /dev/uinput' >&2\nexit {dotool_status}\n",
+                record_into(log)
+            )
+        })
+    }
+
+    /// Like `new`, but the `dotool` stub exits non-zero only for the
+    /// invocation carrying the trailing Enter, so a successful type is
+    /// followed by a failed submit.
+    fn new_failing_submit(name: &str, output: &str) -> Self {
+        Self::build(name, output, |log| {
+            format!(
+                "#!/bin/sh\nstatus=0\nwhile IFS= read -r line || [ -n \"$line\" ]; do printf '%s\\n' \"$line\" >> '{}'; case \"$line\" in 'key enter') status=1;; esac; done\necho 'dotool: failed to open /dev/uinput' >&2\nexit $status\n",
+                log.display()
+            )
+        })
+    }
+
+    fn build(name: &str, output: &str, dotool_script: impl FnOnce(&Path) -> String) -> Self {
         let root = std::env::temp_dir().join(format!(
             "tonguetyped-output-{name}-{}-{}",
             std::process::id(),
@@ -29,23 +50,13 @@ impl Sandbox {
         std::fs::write(config.join("config.toml"), format!("[output]\n{output}")).unwrap();
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        // Shell builtins only: PATH holds nothing but these stubs.
-        let record = |file: &Path| {
-            format!(
-                "while IFS= read -r line || [ -n \"$line\" ]; do printf '%s\\n' \"$line\" >> '{}'; done\n",
-                file.display()
-            )
-        };
         write_script(
             &bin.join("wl-copy"),
-            &format!("#!/bin/sh\n{}", record(&root.join("clipboard"))),
+            &format!("#!/bin/sh\n{}", record_into(&root.join("clipboard"))),
         );
         write_script(
             &bin.join("dotool"),
-            &format!(
-                "#!/bin/sh\n{}echo 'dotool: failed to open /dev/uinput' >&2\nexit {dotool_status}\n",
-                record(&root.join("dotool.log"))
-            ),
+            &dotool_script(&root.join("dotool.log")),
         );
         Self { root }
     }
@@ -69,6 +80,14 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// A shell fragment that appends every stdin line to `file`.
+fn record_into(file: &Path) -> String {
+    format!(
+        "while IFS= read -r line || [ -n \"$line\" ]; do printf '%s\\n' \"$line\" >> '{}'; done\n",
+        file.display()
+    )
 }
 
 fn write_script(path: &Path, content: &str) {
@@ -166,5 +185,33 @@ fn failed_paste_keys_still_leave_the_text_on_the_clipboard() {
     assert_eq!(
         sandbox.read("clipboard").as_deref(),
         Some("TongueTyped typing test\n")
+    );
+}
+
+#[test]
+fn a_failed_submit_after_typing_leaves_the_clipboard_untouched() {
+    // The text is already in the focused application when the trailing Enter
+    // fails; copying it again would clobber the user's clipboard and invite a
+    // duplicate paste, so the failure is reported without a fallback.
+    let sandbox = Sandbox::new_failing_submit(
+        "submit-fails",
+        "method = \"type\"\ntyping_backend = \"dotool\"\nauto_submit = true\n",
+    );
+    let output = sandbox.run();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("pressing Enter failed"), "{stdout}");
+    assert_eq!(
+        sandbox.read("clipboard"),
+        None,
+        "the text was typed, so the fallback must not copy"
+    );
+    assert_eq!(
+        sandbox.read("dotool.log").as_deref(),
+        Some("type TongueTyped typing test\nkey enter\n")
     );
 }
