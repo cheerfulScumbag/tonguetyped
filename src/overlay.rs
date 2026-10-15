@@ -919,11 +919,12 @@ pub(crate) const STYLE_LABELS: [&str; 10] = [
 ];
 
 /// Display labels for `OverlayConfig::live_waveform`: the plain pulsing dot
-/// first, the live multi-bar waveform second. Every style's recording
-/// animation reacts to the microphone either way - the waveform styles follow
-/// the live level sample by sample, the simple-pulse styles follow its
-/// envelope - so this only picks the busier glyph, not whether the overlay is
-/// voice-reactive.
+/// first, the live multi-bar waveform second. Every non-caption style's
+/// recording animation reacts to the microphone either way - the waveform
+/// styles follow the live level sample by sample, the simple-pulse styles
+/// follow its envelope - so this only picks the busier glyph, not whether the
+/// overlay is voice-reactive. The live-text caption styles never draw a
+/// waveform and ignore this toggle.
 pub(crate) const WAVEFORM_LABELS: [&str; 2] = ["Simple pulse", "Live microphone waveform"];
 
 fn anchor_for(position: &str) -> Anchor {
@@ -2984,7 +2985,8 @@ pub fn render_frame_pixels(
 /// a pixel buffer, for the design-preview example and the headless layout
 /// tests. `style` names any caption variant (`live-text`, `live-text-minimal`,
 /// `live-text-box`); an unknown name falls back to the glass variant. `levels`
-/// is the live microphone history the waveform fallback reacts to.
+/// is accepted for parity with `render_frame_pixels`, but the caption never
+/// draws a waveform, so it does not affect the frame.
 pub fn render_live_text_pixels(
     style: &str,
     committed: &str,

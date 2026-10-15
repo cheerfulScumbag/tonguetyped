@@ -890,9 +890,10 @@ pub struct OverlayConfig {
     pub monitor: String,
     // Which recording glyph the non-caption overlay styles show: the plain
     // pulsing dot (`false`) or the live multi-bar microphone waveform (`true`,
-    // the default). Every style's recording animation is voice-reactive either
-    // way - this only picks the busier glyph, feeding the real microphone
-    // level through `audio::publish_level` to the overlay actor. Renamed from
+    // the default). Every non-caption style's recording animation is
+    // voice-reactive either way - this only picks the busier glyph, feeding
+    // the real microphone level through `audio::publish_level` to the overlay
+    // actor. Renamed from
     // `streaming_indicator`, which described the old synthetic stand-in for
     // Handy's streaming panel; the serde alias and `migrate_legacy_overlay_config`
     // keep existing config files loading and rewrite the key on save. This
