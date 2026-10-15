@@ -42,10 +42,18 @@ struct Sandbox {
     data_home: std::path::PathBuf,
     runtime_dir: std::path::PathBuf,
     bin: std::path::PathBuf,
+    /// The compositor the spawned binary sees. KDE by default, so a helper-less
+    /// sandbox exercises the "install dotool" warning; a test that needs the
+    /// native libei backend *unavailable* pins a non-KDE/GNOME desktop instead.
+    desktop: &'static str,
 }
 
 impl Sandbox {
     fn new(tag: &str) -> Self {
+        Self::on(tag, "KDE")
+    }
+
+    fn on(tag: &str, desktop: &'static str) -> Self {
         let root = sandbox_root(tag);
         let config_home = root.join("config");
         let data_home = root.join("data");
@@ -67,6 +75,7 @@ impl Sandbox {
             data_home,
             runtime_dir,
             bin,
+            desktop,
         }
     }
 
@@ -83,9 +92,9 @@ impl Sandbox {
         // `install_typing_helper`.
         cmd.env("PATH", &self.bin);
         cmd.env("XDG_SESSION_TYPE", "wayland");
-        cmd.env("XDG_CURRENT_DESKTOP", "KDE");
-        cmd.env("XDG_SESSION_DESKTOP", "KDE");
-        cmd.env("DESKTOP_SESSION", "KDE");
+        cmd.env("XDG_CURRENT_DESKTOP", self.desktop);
+        cmd.env("XDG_SESSION_DESKTOP", self.desktop);
+        cmd.env("DESKTOP_SESSION", self.desktop);
         cmd.env("NO_COLOR", "1");
         cmd.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
     }
@@ -1294,10 +1303,13 @@ fn pty_transcript_output_configures_paste_and_enter() {
 
 #[test]
 fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
-    // The sandbox PATH has no typing helper and the session is pinned to
-    // Wayland + KDE, so this is the exact "no helper installed" state the
-    // warning exists for, and it must name dotool (wtype cannot work on KWin).
-    let sandbox = Sandbox::new("output-no-helper");
+    // The sandbox PATH has no typing helper and the session is pinned to a
+    // Wayland compositor that is neither wlroots, KDE, nor GNOME (weston), so
+    // no backend can type: this is the exact "no helper installed" state the
+    // warning exists for, and it must name dotool (wtype cannot work without
+    // the wlroots virtual-keyboard protocol and the native libei backend is
+    // KDE/GNOME only).
+    let sandbox = Sandbox::on("output-no-helper", "weston");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 

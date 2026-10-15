@@ -14,6 +14,7 @@ pub mod history;
 pub mod inference;
 pub mod ipc;
 pub mod latency;
+pub mod libei;
 pub mod media;
 pub mod model;
 pub mod output;

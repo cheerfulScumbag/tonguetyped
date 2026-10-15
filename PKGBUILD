@@ -31,7 +31,7 @@ conflicts=('tonguetyped')
 # cannot reach (it types through /dev/uinput, so the user must be in the
 # `input` group or have a matching udev rule), and xdotool already covers the
 # built-in enigo backend on X11.
-depends=('alsa-lib' 'openssl' 'xdotool' 'wtype' 'dotool' 'wl-clipboard')
+depends=('alsa-lib' 'openssl' 'libxkbcommon' 'xdotool' 'wtype' 'dotool' 'wl-clipboard')
 optdepends=(
   'wayland: desktop overlay feedback while recording'
   'xclip: clipboard and paste output on X11'

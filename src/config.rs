@@ -1278,7 +1278,7 @@ impl Config {
         }
         if !matches!(
             self.output.typing_backend.as_str(),
-            "auto" | "wtype" | "enigo" | "dotool"
+            "auto" | "wtype" | "enigo" | "dotool" | "libei"
         ) {
             anyhow::bail!("unsupported typing backend: {}", self.output.typing_backend);
         }
@@ -1684,6 +1684,13 @@ mod tests {
         config.validate().unwrap();
         config.model.active_model = "../custom".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_the_native_libei_typing_backend() {
+        let mut config = Config::default();
+        config.output.typing_backend = "libei".to_string();
+        config.validate().unwrap();
     }
 
     #[test]

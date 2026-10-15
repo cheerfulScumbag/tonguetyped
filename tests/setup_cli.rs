@@ -132,14 +132,16 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
     std::fs::create_dir_all(&bin).unwrap();
 
     // Answer 2 at "Transcript output" (type) while the sandbox PATH has no
-    // helper and the compositor is KDE: the setup must refuse it with the
-    // install warning, naming dotool (wtype cannot work on KWin), re-prompt,
-    // then accept 1 (keep in TongueTyped) and finish normally.
+    // helper and the Wayland compositor is neither wlroots, KDE, nor GNOME
+    // (weston): no backend can type, so the setup must refuse it with the
+    // install warning, naming dotool (wtype cannot work without a wlroots
+    // virtual-keyboard protocol and the native libei backend is KDE/GNOME
+    // only), re-prompt, then accept 1 (keep in TongueTyped) and finish.
     let output = run_setup(
         &root,
         &answers(&["", "", "", "2", "1", "", "", "", "", "", "", ""]),
         Some(&bin),
-        "KDE",
+        "weston",
     );
     assert!(
         output.status.success(),
@@ -155,7 +157,7 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
     );
     assert!(
         stdout.contains("install dotool"),
-        "KDE must be told to install dotool, not wtype:\n{stdout}"
+        "a non-wlroots, non-KDE/GNOME Wayland session must be told to install dotool:\n{stdout}"
     );
     assert!(
         stderr.contains("install dotool"),
@@ -169,6 +171,45 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
         tonguetyped::config::OutputMethod::None,
         "a refused type choice must not be saved"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn setup_offers_native_libei_on_kde_without_a_helper() {
+    let root = root("kde-libei");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+
+    // KDE Wayland with no external helper: the native libei backend can type,
+    // so setup must offer it and save `type` instead of refusing.
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "", "2", "2", "", "", "", "", "", "", "1", ""]),
+        Some(&bin),
+        "KDE",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("libei"),
+        "KDE Wayland must offer the native libei backend:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("install dotool"),
+        "no install warning is needed when libei can type:\n{stdout}"
+    );
+
+    let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert_eq!(
+        config.output.method,
+        tonguetyped::config::OutputMethod::Type
+    );
+    assert_eq!(config.output.typing_backend, "libei");
     std::fs::remove_dir_all(root).unwrap();
 }
 

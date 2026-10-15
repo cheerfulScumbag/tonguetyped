@@ -130,7 +130,8 @@ in
               "wtype"
               "enigo"
               "dotool"
-            ]) "Which helper types the transcript.";
+              "libei"
+            ]) "Which helper types the transcript. `libei` types natively through the XDG RemoteDesktop portal on KDE and GNOME Wayland, needing no helper binary and no /dev/uinput access.";
             auto_submit = setting types.bool "Press Enter after the transcript is typed or pasted. Requires `method = \"type\"` or `\"paste\"`.";
             paste_keys = setting (types.enum [
               "ctrl-v"

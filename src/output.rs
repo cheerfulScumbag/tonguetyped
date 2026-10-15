@@ -180,6 +180,9 @@ fn type_text(text: &str, backend: &str) -> anyhow::Result<()> {
             }
             require_success("dotool", child.wait()?)?;
         }
+        // Native libei: the transcript is written to the EIS socket as key
+        // events, never as a process argument. No helper is spawned at all.
+        "libei" => crate::libei::type_text(text)?,
         _ => {
             anyhow::bail!("unsupported typing backend: {}", backend);
         }
@@ -216,6 +219,7 @@ fn press_enter(backend: &str) -> anyhow::Result<()> {
             }
             require_success("dotool", child.wait()?)?;
         }
+        "libei" => crate::libei::press_enter()?,
         _ => {
             anyhow::bail!("unsupported typing backend: {}", backend);
         }
@@ -259,6 +263,7 @@ fn press_paste(keys: PasteKeys, backend: &str) -> anyhow::Result<()> {
             }
             require_success("dotool", child.wait()?)?;
         }
+        "libei" => crate::libei::press_paste(keys)?,
         _ => {
             anyhow::bail!("unsupported typing backend: {}", backend);
         }
@@ -375,9 +380,10 @@ pub fn method_unavailable_reason(
 /// cannot change over a daemon process's lifetime, so re-running its
 /// subprocess self-tests (observed costing over a second in the real
 /// stop-to-idle latency log, since "auto" means probing wtype, then enigo,
-/// then dotool on every single dictation) on every "auto"-backend output is
-/// pure waste - same probe-then-cache shape as `inference::backend_info`'s
-/// GPU device probe and `overlay::OverlayHandle`'s layer-shell probe.
+/// then dotool, then libei on every single dictation) on every "auto"-backend
+/// output is pure waste - same probe-then-cache shape as
+/// `inference::backend_info`'s GPU device probe and
+/// `overlay::OverlayHandle`'s layer-shell probe.
 fn cached_auto_backend() -> String {
     static BACKEND: OnceLock<String> = OnceLock::new();
     BACKEND.get_or_init(probe_type_backend).clone()
@@ -393,6 +399,9 @@ pub fn probe_type_backend() -> String {
     if dotool_available() {
         return "dotool".to_string();
     }
+    if crate::libei::available() {
+        return "libei".to_string();
+    }
     "none".to_string()
 }
 
@@ -407,11 +416,17 @@ pub fn list_available_backends() -> Vec<String> {
     if dotool_available() {
         backends.push("dotool".to_string());
     }
+    if crate::libei::available() {
+        backends.push("libei".to_string());
+    }
     backends
 }
 
 pub fn has_any_type_backend() -> bool {
-    helper_self_test("wtype") || enigo_available() || dotool_available()
+    helper_self_test("wtype")
+        || enigo_available()
+        || dotool_available()
+        || crate::libei::available()
 }
 
 pub fn type_backend_available(backend: &str) -> bool {
@@ -420,20 +435,22 @@ pub fn type_backend_available(backend: &str) -> bool {
         "wtype" => helper_self_test("wtype"),
         "dotool" => dotool_available(),
         "enigo" => enigo_available(),
+        "libei" => crate::libei::available(),
         _ => false,
     }
 }
 
-/// The warning the configuration UIs and the daemon startup log show when no
-/// typing helper is usable, naming the one action that makes a helper work for
-/// this compositor. `enigo` needs no install - it is built in - so the missing
-/// piece is always one of the two external helpers: `wtype`, which types
-/// through the Wayland virtual-keyboard protocol that only wlroots-based
-/// compositors implement, or `dotool`, which types through `/dev/uinput` and
-/// so works on KDE's KWin and other compositors too. When `dotool` is already
-/// installed but `/dev/uinput` is not writable, the warning names the
-/// permission remedy instead of telling the user to install a binary they
-/// already have.
+/// The warning the configuration UIs and the daemon startup log show when the
+/// configured typing backend cannot type here, naming the one action that makes
+/// typing work for this compositor. `enigo` needs no install (it is built in),
+/// `wtype` types through the Wayland virtual-keyboard protocol that only
+/// wlroots-based compositors implement, and `dotool` types through
+/// `/dev/uinput` and so works on KDE's KWin and other compositors too. When
+/// `dotool` is already installed but `/dev/uinput` is not writable, the warning
+/// names the permission remedy instead of telling the user to install a binary
+/// they already have; when the native `libei` backend is available on
+/// KDE/GNOME Wayland, the fix is to switch `typing_backend` to it, not to
+/// install another helper.
 /// The restart note is real, not boilerplate: `cached_auto_backend`, this
 /// warning, and the daemon process all memoize the probe, so a helper
 /// installed while TongueTyped is running is not picked up until it restarts.
@@ -450,14 +467,17 @@ pub fn typing_helper_warning() -> &'static str {
     })
 }
 
-/// The external helper to name for this session: `wtype` only on a Wayland
-/// session whose compositor is wlroots-based (sway, Hyprland, niri, ...),
-/// which implements the `zwp_virtual_keyboard_manager_v1` protocol `wtype`
-/// needs. Everywhere else - KDE's KWin, other Wayland compositors, and X11 -
+/// The helper to name for this session. `wtype` only on a Wayland session
+/// whose compositor is wlroots-based (sway, Hyprland, niri, ...), which
+/// implements the `zwp_virtual_keyboard_manager_v1` protocol `wtype` needs.
+/// On KDE/GNOME Wayland the native `libei` backend works, so nothing needs
+/// installing there. Everywhere else - other Wayland compositors and X11 -
 /// `dotool` is the helper that can work.
 fn recommended_helper() -> &'static str {
     if session_is_wayland() && compositor_is_wlroots() {
         "wtype"
+    } else if crate::libei::available() {
+        "libei"
     } else {
         "dotool"
     }
@@ -466,6 +486,8 @@ fn recommended_helper() -> &'static str {
 fn warning_for(helper: &str, dotool_installed: bool, uinput_writable: bool) -> &'static str {
     if helper == "wtype" {
         "No typing helper found - install wtype, then restart TongueTyped."
+    } else if helper == "libei" {
+        "The configured typing backend is unavailable - the native libei backend works on this session; set typing_backend = \"libei\" (or use the clipboard output method), then restart TongueTyped."
     } else if dotool_installed && !uinput_writable {
         "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or add a udev rule granting write access to /dev/uinput, then restart TongueTyped."
     } else {
@@ -887,17 +909,35 @@ mod tests {
     }
 
     #[test]
-    fn typing_helper_warning_names_a_helper_to_install() {
+    fn typing_helper_warning_names_a_concrete_remedy() {
         let warning = typing_helper_warning();
         assert!(
             warning.contains("install wtype")
                 || warning.contains("install dotool")
+                || warning.contains("typing_backend")
                 || warning.contains("input"),
             "the warning must name a concrete remedy: {warning}"
         );
         assert!(
             warning.contains("restart TongueTyped"),
             "the warning must say a restart is needed: {warning}"
+        );
+    }
+
+    #[test]
+    fn libei_warning_points_at_libei_when_the_configured_backend_cannot_type() {
+        // Reached when the configured typing backend cannot type but the
+        // native libei backend is available on KDE/GNOME Wayland: the remedy
+        // is to switch to libei, never to install a helper or to claim the
+        // available libei is unavailable.
+        let warning = warning_for("libei", false, false);
+        assert!(
+            warning.contains("libei") && warning.contains("typing_backend"),
+            "the warning must name switching to libei: {warning}"
+        );
+        assert!(
+            !warning.contains("install dotool") && !warning.contains("install wtype"),
+            "a session where libei works must not be told to install another helper: {warning}"
         );
     }
 
