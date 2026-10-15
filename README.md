@@ -204,8 +204,9 @@ backend. Every `.deb` installs the `tonguetyped` binary plus its bash, zsh, and
 fish shell completions and man pages.
 
 The `.deb` recommends `wtype` and `wl-clipboard`. Debian does not package
-`dotool`, so KDE Wayland users must build it from source to type (see
-[platform notes](#platform-notes)) or use the `clipboard` output method.
+`dotool`, so KDE Wayland users install their own typing helper; see
+[platform notes](#platform-notes) for the options, or use the `clipboard`
+output method.
 
 ### Fedora / RHEL (.rpm)
 

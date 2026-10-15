@@ -435,9 +435,10 @@ pub fn method_unavailable_reason(
 /// cannot change over a daemon process's lifetime, so re-running its
 /// subprocess self-tests (observed costing over a second in the real
 /// stop-to-idle latency log, since "auto" means probing wtype, then enigo,
-/// then dotool on every single dictation) on every "auto"-backend output is
-/// pure waste - same probe-then-cache shape as `inference::backend_info`'s
-/// GPU device probe and `overlay::OverlayHandle`'s layer-shell probe.
+/// then dotool, then eitype on every single dictation) on every "auto"-backend
+/// output is pure waste - same probe-then-cache shape as
+/// `inference::backend_info`'s GPU device probe and
+/// `overlay::OverlayHandle`'s layer-shell probe.
 fn cached_auto_backend() -> String {
     static BACKEND: OnceLock<String> = OnceLock::new();
     BACKEND.get_or_init(probe_type_backend).clone()
