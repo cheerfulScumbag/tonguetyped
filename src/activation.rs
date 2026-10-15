@@ -111,7 +111,11 @@ fn install_development_desktop_entry(data_dir: &Path) -> anyhow::Result<()> {
     })
 }
 
-async fn register_host_app() -> anyhow::Result<()> {
+/// Registers TongueTyped's desktop application identity so a portal request
+/// (the activation shortcut, or the libei RemoteDesktop session in
+/// [`crate::libei`]) is attributed to this app rather than a bare connection.
+/// Shared by both portal users so they resolve the same application id.
+pub(crate) async fn register_host_app() -> anyhow::Result<()> {
     ashpd::register_host_app(application_id()?.try_into()?)
         .await
         .context(

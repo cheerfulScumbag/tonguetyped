@@ -37,8 +37,9 @@ an interactive dashboard for every setting.
 - **Keyboard-first.** Bind "Start or stop dictation" once in your desktop's
   shortcut dialog. Hold to talk, or press once to start and once to stop.
 - **Types where you are.** The transcript is typed or pasted into the focused
-  app through `wtype`, `dotool`, or `enigo` - whichever actually works on your
-  compositor. When typing fails, the transcript is left on the clipboard.
+  app through `wtype`, `dotool`, `enigo`, or a built-in native `libei` session -
+  whichever actually works on your compositor. When typing fails, the transcript
+  is left on the clipboard.
 - **Dictate into files.** Point `transcript_folder` at a directory and every
   finished transcript is also written there as a plain-text file, independent of
   the focused app or the clipboard.
@@ -644,23 +645,28 @@ and does not need the daemon to be running.
 
 ## Platform notes
 
-Typing into the focused application uses one of three backends. Automatic
-selection tries `wtype`, then `enigo` on X11, then `dotool`, and only ever uses
-a backend that actually works.
+Typing into the focused application uses one of four backends. Automatic
+selection tries `wtype`, then `enigo` on X11, then `dotool`, then the built-in
+`libei` backend, and only ever uses one that actually works.
 
 | Session | Typing helper | Notes |
 | --- | --- | --- |
 | wlroots Wayland (sway, Hyprland, niri) | `wtype` | Types through the Wayland virtual-keyboard protocol |
 | X11 | `enigo` / `xdotool` | Built in; `xdotool` provides the X11 backend |
-| KDE KWin and other Wayland compositors | `dotool` | `wtype` cannot type here; `dotool` writes through `/dev/uinput` |
+| KDE Plasma 6.1+ / GNOME 45+ Wayland | `libei` | Built in; types through the XDG RemoteDesktop portal's Emulated Input session, needing no `/dev/uinput` access |
+| KDE KWin and other Wayland compositors with `/dev/uinput` | `dotool` | `wtype` cannot type here; `dotool` writes through `/dev/uinput` |
 
 `dotool` needs write access to `/dev/uinput`, which is not granted by default.
 Add your user to the `input` group or install a matching udev rule; a present
-`dotool` that cannot open the device is treated as unavailable. **Debian has no
-`dotool` package** - KDE Wayland users installing from the `.deb` must build
-`dotool` from source (`go build` from its upstream repository) to type on KWin.
-Without it, the `clipboard` output method still works, and `type` falls back to
-leaving the transcript on the clipboard.
+`dotool` that cannot open the device is treated as unavailable. The built-in
+`libei` backend covers KDE and GNOME Wayland without that access, so **Debian
+has no `dotool` package** no longer leaves KDE Wayland users unable to type:
+`auto` picks `libei` there. The first dictation that uses `libei` shows the
+portal's authorization dialog (naming TongueTyped) and stores a restore token so
+later runs are silent; the daemon then holds one Emulated Input session for its
+lifetime, so there is no per-dictation handshake. `typing_backend = "libei"`
+selects it explicitly. If the portal is unavailable (an older KDE or GNOME, or a
+denied request), typing falls back to leaving the transcript on the clipboard.
 
 The Nix package and the AUR package both carry the helpers, so a normal install
 works out of the box. When a method's helper is missing, the dashboard and the
@@ -712,7 +718,7 @@ timeout_minutes = 15
 
 [output]
 method = "type"            # "none", "type", "clipboard", or "paste"
-typing_backend = "auto"    # "auto", "wtype", "enigo", or "dotool"
+typing_backend = "auto"    # "auto", "wtype", "enigo", "dotool", or "libei"
 auto_submit = false        # press Enter after "type" or "paste"
 paste_keys = "ctrl-v"      # "ctrl-v" or "shift-insert", for "paste"
 
