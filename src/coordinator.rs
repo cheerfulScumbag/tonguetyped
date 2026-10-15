@@ -1032,7 +1032,16 @@ impl Coordinator {
     }
 
     fn cancel(&self) -> CoordinatorResponse {
-        let _output_guard = self.output_lock.lock().unwrap();
+        // Best-effort serialize with an in-flight output, but never block on
+        // it: the worker holds `output_lock` for its whole typing-plus-history
+        // phase, so a blocking acquire here would make `cancel` (and therefore
+        // `stop`/`restart`, which cancel before their bounded wait) hang for
+        // the entire output - indefinitely if the typing helper (`wtype`/
+        // `dotool`) wedges. The generation bump below is what actually
+        // suppresses a stale settle, so when the lock is already held the only
+        // cost of skipping it is letting an already-committed output finish,
+        // which cannot be recalled anyway.
+        let _output_guard = self.output_lock.try_lock().ok();
         let mut inner = self.state.lock().unwrap();
         match inner.state {
             State::Idle => CoordinatorResponse::Ignored("idle".into()),
