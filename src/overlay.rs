@@ -2342,6 +2342,9 @@ fn paint_live_text(
         cy
     };
     let y_top = line_center - text::CAPTION_FONT_SIZE * 0.62;
+    // The box stacks its content below the leading chip, so every text row
+    // (captured words and the no-words status message alike) starts here.
+    let boxed_text_top = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 12.0;
 
     let right = width - LIVE_TEXT_PADDING;
     let captured = live_text.filter(|text| !text.is_empty());
@@ -2377,12 +2380,11 @@ fn paint_live_text(
             alpha: 1.0,
         };
         if boxed {
-            let text_top = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 12.0;
             let max_width = (right - LIVE_TEXT_PADDING).max(40.0);
             text::draw_caption(
                 canvas,
                 LIVE_TEXT_PADDING,
-                text_top,
+                boxed_text_top,
                 max_width,
                 live_text,
                 colors,
@@ -2472,7 +2474,8 @@ fn paint_live_text(
                     alpha: 0.9,
                 };
                 let line = text::caption_line(message, "");
-                text::draw_line(canvas, text_x, y_top, &line, &colors, None);
+                let message_y = if boxed { boxed_text_top } else { y_top };
+                text::draw_line(canvas, text_x, message_y, &line, &colors, None);
             }
         }
     }
@@ -3608,6 +3611,55 @@ mod tests {
         assert!(
             words.iter().any(|&byte| byte != 0),
             "the caption with text must paint pixels"
+        );
+    }
+
+    #[test]
+    fn boxed_caption_status_message_does_not_overlap_the_chip() {
+        // The box stacks its content below the leading chip, so a terminal
+        // status message with no captured words must paint in that same row
+        // rather than on top of the chip. Render the same phase with the word
+        // "Ready" captured - which already draws below the chip - and compare the
+        // chip's own region: an intruding status message would change it.
+        let (width, _) = surface_size_for(Style::LiveTextBox);
+        let chip_right = (LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0) as u32;
+        let chip_region = |pixels: &[u8]| -> Vec<u8> {
+            let mut out = Vec::new();
+            for y in LIVE_TEXT_PADDING as u32..=chip_right {
+                for x in LIVE_TEXT_PADDING as u32..=chip_right {
+                    let index = ((y * width + x) * 4) as usize;
+                    out.extend_from_slice(&pixels[index..index + 4]);
+                }
+            }
+            out
+        };
+        let status = paint_to_pixels_streaming(
+            Some(Phase::Success),
+            0.0,
+            0.0,
+            true,
+            Style::LiveTextBox,
+            &speaking_history(),
+            true,
+            None,
+        );
+        let words = paint_to_pixels_streaming(
+            Some(Phase::Success),
+            0.0,
+            0.0,
+            true,
+            Style::LiveTextBox,
+            &speaking_history(),
+            true,
+            Some(&LiveText {
+                committed: "Ready".to_string(),
+                tentative: String::new(),
+            }),
+        );
+        assert_eq!(
+            chip_region(&status),
+            chip_region(&words),
+            "the box's no-words status message must not paint over the phase chip"
         );
     }
 

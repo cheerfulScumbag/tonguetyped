@@ -217,8 +217,9 @@ pub(super) fn draw_line(
             let bounds = outlined.px_bounds();
             outlined.draw(|dx, dy, coverage| {
                 let fade = match clip_left {
-                    Some(edge) => ((bounds.min.x + dx as f32 - edge) / CAPTION_LEFT_FADE)
-                        .clamp(0.0, 1.0),
+                    Some(edge) => {
+                        ((bounds.min.x + dx as f32 - edge) / CAPTION_LEFT_FADE).clamp(0.0, 1.0)
+                    }
                     None => 1.0,
                 };
                 if fade <= 0.0 {

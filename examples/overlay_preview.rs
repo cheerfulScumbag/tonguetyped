@@ -11,7 +11,8 @@
 //! recording`. "waveform" holds the Recording phase with
 //! `overlay.live_waveform` enabled, to preview the live microphone waveform
 //! look instead of the default pulsing dot. Pass a style name
-//! (badge/minimal/pill/blob/border/half-circle/long-pill/live-text) as a third
+//! (badge/minimal/pill/blob/border/half-circle/long-pill/live-text/
+//! live-text-minimal/live-text-box) as a third
 //! argument to preview one of the other `overlay.style` looks, e.g. `cargo run
 //! --example overlay_preview -- top-right recording blob`. The `border` style
 //! ignores `position`: it is a full-screen frame that hugs every screen edge.

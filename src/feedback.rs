@@ -67,10 +67,12 @@ impl DesktopFeedback {
             overlay: Arc::new(OverlayHandle::new()),
         }
     }
-}
 
-impl Feedback for DesktopFeedback {
-    fn send(&self, event: FeedbackEvent, config: &Config) {
+    /// Shows `event` off-thread, falling back to the desktop notification path
+    /// when the overlay is unavailable. `streaming` is `Some` only for a
+    /// recording start, carrying whether the active model streams so the overlay
+    /// adopts the caption up front instead of flashing the waveform.
+    fn send_command(&self, event: FeedbackEvent, streaming: Option<bool>, config: &Config) {
         let overlay_config = config.overlay.clone();
         let audio = config.audio.clone();
         if !overlay_config.enabled && !audio.feedback_sounds {
@@ -83,37 +85,29 @@ impl Feedback for DesktopFeedback {
         // the same way the legacy D-Bus calls below already were.
         let overlay = self.overlay.clone();
         std::thread::spawn(move || {
-            if overlay_config.enabled && !overlay.try_send(event, &overlay_config) {
-                show_visual(event);
+            if overlay_config.enabled {
+                let sent = match streaming {
+                    Some(streaming) => overlay.try_send_recording(streaming, &overlay_config),
+                    None => overlay.try_send(event, &overlay_config),
+                };
+                if !sent {
+                    show_visual(event);
+                }
             }
             if audio.feedback_sounds {
                 play_sound(event, audio.feedback_volume, &audio.feedback_device);
             }
         });
     }
+}
+
+impl Feedback for DesktopFeedback {
+    fn send(&self, event: FeedbackEvent, config: &Config) {
+        self.send_command(event, None, config);
+    }
 
     fn send_recording(&self, streaming: bool, config: &Config) {
-        let overlay_config = config.overlay.clone();
-        let audio = config.audio.clone();
-        if !overlay_config.enabled && !audio.feedback_sounds {
-            return;
-        }
-        // Same off-thread shape as `send`; the only difference is the extra
-        // streaming flag, which lets the overlay adopt the caption from the
-        // start of a streaming recording instead of flashing the waveform.
-        let overlay = self.overlay.clone();
-        std::thread::spawn(move || {
-            if overlay_config.enabled && !overlay.try_send_recording(streaming, &overlay_config) {
-                show_visual(FeedbackEvent::Recording);
-            }
-            if audio.feedback_sounds {
-                play_sound(
-                    FeedbackEvent::Recording,
-                    audio.feedback_volume,
-                    &audio.feedback_device,
-                );
-            }
-        });
+        self.send_command(FeedbackEvent::Recording, Some(streaming), config);
     }
 
     fn send_live_text(&self, text: crate::overlay::LiveText, config: &Config) {

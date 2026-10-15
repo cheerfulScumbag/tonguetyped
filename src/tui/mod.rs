@@ -43,7 +43,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -294,6 +294,22 @@ struct App {
     /// the key handler can simply increment/decrement it and a transcript
     /// taller than the pane stays fully reachable.
     info_scroll: Cell<u16>,
+    /// Cached rasterisation of the overlay style shown on the Overlay screen.
+    /// `render_overlay` runs on every 66ms tick, and the offline rasteriser
+    /// allocates and paints the style's full-resolution surface (1920x1080 for
+    /// `border`) each call, so the pixels are rendered once and reused until the
+    /// previewed style or the waveform toggle changes.
+    overlay_preview: RefCell<Option<OverlayPreview>>,
+}
+
+/// One cached overlay preview frame: the rasterised pixels plus the inputs that
+/// produced them, so `render_overlay` can tell when it must re-render.
+struct OverlayPreview {
+    style: String,
+    live_waveform: bool,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
 }
 
 /// How often the home screen's status strip re-probes daemon liveness.
@@ -319,6 +335,7 @@ impl App {
             should_quit: false,
             daemon_status_cache: Cell::new(None),
             info_scroll: Cell::new(0),
+            overlay_preview: RefCell::new(None),
         }
     }
 
@@ -1806,7 +1823,7 @@ impl App {
             let block = Block::default().borders(Borders::ALL).title(title);
             let inner = block.inner(preview_area);
             frame.render_widget(block, preview_area);
-            let lines = overlay_preview_lines(
+            let lines = self.overlay_preview_lines(
                 &self.config.overlay.style,
                 self.config.overlay.live_waveform,
                 inner.width,
@@ -1814,6 +1831,41 @@ impl App {
             );
             frame.render_widget(Paragraph::new(lines), inner);
         }
+    }
+
+    /// The preview cells for the selected overlay style, reusing the cached
+    /// rasterisation when the style and waveform toggle are unchanged so the
+    /// dashboard does not re-render the full-resolution frame every tick.
+    fn overlay_preview_lines(
+        &self,
+        style: &str,
+        live_waveform: bool,
+        cols: u16,
+        rows: u16,
+    ) -> Vec<Line<'static>> {
+        let mut cache = self.overlay_preview.borrow_mut();
+        let stale = match cache.as_ref() {
+            Some(preview) => preview.style != style || preview.live_waveform != live_waveform,
+            None => true,
+        };
+        if stale {
+            let (width, height, pixels) = crate::overlay::render_frame_pixels(
+                style,
+                Some("recording"),
+                0.0,
+                live_waveform,
+                &[],
+            );
+            *cache = Some(OverlayPreview {
+                style: style.to_string(),
+                live_waveform,
+                width,
+                height,
+                pixels,
+            });
+        }
+        let preview = cache.as_ref().expect("preview populated above");
+        preview_lines_from_pixels(preview.width, preview.height, &preview.pixels, cols, rows)
     }
 
     fn render_text_fields(
@@ -1907,21 +1959,19 @@ fn rendered_output_lines(lines: &[OutputLine]) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Renders a preview of one overlay style into terminal half-block cells, for
-/// the Overlay screen. It reuses the overlay's own offline rasteriser
-/// (`overlay::render_frame_pixels`), so the preview matches what the compositor
-/// shows at this style's recording state; each cell carries two vertical image
-/// pixels (`▀` with the upper pixel as the foreground and the lower as the
-/// background), which any truecolour terminal renders without a graphics
-/// protocol.
-fn overlay_preview_lines(
-    style: &str,
-    live_waveform: bool,
+/// Downsamples a rasterised overlay frame (from the overlay's own offline
+/// rasteriser, so the preview matches what the compositor shows at the style's
+/// recording state) into `rows` x `cols` terminal half-block cells for the
+/// Overlay screen. Each cell carries two vertical image pixels (`▀` with the
+/// upper pixel as the foreground and the lower as the background), which any
+/// truecolour terminal renders without a graphics protocol.
+fn preview_lines_from_pixels(
+    pixels_width: u32,
+    pixels_height: u32,
+    pixels: &[u8],
     cols: u16,
     rows: u16,
 ) -> Vec<Line<'static>> {
-    let (pixels_width, pixels_height, pixels) =
-        crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, live_waveform, &[]);
     if pixels_width == 0 || pixels_height == 0 || cols == 0 || rows == 0 {
         return Vec::new();
     }
@@ -1931,7 +1981,7 @@ fn overlay_preview_lines(
         let mut spans = Vec::with_capacity(cols as usize);
         for col in 0..cols as usize {
             let top = preview_sample(
-                &pixels,
+                pixels,
                 pixels_width,
                 pixels_height,
                 col,
@@ -1940,7 +1990,7 @@ fn overlay_preview_lines(
                 sample_rows,
             );
             let bottom = preview_sample(
-                &pixels,
+                pixels,
                 pixels_width,
                 pixels_height,
                 col,
@@ -2202,7 +2252,9 @@ mod tests {
         // opaque disc, so at least one cell carries a foreground colour while
         // the transparency around it stays blank.
         for style in crate::overlay::STYLE_VALUES {
-            let lines = overlay_preview_lines(style, false, 24, 8);
+            let (width, height, pixels) =
+                crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, false, &[]);
+            let lines = preview_lines_from_pixels(width, height, &pixels, 24, 8);
             assert_eq!(lines.len(), 8, "{style}: one line per preview row");
             for line in &lines {
                 assert_eq!(line.spans.len(), 24, "{style}: one cell per column");
