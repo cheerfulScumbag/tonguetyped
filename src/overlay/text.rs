@@ -68,11 +68,7 @@ impl LaidLine {
 /// ellipsis - is carried through, so the caller colours each glyph by its own
 /// flag instead of assuming a committed-prefix/tentative-suffix layout. Layout
 /// uses the bundled font, so the same input always yields the same lines.
-pub(super) fn caption_lines(
-    committed: &str,
-    tentative: &str,
-    max_width: f32,
-) -> Vec<LaidLine> {
+pub(super) fn caption_lines(committed: &str, tentative: &str, max_width: f32) -> Vec<LaidLine> {
     let Some(font) = font() else {
         return Vec::new();
     };

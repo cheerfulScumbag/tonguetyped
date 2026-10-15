@@ -586,7 +586,7 @@ streaming models with a `live (en)` tag under **STREAMING**, and the dashboard's
 model screen tags them `LIVE`; the rest of the catalog produces no live text and
 shows only the recording indicator.
 
-Two things to know before choosing a streaming model:
+Three things to know before choosing a streaming model:
 
 - **Live text appears in the overlay only.** Partial words are preview: they are
   never typed into the focused application, and the transcript that is actually

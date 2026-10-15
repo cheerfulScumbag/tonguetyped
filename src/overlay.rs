@@ -2633,7 +2633,8 @@ fn paint_half_circle(
 /// `examples/overlay_style_png.rs` reorders it to PNG's RGBA (and
 /// unpremultiplies, since PNG alpha is straight). `style`
 /// and `phase` use the same string values the config and feedback events use
-/// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`;
+/// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`/
+/// `live-text`;
 /// `recording`/`transcribing`/`success`/`no-speech`/`copied`/
 /// `clipboard-fallback`/`submit-failed`/`cancelled`/`error`), and
 /// `None` clears to fully transparent. `levels` is the live microphone history
