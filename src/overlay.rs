@@ -2279,8 +2279,8 @@ fn paint_live_text(
     );
 
     // A thin caret after the newest line, marking where the tentative tail ends.
-    if let Some((last, _)) = lines.last() {
-        let caret_x = (text_x + text::width_of(last)).min(text_x + max_width);
+    if let Some(last) = lines.last() {
+        let caret_x = (text_x + text::width_of(&last.text())).min(text_x + max_width);
         let caret_center_y = y_top
             + (lines.len() as f32 - 1.0) * text::CAPTION_LINE_HEIGHT
             + text::CAPTION_LINE_HEIGHT / 2.0;

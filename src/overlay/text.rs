@@ -51,27 +51,28 @@ struct LaidChar {
 
 /// One visual line of laid-out characters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct LaidLine {
+pub(super) struct LaidLine {
     chars: Vec<LaidChar>,
 }
 
 impl LaidLine {
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         self.chars.iter().map(|c| c.ch).collect()
     }
 }
 
 /// Wrap `committed + tentative` to `max_width`, returning at most
 /// `max_lines` lines with the most recent speech kept. When earlier lines are
-/// dropped the first visible line is prefixed with an ellipsis; the
-/// committed/tentative flag of every character is preserved so the caller can
-/// colour the still-revisable tail. Layout uses the bundled font, so the same
-/// input always yields the same lines.
+/// dropped the first visible line is prefixed with an ellipsis marked
+/// tentative; the committed/tentative flag of every character - including that
+/// ellipsis - is carried through, so the caller colours each glyph by its own
+/// flag instead of assuming a committed-prefix/tentative-suffix layout. Layout
+/// uses the bundled font, so the same input always yields the same lines.
 pub(super) fn caption_lines(
     committed: &str,
     tentative: &str,
     max_width: f32,
-) -> Vec<(String, usize)> {
+) -> Vec<LaidLine> {
     let Some(font) = font() else {
         return Vec::new();
     };
@@ -140,11 +141,6 @@ pub(super) fn caption_lines(
     visible
         .into_iter()
         .filter(|line| !line.chars.is_empty())
-        .map(|line| {
-            let tentative = line.chars.iter().filter(|c| c.tentative).count();
-            let committed = line.chars.len() - tentative;
-            (line.text(), committed)
-        })
         .collect()
 }
 
@@ -179,15 +175,16 @@ pub(super) fn draw_caption(
     let scaled = font.as_scaled(scale);
     let ascent = scaled.ascent();
     let mut y = y_top;
-    for (line, committed_len) in lines {
+    for line in lines {
         let baseline = y + ascent;
         let mut cursor = x;
-        for (index, ch) in line.chars().enumerate() {
+        for laid in &line.chars {
+            let ch = laid.ch;
             let glyph_id = font.glyph_id(ch);
-            let color = if index < committed_len {
-                colors.committed
-            } else {
+            let color = if laid.tentative {
                 colors.tentative
+            } else {
+                colors.committed
             };
             let glyph = glyph_id.with_scale_and_position(scale, point(cursor, baseline));
             if let Some(outlined) = font.outline_glyph(glyph) {
@@ -231,8 +228,10 @@ mod tests {
     fn short_text_stays_on_one_line_and_keeps_its_split() {
         let lines = caption_lines("hello world", " again", 720.0);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].0, "hello world again");
-        assert_eq!(lines[0].1, "hello world".chars().count());
+        assert_eq!(lines[0].text(), "hello world again");
+        let committed = "hello world".chars().count();
+        assert!(lines[0].chars[..committed].iter().all(|c| !c.tentative));
+        assert!(lines[0].chars[committed..].iter().all(|c| c.tentative));
     }
 
     #[test]
@@ -243,9 +242,9 @@ mod tests {
             220.0,
         );
         assert!(lines.len() >= CAPTION_MAX_LINES);
-        for (text, _) in &lines {
+        for line in &lines {
             assert!(
-                !text.starts_with(' '),
+                !line.text().starts_with(' '),
                 "a wrapped line kept a leading space"
             );
         }
@@ -257,19 +256,29 @@ mod tests {
                     thirteen fourteen fifteen sixteen seventeen eighteen";
         let lines = caption_lines(long, "", 220.0);
         assert_eq!(lines.len(), CAPTION_MAX_LINES, "window keeps two lines");
+        let first = &lines[0];
         assert!(
-            lines[0].0.starts_with('…'),
+            first.text().starts_with('…'),
             "the first visible line should mark dropped text: {:?}",
-            lines[0].0
+            first.text()
+        );
+        // The dropped-text marker is a tentative glyph even though it sits at
+        // the start of the line, and the committed words after it stay
+        // committed - colouring must follow each glyph's own flag.
+        assert!(first.chars[0].tentative, "the ellipsis must be tentative");
+        assert!(
+            !first.chars.last().unwrap().tentative,
+            "committed text after the ellipsis must stay committed"
         );
     }
 
     #[test]
     fn tentative_tail_is_tracked_per_character() {
         let lines = caption_lines("hello", " world", 720.0);
-        let (text, committed) = &lines[0];
-        assert_eq!(text.chars().count(), 11);
-        assert_eq!(*committed, 5, "only the committed prefix is frozen");
+        let chars = &lines[0].chars;
+        assert_eq!(chars.len(), 11);
+        assert!(chars[..5].iter().all(|c| !c.tentative));
+        assert!(chars[5..].iter().all(|c| c.tentative));
     }
 
     #[test]

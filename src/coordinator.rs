@@ -572,11 +572,17 @@ impl CoordinatorRuntime for ProductionRuntime {
         drop(frame_tx);
         let inference = Arc::clone(&self.inference);
         let live_config = Arc::new(config.clone());
+        // Publish a fresh cancellable run before the stream starts (and before
+        // any cold model load on its thread) so a cancel from another thread
+        // aborts an in-flight stream instead of blocking shutdown on the
+        // inference lock, mirroring `transcribe`.
+        let cancel_token = crate::inference::CancelToken::new();
+        *self.cancel_token.lock().unwrap() = Some(cancel_token.clone());
         // The stream owns the inference lock for the whole recording, so hold it
         // on a dedicated thread and join it once capture has ended.
         let stream_thread = std::thread::Builder::new()
             .name("tonguetyped-live-text".to_string())
-            .spawn(move || stream_capture(inference, live_config, frame_rx, feedback))
+            .spawn(move || stream_capture(inference, live_config, frame_rx, feedback, cancel_token))
             .ok();
         let mut attempt = self.capture(
             microphone,
@@ -771,19 +777,25 @@ impl Drop for ProductionRuntime {
 /// recording, feeds the model's native stream every 16 kHz block the recorder
 /// publishes, reports each text change to `feedback`, and returns the finalized
 /// transcript. Returns `None` (so the worker falls back to a batch decode) when
-/// the model turns out not to stream or the stream itself fails; the fallback
+/// capture never produced a frame (a microphone error closed the channel), the
+/// model turns out not to stream, or the stream itself fails; the fallback
 /// keeps the dictation working even if streaming is momentarily unavailable.
 fn stream_capture(
     inference: Arc<Mutex<EngineLifecycle<crate::inference::InferenceEngine>>>,
     config: Arc<Config>,
     frame_rx: mpsc::Receiver<Vec<f32>>,
     feedback: Arc<dyn Feedback>,
+    cancel_token: crate::inference::CancelToken,
 ) -> Option<StreamedTranscript> {
     let model_id = config.model.active_model.clone();
     let backend = config.model.preferred_backend.clone();
     let engine_key = format!("{model_id}@{backend}");
+    // Wait for the first frame before touching the model: when capture failed
+    // to start (a microphone error) the recorder is gone and the channel is
+    // already closed, so this returns without a cold load and lets the worker
+    // report the error promptly instead of after a model load.
+    let first_frame = frame_rx.recv().ok()?;
     let mut lifecycle = inference.lock().unwrap_or_else(|e| e.into_inner());
-    let cancel_token = crate::inference::CancelToken::new();
     let engine = match lifecycle.ensure(&engine_key, || {
         let mut engine = crate::inference::InferenceEngine::new_with_token(
             crate::catalog::model_path(&model_id)?,
@@ -799,6 +811,9 @@ fn stream_capture(
             return None;
         }
     };
+    // Cover a reused (already-loaded) engine too, so a cancel reaches an
+    // in-flight stream the same way it reaches a batch decode.
+    engine.set_cancel_token(&cancel_token);
     if !engine.supports_streaming() {
         return None;
     }
@@ -814,9 +829,12 @@ fn stream_capture(
             &partial_config,
         );
     };
+    // Hand the already-received first frame to the stream first, then drain the
+    // rest of the channel; `None` (channel closed) finalizes the stream.
+    let mut pending = Some(first_frame);
     let result = engine.transcribe_streaming(
         &config.transcription,
-        || frame_rx.recv().ok(),
+        || pending.take().or_else(|| frame_rx.recv().ok()),
         &mut on_partial,
     );
     let inference = started.elapsed();
