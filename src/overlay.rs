@@ -1362,7 +1362,7 @@ fn blob_spikes(angle: f32, t: f32) -> f32 {
 }
 
 /// Blends `color` toward white by `amount` (0..1) - used for the blob's bright
-/// inner glow and near-white sheen.
+/// inner glow and its lighter sheen.
 fn lighten(color: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
     let f = |channel: u8| -> u8 {
         (channel as f32 + (255.0 - channel as f32) * amount)
@@ -3838,6 +3838,66 @@ mod tests {
             );
             seen.push(pixels);
         }
+    }
+
+    #[test]
+    fn blob_recording_body_is_a_bold_saturated_red_and_keeps_its_gloss() {
+        // The captain asked the recording blob be a bold, saturated "blood
+        // red" rather than the pale, washed-out pink it used to paint, while
+        // keeping its gloss. Render it and check both: the opaque body stays
+        // strongly red-dominant and saturated, and a bright desaturated
+        // highlight (the specular dot / sheen) still stands out of the body.
+        let mut saturations: Vec<f32> = Vec::new();
+        let mut opaque = 0usize;
+        let mut red_dominant = 0usize;
+        let mut gloss = 0usize;
+        for t in [0.0_f32, 0.25, 0.5, 0.75] {
+            let pixels = paint_to_pixels(Some(Phase::Recording), t, false, Style::Blob);
+            for pixel in pixels.as_chunks::<4>().0 {
+                let (b, g, r, a) = (
+                    pixel[0] as i32,
+                    pixel[1] as i32,
+                    pixel[2] as i32,
+                    pixel[3] as i32,
+                );
+                if a < 200 {
+                    continue;
+                }
+                opaque += 1;
+                let max = r.max(g).max(b);
+                let min = r.min(g).min(b);
+                let saturation = if max == 0 {
+                    0.0
+                } else {
+                    (max - min) as f32 / max as f32
+                };
+                saturations.push(saturation);
+                if r > g && r > b {
+                    red_dominant += 1;
+                }
+                // The gloss the blob must keep: a bright pixel that is far less
+                // saturated than the red body, so a pale wash cannot fake it.
+                if min > 150 && saturation < 0.35 {
+                    gloss += 1;
+                }
+            }
+        }
+        assert!(opaque > 0, "the recording blob painted no opaque pixels");
+        saturations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = saturations[saturations.len() / 2];
+        assert!(
+            median > 0.6,
+            "the blob body should be boldly saturated, median saturation was {median}"
+        );
+        let dominant_fraction = red_dominant as f32 / opaque as f32;
+        assert!(
+            dominant_fraction > 0.95,
+            "the blob body should be red-dominant, only {dominant_fraction} of pixels were"
+        );
+        assert!(
+            gloss > 0,
+            "the blob must keep its gloss: no bright, desaturated highlight pixel was painted"
+        );
     }
 
     #[test]
