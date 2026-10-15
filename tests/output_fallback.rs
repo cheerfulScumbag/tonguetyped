@@ -291,7 +291,7 @@ fn the_auto_probe_finds_eitype_when_dotool_cannot_work() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("Typed the test text"));
     assert_eq!(
         sandbox.read("eitype.log").as_deref(),
-        Some("TongueTyped typing test\n")
+        Some("-- TongueTyped typing test\n")
     );
 }
 
@@ -319,7 +319,7 @@ fn a_failing_eitype_falls_back_to_the_clipboard() {
     );
     assert_eq!(
         sandbox.read("eitype.log").as_deref(),
-        Some("TongueTyped typing test\n"),
+        Some("-- TongueTyped typing test\n"),
         "eitype was attempted before the fallback"
     );
     assert_eq!(
@@ -345,7 +345,7 @@ fn eitype_typing_on_kde_forces_a_small_inter_key_delay() {
     );
     assert_eq!(
         sandbox.read("eitype.log").as_deref(),
-        Some("-d 1 TongueTyped typing test\n")
+        Some("-d 1 -- TongueTyped typing test\n")
     );
 }
 
