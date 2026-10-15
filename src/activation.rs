@@ -701,7 +701,32 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a live xdg-desktop-portal with the host registry interface"]
     async fn a_second_registration_on_the_shared_connection_is_tolerated() {
+        // The shortcut listener and the libei RemoteDesktop session share one
+        // process-global portal connection, which accepts only one application
+        // id. Register the identity, then force a second registration onto the
+        // portal (rather than letting the memo short-circuit it) and prove the
+        // wrapper turns the portal's rejection into success.
+        REGISTERED.store(false, Ordering::Release);
         register_host_app().await.expect("first registration");
+
+        // The shared connection now carries the identity, so the portal rejects
+        // a second raw `Register` with the exact reply the daemon log reported.
+        // Asserting this proves the test is exercising the already-associated
+        // branch rather than passing trivially on an idempotent portal.
+        REGISTERED.store(false, Ordering::Release);
+        let app_id: ashpd::AppID = application_id()
+            .expect("application id")
+            .try_into()
+            .expect("valid application id");
+        let raw = ashpd::register_host_app(app_id).await;
+        assert!(
+            matches!(&raw, Err(error) if is_already_associated(error)),
+            "a second registration on the shared connection must be rejected as \
+             already associated: {raw:?}"
+        );
+
+        // The wrapper must treat that rejection as success.
+        REGISTERED.store(false, Ordering::Release);
         register_host_app()
             .await
             .expect("a second registration on the shared connection must be tolerated");

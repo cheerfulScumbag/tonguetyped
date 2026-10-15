@@ -672,7 +672,8 @@ denied request), typing falls back to leaving the transcript on the clipboard.
 
 The Nix package and the AUR package both carry the helpers, so a normal install
 works out of the box. When a method's helper is missing, the dashboard and the
-setup wizard say so and name what to install for your compositor, and refuse to
+setup wizard say so and name the remedy for your compositor - install the missing
+helper, or switch to the built-in `libei` backend where it works - and refuse to
 save an output method that could never work. `paste` needs both the clipboard
 helper and a typing helper, which presses the paste keys.
 
