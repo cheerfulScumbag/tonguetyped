@@ -42,3 +42,9 @@ SOFTWARE.
 
 Commit: 2a412ed858695b9251f3f5a1a20d95b59fa7c498
 License: MIT
+
+### Inter (github.com/rsms/inter)
+
+The live-text overlay style rasterises a bundled font
+(`assets/fonts/Inter-Medium.ttf`): Inter, under the SIL Open Font License 1.1.
+The full license text ships alongside it at `assets/fonts/LICENSE-Inter.txt`.

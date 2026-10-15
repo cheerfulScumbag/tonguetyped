@@ -111,6 +111,10 @@ struct ConsoleState {
     capabilities: Capabilities,
     step: StepKind,
     model_values: Vec<String>,
+    /// Display labels matching `model_values` position for position: the id,
+    /// plus a "live, English only" tag for a streaming model so the trade-off
+    /// is visible at selection time.
+    model_labels: Vec<String>,
     model_selection: usize,
     inference_backend_values: Vec<&'static str>,
     inference_backend_selection: usize,
@@ -156,6 +160,16 @@ impl ConsoleState {
         let model_values: Vec<String> = crate::catalog::ENTRIES
             .iter()
             .map(|entry| entry.id.to_string())
+            .collect();
+        let model_labels: Vec<String> = crate::catalog::ENTRIES
+            .iter()
+            .map(|entry| {
+                if entry.info().supports_streaming() {
+                    format!("{}  (live text, English only)", entry.id)
+                } else {
+                    entry.id.to_string()
+                }
+            })
             .collect();
         let model_selection = model_values
             .iter()
@@ -232,6 +246,7 @@ impl ConsoleState {
             capabilities,
             step: StepKind::Model,
             model_values,
+            model_labels,
             model_selection,
             inference_backend_values,
             inference_backend_selection,
@@ -990,7 +1005,7 @@ impl ConsoleState {
         match self.step {
             StepKind::Model => frame.render_widget(
                 list_paragraph(
-                    &self.model_values,
+                    &self.model_labels,
                     self.model_selection,
                     self.step_title(),
                     area.height,

@@ -35,6 +35,15 @@ pub enum FeedbackEvent {
 
 pub trait Feedback: Send + Sync {
     fn send(&self, event: FeedbackEvent, config: &Config);
+
+    /// Show a live-text snapshot (a streaming model's partial transcript) in
+    /// the overlay. This is preview-only and never a state transition: it is
+    /// painted by the `live-text` overlay style alone, never typed, persisted,
+    /// or mirrored to the notification fallback chain (partial words rewriting
+    /// in a desktop OSD would be worse than showing nothing). The default is a
+    /// no-op, so runtimes and test fakes that do not show live text compile
+    /// unchanged.
+    fn send_live_text(&self, _text: crate::overlay::LiveText, _config: &Config) {}
 }
 
 #[derive(Default)]
@@ -70,6 +79,21 @@ impl Feedback for DesktopFeedback {
             if audio.feedback_sounds {
                 play_sound(event, audio.feedback_volume, &audio.feedback_device);
             }
+        });
+    }
+
+    fn send_live_text(&self, text: crate::overlay::LiveText, config: &Config) {
+        let overlay_config = config.overlay.clone();
+        if !overlay_config.enabled {
+            return;
+        }
+        // Same off-thread send as `send`: the first overlay probe blocks
+        // briefly, every send after it is a non-blocking channel write. A
+        // partial that the compositor cannot show is dropped, never routed to
+        // the desktop notification fallback.
+        let overlay = self.overlay.clone();
+        std::thread::spawn(move || {
+            overlay.try_send_live_text(text, &overlay_config);
         });
     }
 }

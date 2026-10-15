@@ -130,9 +130,16 @@ impl ModelScreen {
                 };
                 // Family and license live in the detail panel below; the list
                 // stays within an 80-column terminal and marks the language
-                // coverage a user needs to choose between families.
+                // coverage and whether the model can stream live partial text
+                // (the "LIVE" tag), which a user needs to choose between
+                // families.
+                let live = if row.info.supports_streaming() {
+                    "live"
+                } else {
+                    "-"
+                };
                 let text = format!(
-                    "{marker}{:<32} {:<8} {:>8}  {:<9}  {:<13}",
+                    "{marker}{live:<5}{:<31} {:<8} {:>8} {:<9} {:<13}",
                     row.id,
                     row.quant,
                     commands::human_size(row.size_bytes),
@@ -150,7 +157,7 @@ impl ModelScreen {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(focus_border(self.focus == ModelFocus::Catalog))
-                    .title("Model catalog (MODEL ID / QUANT / SIZE / STATUS / LANGUAGES)"),
+                    .title("Model catalog (MODEL ID / QUANT / SIZE / STATUS / LIVE / LANGUAGES)"),
             )
             .scroll((scroll, 0))
     }
@@ -175,7 +182,16 @@ impl ModelScreen {
             Span::styled("Input limit ", label),
             Span::raw(long_form_note(row.info.long_form)),
         ]);
-        Paragraph::new(vec![heading, note]).block(
+        let streaming = if row.info.supports_streaming() {
+            "live partial text in the overlay while you speak; English only"
+        } else {
+            "no live text - the transcript appears after transcription"
+        };
+        let streaming_note = Line::from(vec![
+            Span::styled("Streaming ", label),
+            Span::raw(streaming),
+        ]);
+        Paragraph::new(vec![heading, note, streaming_note]).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Selected model"),

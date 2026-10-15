@@ -53,6 +53,12 @@ pub fn list_devices() -> anyhow::Result<Vec<AudioDevice>> {
 
 pub type LevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
 pub type ErrorCallback = Arc<dyn Fn(String) + Send + Sync>;
+/// Receives every resampled 16 kHz mono block as it is captured, in capture
+/// order. The live-text path installs one to feed a streaming model's
+/// [`transcribe_streaming`](crate::inference::InferenceEngine::transcribe_streaming)
+/// while the user speaks; the level/error callbacks above stay untouched, and
+/// the recorder still buffers the whole capture exactly as before.
+pub type FrameCallback = Arc<dyn Fn(&[f32]) + Send + Sync>;
 
 pub struct AudioRecorder {
     stream: Option<cpal::Stream>,
@@ -62,6 +68,11 @@ pub struct AudioRecorder {
     source_frames: Arc<Mutex<usize>>,
     source_rate: u32,
     target_rate: u32,
+    /// Set once, before `start`, by [`AudioRecorder::set_frame_callback`]. A
+    /// `OnceLock` (not a `Mutex`) keeps the per-block capture path lock-free
+    /// while still letting the callback be installed after `new` built the
+    /// stream, so the common recorder construction sites need no new argument.
+    frame_callback: Arc<std::sync::OnceLock<FrameCallback>>,
 }
 
 impl AudioRecorder {
@@ -136,6 +147,7 @@ impl AudioRecorder {
         };
         let pending = Arc::new(Mutex::new(Vec::new()));
         let source_frames = Arc::new(Mutex::new(0));
+        let frame_callback = Arc::new(std::sync::OnceLock::new());
         let capture = CaptureState {
             channels: channels as usize,
             buffer: buffer.clone(),
@@ -143,6 +155,7 @@ impl AudioRecorder {
             resampler: resampler.clone(),
             source_frames: source_frames.clone(),
             level_callback,
+            frame_callback: frame_callback.clone(),
         };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
@@ -165,7 +178,15 @@ impl AudioRecorder {
             source_frames,
             source_rate,
             target_rate,
+            frame_callback,
         })
+    }
+
+    /// Install the callback every resampled 16 kHz mono block is delivered to.
+    /// Called before [`start`](Self::start) by the live-text path; the first
+    /// call wins, so a recorder is never re-pointed mid-capture.
+    pub fn set_frame_callback(&self, callback: FrameCallback) {
+        let _ = self.frame_callback.set(callback);
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
@@ -296,6 +317,7 @@ struct CaptureState {
     resampler: Option<Arc<Mutex<FftFixedIn<f32>>>>,
     source_frames: Arc<Mutex<usize>>,
     level_callback: Option<LevelCallback>,
+    frame_callback: Arc<std::sync::OnceLock<FrameCallback>>,
 }
 
 fn build_input_stream<T>(
@@ -340,7 +362,15 @@ impl CaptureState {
             while pending.len() >= input_frames {
                 let input: Vec<Vec<f32>> = vec![pending.drain(..input_frames).collect()];
                 match resampler.process(&input, None) {
-                    Ok(output) => self.buffer.lock().unwrap().extend_from_slice(&output[0]),
+                    Ok(output) => {
+                        // Publish the resampled block to a live consumer (the
+                        // streaming model) before buffering it, so partials and
+                        // the final buffer see the exact same 16 kHz samples.
+                        if let Some(callback) = self.frame_callback.get() {
+                            callback(&output[0]);
+                        }
+                        self.buffer.lock().unwrap().extend_from_slice(&output[0]);
+                    }
                     Err(error) => {
                         tracing::error!("audio resampling failed: {}", error);
                         break;
@@ -348,6 +378,9 @@ impl CaptureState {
                 }
             }
         } else {
+            if let Some(callback) = self.frame_callback.get() {
+                callback(&mono);
+            }
             self.buffer.lock().unwrap().extend_from_slice(&mono);
         }
     }
@@ -598,6 +631,56 @@ mod tests {
     #[test]
     fn downmixes_interleaved_channels() {
         assert_eq!(downmix_to_mono(&[1.0, -1.0, 0.5, 0.5], 2), [0.0, 0.5]);
+    }
+
+    #[test]
+    fn process_publishes_each_block_to_the_frame_callback() {
+        // The live-text path installs a frame callback before `start`; every
+        // captured block must reach it (and still be buffered) in capture order,
+        // so the streaming model sees the same 16 kHz audio the batch path
+        // would.
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let frame_callback = Arc::new(std::sync::OnceLock::new());
+        let captured: Arc<Mutex<Vec<Vec<f32>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        let callback: FrameCallback = Arc::new(move |samples: &[f32]| {
+            sink.lock().unwrap().push(samples.to_vec());
+        });
+        frame_callback.set(callback).ok();
+        let state = CaptureState {
+            channels: 1,
+            buffer: buffer.clone(),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            resampler: None,
+            source_frames: Arc::new(Mutex::new(0)),
+            level_callback: None,
+            frame_callback,
+        };
+
+        state.process(&[0.1, 0.2, 0.3]);
+        state.process(&[0.4]);
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![vec![0.1, 0.2, 0.3], vec![0.4]]
+        );
+        assert_eq!(*buffer.lock().unwrap(), vec![0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn process_without_a_frame_callback_only_buffers() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let state = CaptureState {
+            channels: 1,
+            buffer: buffer.clone(),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            resampler: None,
+            source_frames: Arc::new(Mutex::new(0)),
+            level_callback: None,
+            frame_callback: Arc::new(std::sync::OnceLock::new()),
+        };
+        state.process(&[0.5, -0.5]);
+        assert_eq!(*buffer.lock().unwrap(), vec![0.5, -0.5]);
     }
 
     #[test]
