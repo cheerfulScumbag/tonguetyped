@@ -1313,7 +1313,7 @@ fn apply_decoding(screen: &TextFieldsScreen, config: &mut Config) -> Result<(), 
         .apply_decoding_form(prompt.1.value(), &knobs)
 }
 
-fn overlay_style_label(style: &str) -> &'static str {
+pub(super) fn overlay_style_label(style: &str) -> &'static str {
     overlay::STYLE_VALUES
         .iter()
         .position(|value| *value == style)

@@ -30,12 +30,12 @@
 //! Besides the state cues above, the overlay can paint **live text**: when a
 //! streaming model is active, the coordinator forwards its partial transcript
 //! through [`OverlayHandle::try_send_live_text`] and the overlay draws it as a
-//! wide dark pill with the frozen prefix bright, the still-revisable tail
-//! dimmed, and a caret. Those partials adopt the `live-text` caption
-//! presentation for the streaming duration (see [`Style::LiveText`]) even when
-//! another style is configured, so words appear as they are spoken without a
-//! style change. That text is preview only: it is never typed, persisted, or
-//! mirrored to the fallback chain.
+//! dark glass card with a leading phase chip, the frozen prefix bright, the
+//! still-revisable tail dimmed, and a caret. Those partials adopt the
+//! `live-text` caption presentation for the streaming duration (see
+//! [`Style::LiveText`]) even when another style is configured, so words appear
+//! as they are spoken without a style change. That text is preview only: it is
+//! never typed, persisted, or mirrored to the fallback chain.
 
 use crate::config::OverlayConfig;
 use crate::feedback::FeedbackEvent;
@@ -78,15 +78,6 @@ const BLOB_SURFACE: u32 = 96;
 /// Unlike the small badge styles it has no glow to pad for, so the surface is
 /// exactly the bar itself.
 const LONG_PILL_SURFACE: (u32, u32) = (384, 48);
-/// `LONG_PILL_SURFACE`'s dark neutral fill (the reference bar's #323232),
-/// independent of the phase colour - only the status button and the trace
-/// carry the state.
-const LONG_PILL_BACKGROUND: (u8, u8, u8) = (0x32, 0x32, 0x32);
-/// How opaque the long pill's dark bar fill is: just under solid, so the bar
-/// reads as faintly translucent rather than a hard block while the trace and
-/// button stay fully opaque on top of it (the captain's ask - a tiny bit of
-/// opacity on the background only).
-const LONG_PILL_BACKGROUND_OPACITY: f32 = 0.85;
 /// The long pill's squiggle trace colour: the reference's light neutral grey.
 const LONG_PILL_LINE: (u8, u8, u8) = (0xC8, 0xC8, 0xC8);
 /// The `HalfCircle` style's surface: twice the badge width by the badge height,
@@ -178,18 +169,34 @@ const GLYPH_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
 /// padding (the reviewed mockup's 720x96). It is the largest fixed style, so it
 /// is anchored at the configured `overlay.position` like the badge styles.
 const LIVE_TEXT_SURFACE: (u32, u32) = (720, 96);
-/// Inset of the pill's dark background from the surface edge, leaving room for
+/// The `LiveTextBox` style's surface: a taller card that wraps several lines
+/// and scrolls internally, for long passages.
+const LIVE_TEXT_BOX_SURFACE: (u32, u32) = (400, 320);
+/// Inset of the card's dark background from the surface edge, leaving room for
 /// the capsule's anti-aliased ends to fade out before the surface boundary.
 const LIVE_TEXT_INSET: f32 = 4.0;
-/// Side padding between the pill's edge and the first/last glyph.
-const LIVE_TEXT_PADDING: f32 = 30.0;
-/// The pill's dark neutral fill, matching the long pill's #323232 family but a
-/// touch darker so near-white text reads with strong contrast.
-const LIVE_TEXT_BACKGROUND: (u8, u8, u8) = (0x11, 0x11, 0x11);
-const LIVE_TEXT_BACKGROUND_OPACITY: f32 = 0.88;
+/// Left/right padding between the card edge and the contents.
+const LIVE_TEXT_PADDING: f32 = 26.0;
+/// The leading phase chip's radius and the gap between it and the text.
+const LIVE_TEXT_CHIP_RADIUS: f32 = 21.0;
+const LIVE_TEXT_CHIP_GAP: f32 = 15.0;
+/// The card's dark glass fill: a vertical gradient from a lifted top to a
+/// near-black bottom, under a just-under-solid opacity so it reads as glass.
+const LIVE_TEXT_BACKGROUND_TOP: (u8, u8, u8) = (0x26, 0x26, 0x2B);
+const LIVE_TEXT_BACKGROUND_BOTTOM: (u8, u8, u8) = (0x0F, 0x0F, 0x12);
+const LIVE_TEXT_BACKGROUND_OPACITY: f32 = 0.92;
 /// Frozen prefix colour (near-white) and the dimmer, still-revisable tail.
-const LIVE_TEXT_COMMITTED: (u8, u8, u8) = (0xF2, 0xF2, 0xF2);
-const LIVE_TEXT_TENTATIVE: (u8, u8, u8) = (0x8A, 0x8A, 0x8A);
+const LIVE_TEXT_COMMITTED: (u8, u8, u8) = (0xF4, 0xF4, 0xF5);
+const LIVE_TEXT_TENTATIVE: (u8, u8, u8) = (0x74, 0x74, 0x78);
+/// The soft caret after the newest word.
+const LIVE_TEXT_CARET: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
+/// The caret's width and height (a rounded bar sitting on the text baseline).
+const LIVE_TEXT_CARET_WIDTH: f32 = 3.0;
+const LIVE_TEXT_CARET_HEIGHT: f32 = 26.0;
+/// The listening pad's three breathing dots: radius, gap, and the pad's
+/// minimum card width so the empty caption never collapses to a stub.
+const LIVE_TEXT_LISTEN_RADIUS: f32 = 6.0;
+const LIVE_TEXT_LISTEN_GAP: f32 = 11.0;
 
 /// One live-text snapshot: the frozen `committed` prefix and the still-revisable
 /// `tentative` tail a streaming model reports while the user speaks. Produced by
@@ -230,16 +237,32 @@ impl OverlayHandle {
     /// finished), so the caller can fall back to the KDE OSD / notification
     /// path.
     pub fn try_send(&self, event: FeedbackEvent, config: &OverlayConfig) -> bool {
-        let config = config.clone();
+        self.try_send_command(Command {
+            event,
+            live_text: None,
+            streaming: false,
+            config: config.clone(),
+        })
+    }
+
+    /// Shows the recording-phase start for a streaming-capable model. Identical
+    /// to [`try_send`](Self::try_send) with [`FeedbackEvent::Recording`] except
+    /// that the overlay adopts the caption presentation immediately (see
+    /// [`Command::streaming`]), so the waveform never appears for a model whose
+    /// words will stream.
+    pub fn try_send_recording(&self, streaming: bool, config: &OverlayConfig) -> bool {
+        self.try_send_command(Command {
+            event: FeedbackEvent::Recording,
+            live_text: None,
+            streaming,
+            config: config.clone(),
+        })
+    }
+
+    fn try_send_command(&self, command: Command) -> bool {
         let sender = self.sender.get_or_init(spawn_actor);
         match sender {
-            Some(tx) => tx
-                .send(Command {
-                    event,
-                    live_text: None,
-                    config,
-                })
-                .is_ok(),
+            Some(tx) => tx.send(command).is_ok(),
             None => false,
         }
     }
@@ -252,18 +275,12 @@ impl OverlayHandle {
     /// snapshot is active the overlay paints the caption presentation for the
     /// streaming duration, whatever `overlay.style` says.
     pub fn try_send_live_text(&self, live_text: LiveText, config: &OverlayConfig) -> bool {
-        let config = config.clone();
-        let sender = self.sender.get_or_init(spawn_actor);
-        match sender {
-            Some(tx) => tx
-                .send(Command {
-                    event: FeedbackEvent::Recording,
-                    live_text: Some(live_text),
-                    config,
-                })
-                .is_ok(),
-            None => false,
-        }
+        self.try_send_command(Command {
+            event: FeedbackEvent::Recording,
+            live_text: Some(live_text),
+            streaming: false,
+            config: config.clone(),
+        })
     }
 
     /// Whether the actor has already been probed (whether or not it turned out
@@ -287,6 +304,13 @@ struct Command {
     /// `FeedbackEvent::Recording`) is only a placeholder so the actor's
     /// phase/style/config handling is shared.
     live_text: Option<LiveText>,
+    /// Whether the recording this command starts belongs to a streaming-capable
+    /// model. A streaming recording adopts the caption presentation from the
+    /// start (its empty state is the listening pad), so the waveform never
+    /// flashes before the first word; a non-streaming recording keeps the
+    /// configured style and its waveform. This is what makes the live text and
+    /// the waveform mutually exclusive by model capability, not by accident.
+    streaming: bool,
     config: OverlayConfig,
 }
 
@@ -435,6 +459,7 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         timer_generation: 0,
         levels: LevelHistory::new(),
         live_text: None,
+        streaming: false,
         loop_signal: event_loop.get_signal(),
     };
 
@@ -529,10 +554,30 @@ struct State {
     levels: LevelHistory,
     /// The most recent live-text snapshot from a streaming model. While this is
     /// `Some` the overlay adopts the `live-text` presentation; it is cleared by
-    /// any non-`Recording` event and by the start-of-recording event, so a
-    /// finished dictation never leaves stale partial words on screen.
+    /// the start of a fresh recording and kept through the terminal phases so
+    /// the caption can hold the last words as a status cue, so a finished
+    /// dictation never leaves stale partial words on screen for the next one.
     live_text: Option<LiveText>,
+    /// Whether the current recording belongs to a streaming-capable model (see
+    /// [`Command::streaming`]). While true the overlay shows the caption
+    /// presentation for the whole recording, so a streaming model never flashes
+    /// the waveform before its first word; a non-streaming recording leaves
+    /// this false and keeps the configured style and its waveform.
+    streaming: bool,
     loop_signal: LoopSignal,
+}
+
+/// The recording's streaming capability after applying a command. A paint-only
+/// live-text snapshot only repaints the words, so it must leave the capability
+/// untouched: otherwise a streaming recording would read as non-streaming from
+/// its first partial, and a momentarily-empty snapshot would fall back to the
+/// waveform - the two presentations showing at once.
+fn streaming_after_command(current: bool, paint_only: bool, command_streaming: bool) -> bool {
+    if paint_only {
+        current
+    } else {
+        command_streaming
+    }
 }
 
 impl State {
@@ -555,10 +600,13 @@ impl State {
             self.phase = Some(phase);
             self.deadline = phase.dwell().map(|dwell| Instant::now() + dwell);
             self.anim_start = Instant::now();
-            // Every non-live-text command clears the snapshot, so partials are
-            // gone the moment the dictation leaves Recording and a fresh
-            // recording starts blank.
-            self.live_text = command.live_text;
+            // The live-text snapshot is kept through the terminal phases so the
+            // caption can hold the last words as a status cue; it is cleared
+            // only when a fresh recording starts, so stale words never leak
+            // into the next dictation.
+            if phase == Phase::Recording {
+                self.live_text = None;
+            }
             if phase == Phase::Recording && previous_phase != Some(Phase::Recording) {
                 // A new dictation starts a fresh waveform; the previous
                 // recording's voice must never scroll into the new one.
@@ -566,7 +614,12 @@ impl State {
             }
         }
         self.live_waveform = command.config.live_waveform;
-        self.style = resolved_style(&command.config.style, self.live_text.is_some());
+        self.streaming = streaming_after_command(self.streaming, paint_only, command.streaming);
+        self.style = resolved_style(
+            &command.config.style,
+            self.live_text.is_some(),
+            self.streaming,
+        );
         self.position = command.config.position.clone();
         self.target = target_for(&command.config.monitor);
 
@@ -797,6 +850,7 @@ impl State {
             OverlayFrame {
                 levels: &self.levels,
                 live_text: self.live_text.as_ref(),
+                streaming: self.streaming,
             },
         );
 
@@ -829,10 +883,12 @@ pub(crate) const POSITION_VALUES: [&str; 7] = [
 /// corners, `HalfCircle` as a captain-requested glowing, pulsing
 /// semicircle resting on the top edge, and `LongPill` as a captain-requested
 /// wide dark bar with a squiggly live waveform and a round status button,
-/// separate from the small `Pill`. `LiveText` is the streaming caption: a wide
-/// dark pill that shows the live partial words from a streaming model (see
-/// [`LiveText`]), falling back to the live waveform before the first words land.
-pub(crate) const STYLE_VALUES: [&str; 8] = [
+/// separately from the small `Pill`. The `live-text`, `live-text-minimal`, and
+/// `live-text-box` values are the streaming caption family: a dark glass card
+/// showing the live partial words from a streaming model (see [`LiveText`]),
+/// with the listening pad before the first word for a streaming recording and
+/// the waveform fallback for a non-streaming one.
+pub(crate) const STYLE_VALUES: [&str; 10] = [
     "badge",
     "minimal",
     "pill",
@@ -841,10 +897,12 @@ pub(crate) const STYLE_VALUES: [&str; 8] = [
     "half-circle",
     "long-pill",
     "live-text",
+    "live-text-minimal",
+    "live-text-box",
 ];
 
 /// Display labels matching `STYLE_VALUES` position for position.
-pub(crate) const STYLE_LABELS: [&str; 8] = [
+pub(crate) const STYLE_LABELS: [&str; 10] = [
     "Badge",
     "Minimal",
     "Pill",
@@ -852,7 +910,9 @@ pub(crate) const STYLE_LABELS: [&str; 8] = [
     "Border",
     "Half Circle",
     "Long Pill",
-    "Live Text",
+    "Live Text (glass)",
+    "Live Text (minimal)",
+    "Live Text (box)",
 ];
 
 /// Display labels for `OverlayConfig::live_waveform`: the plain pulsing dot
@@ -1504,26 +1564,53 @@ pub(crate) enum Style {
     Border,
     HalfCircle,
     LongPill,
-    /// The streaming caption pill: a wide dark card holding the live partial
-    /// transcript from a streaming model, or the live waveform until words
-    /// arrive. This is the only style that paints [`LiveText`], and it is also
-    /// adopted automatically for the streaming duration while a model's live
-    /// text is active, even when another style is configured.
+    /// The streaming caption, glass variant (the default): a content-sized dark
+    /// glass card holding a leading phase chip and one line of the live partial
+    /// transcript, or the listening pad until words arrive. This is the
+    /// presentation a streaming model's partials adopt automatically; a
+    /// non-streaming recording of this style falls back to the waveform.
     LiveText,
+    /// The streaming caption, minimal variant: the same single-line card with a
+    /// single leading phase dot instead of the full chip.
+    LiveTextMinimal,
+    /// The streaming caption, box variant: a taller wrapped card that scrolls
+    /// internally, for long passages.
+    LiveTextBox,
 }
 
-/// The style the overlay actually paints: a streaming model's live text adopts
-/// the caption presentation for as long as its partials are arriving, so the
-/// words appear as they are spoken without the user also changing
-/// `overlay.style`; once the snapshot clears the configured style returns. The
-/// explicit `live-text` style is honoured whether or not the model streams
-/// (showing its live-waveform fallback before the first words).
-fn resolved_style(configured: &str, live_text_active: bool) -> Style {
-    if live_text_active {
-        Style::LiveText
+/// The style the overlay actually paints. A streaming model's live text adopts
+/// the caption presentation for as long as its partials are arriving (and from
+/// the start of a streaming recording, before the first word), so the words
+/// appear as they are spoken without the user also changing `overlay.style`;
+/// once the snapshot clears the configured style returns. When the user has
+/// configured a specific caption variant, that variant is used for the adopted
+/// caption; otherwise the glass variant is.
+fn resolved_style(configured: &str, caption_active: bool, streaming: bool) -> Style {
+    let base = style_for(configured);
+    if caption_active || streaming {
+        caption_variant(base)
     } else {
-        style_for(configured)
+        base
     }
+}
+
+/// The caption variant to paint when the caption is adopted (`streaming` or a
+/// live partial): the configured caption variant if the user picked one, else
+/// the glass default.
+fn caption_variant(configured: Style) -> Style {
+    match configured {
+        Style::LiveTextMinimal => Style::LiveTextMinimal,
+        Style::LiveTextBox => Style::LiveTextBox,
+        _ => Style::LiveText,
+    }
+}
+
+/// Whether `style` is one of the `live-text` caption variants.
+fn is_caption_style(style: Style) -> bool {
+    matches!(
+        style,
+        Style::LiveText | Style::LiveTextMinimal | Style::LiveTextBox
+    )
 }
 
 /// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
@@ -1537,6 +1624,8 @@ fn style_for(name: &str) -> Style {
         "half-circle" => Style::HalfCircle,
         "long-pill" => Style::LongPill,
         "live-text" => Style::LiveText,
+        "live-text-minimal" => Style::LiveTextMinimal,
+        "live-text-box" => Style::LiveTextBox,
         _ => Style::Badge,
     }
 }
@@ -1574,7 +1663,8 @@ fn surface_size_for(style: Style) -> (u32, u32) {
         Style::Border => BORDER_PREVIEW,
         Style::HalfCircle => HALF_CIRCLE_SURFACE,
         Style::LongPill => LONG_PILL_SURFACE,
-        Style::LiveText => LIVE_TEXT_SURFACE,
+        Style::LiveText | Style::LiveTextMinimal => LIVE_TEXT_SURFACE,
+        Style::LiveTextBox => LIVE_TEXT_BOX_SURFACE,
     }
 }
 
@@ -1716,6 +1806,10 @@ fn phase_color(phase: Phase) -> (u8, u8, u8) {
 struct OverlayFrame<'a> {
     levels: &'a LevelHistory,
     live_text: Option<&'a LiveText>,
+    /// Whether the current recording belongs to a streaming-capable model (see
+    /// [`State::streaming`]): the caption's empty state is the listening pad
+    /// when true, and the waveform fallback when false.
+    streaming: bool,
 }
 
 fn paint(
@@ -1727,7 +1821,11 @@ fn paint(
     style: Style,
     frame: OverlayFrame<'_>,
 ) {
-    let OverlayFrame { levels, live_text } = frame;
+    let OverlayFrame {
+        levels,
+        live_text,
+        streaming,
+    } = frame;
     canvas.pixels.fill(0);
     let Some(phase) = phase else { return };
     match style {
@@ -1740,7 +1838,16 @@ fn paint(
         Style::Border => paint_border(canvas, phase, t, live_waveform, levels),
         Style::HalfCircle => paint_half_circle(canvas, phase, t, live_waveform, levels),
         Style::LongPill => paint_long_pill(canvas, phase, t, levels),
-        Style::LiveText => paint_live_text(canvas, phase, t, live_waveform, levels, live_text),
+        Style::LiveText | Style::LiveTextMinimal | Style::LiveTextBox => paint_live_text(
+            canvas,
+            phase,
+            t,
+            live_waveform,
+            levels,
+            live_text,
+            style,
+            streaming,
+        ),
     }
 }
 
@@ -2068,25 +2175,30 @@ fn paint_pill(
 /// phase status button at its right end - the `LongPill` style, built to the
 /// captain's reference (see the design record at
 /// `data/tt-pill-overlay-live-microphone-waveform-re-23/design-brief.md`): the
-/// bar is a neutral #323232 capsule, only faintly translucent
-/// (`LONG_PILL_BACKGROUND_OPACITY`); the phase colour lives in the button, not
-/// the bar. The trace is a smooth light-grey
-/// line that rolls with the live `LevelHistory`, and the button is the phase
-/// colour made vivid with `bolden` (red with a white dot while recording, green
-/// with a checkmark after success, and the matching glyph for every other
-/// phase). The trace ignores `live_waveform`: it is this style's whole point.
+/// bar is a dark glass capsule sharing the caption card's vertical gradient and
+/// faint translucency; the phase colour lives in the button, not the bar. The
+/// trace is a smooth light-grey line that rolls with the live `LevelHistory`,
+/// and the button is the phase colour made vivid with `bolden` (red with a
+/// white dot while recording, green with a checkmark after success, and the
+/// matching glyph for every other phase). The trace ignores `live_waveform`: it
+/// is this style's whole point.
 fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHistory) {
     let width = canvas.width as f32;
     let height = canvas.height as f32;
     let cy = height / 2.0;
-    fill_capsule(
+    // The dark glass bar, refreshed to match the caption card: a vertical
+    // gradient capsule (the captain asked the long pill to share the caption's
+    // finish while keeping its waveform).
+    fill_rounded_rect(
         canvas,
         width / 2.0,
         cy,
         width / 2.0,
         height / 2.0,
-        LONG_PILL_BACKGROUND,
-        LONG_PILL_BACKGROUND_OPACITY,
+        height / 2.0,
+        LIVE_TEXT_BACKGROUND_TOP,
+        LIVE_TEXT_BACKGROUND_BOTTOM,
+        LIVE_TEXT_BACKGROUND_OPACITY,
     );
 
     // Button geometry from the reference: a circle 0.752 of the bar height,
@@ -2193,14 +2305,17 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
     }
 }
 
-/// The `LiveText` streaming caption: a wide dark pill holding the live partial
-/// transcript, or the live waveform until the first words arrive. The frozen
-/// `committed` prefix is near-white and the still-revisable `tentative` tail is
-/// dimmed, with a thin phase-coloured caret after the newest word; the
-/// newest-words window lives in [`text::caption_lines`]. Partial text is painted
-/// here and nowhere else - it is never typed, persisted, or shown in the
-/// fallback notification chain. The overlay adopts this presentation whenever a
-/// streaming model's partials are active (see [`resolved_style`]).
+/// The `live-text` streaming caption. Partial text is painted here and nowhere
+/// else - it is never typed, persisted, or shown in the fallback notification
+/// chain. The card is a dark glass panel with a leading phase chip (or a bare
+/// dot in the minimal variant), one line of the frozen `committed` prefix in
+/// near-white and the still-revisable `tentative` tail dimmed, and a soft caret
+/// after the newest word. `style` selects the variant (glass, minimal, or the
+/// scrolling box); `streaming` decides the empty state - the listening pad for
+/// a streaming recording (words will come) and the waveform fallback for a
+/// non-streaming recording of a caption style - so the live text and the
+/// waveform are never drawn together.
+#[allow(clippy::too_many_arguments)]
 fn paint_live_text(
     canvas: &mut Canvas,
     phase: Phase,
@@ -2208,97 +2323,274 @@ fn paint_live_text(
     live_waveform: bool,
     levels: &LevelHistory,
     live_text: Option<&LiveText>,
+    style: Style,
+    streaming: bool,
 ) {
     let width = canvas.width as f32;
     let height = canvas.height as f32;
     let cx = width / 2.0;
     let cy = height / 2.0;
+    let boxed = style == Style::LiveTextBox;
+    let minimal = style == Style::LiveTextMinimal;
     let half_width = width / 2.0 - LIVE_TEXT_INSET;
     let half_height = height / 2.0 - LIVE_TEXT_INSET;
-    fill_capsule(
+    let radius = if boxed { 26.0 } else { half_height };
+    fill_rounded_rect(
         canvas,
         cx,
         cy,
         half_width,
         half_height,
-        LIVE_TEXT_BACKGROUND,
+        radius,
+        LIVE_TEXT_BACKGROUND_TOP,
+        LIVE_TEXT_BACKGROUND_BOTTOM,
         LIVE_TEXT_BACKGROUND_OPACITY,
     );
 
-    let text_x = LIVE_TEXT_PADDING;
-    // The status dot at the right end always carries the phase colour, so the
-    // pill still reads recording/transcribing/success even before the first
-    // word lands; the text keeps clear of it.
-    let dot_cx = width - 34.0;
-    let dot_radius = 9.0;
-    let max_width = (dot_cx - dot_radius - text_x - 12.0).max(40.0);
-    let y_top = (height - text::CAPTION_LINE_HEIGHT * text::CAPTION_MAX_LINES as f32) / 2.0;
-    fill_circle(canvas, dot_cx, cy, dot_radius, bolden(phase_color(phase)));
+    // The vertical centre of the first text line (the box stacks from the top,
+    // the single-line cards centre on the surface).
+    let line_center = if boxed {
+        LIVE_TEXT_PADDING + text::CAPTION_LINE_HEIGHT / 2.0
+    } else {
+        cy
+    };
+    let y_top = line_center - text::CAPTION_FONT_SIZE * 0.62;
+    // The box stacks its content below the leading chip, so every text row
+    // (captured words and the no-words status message alike) starts here.
+    let boxed_text_top = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 12.0;
 
-    let Some(live_text) = live_text.filter(|text| !text.is_empty()) else {
-        // No words yet (or none captured): keep the pill alive with the live
-        // microphone glyph so it reads as "listening", not as an empty box.
-        if live_waveform {
-            paint_live_waveform(
-                canvas,
-                cx,
-                cy,
-                max_width,
-                height * 0.45,
-                LONG_PILL_LINE,
-                levels,
-            );
+    let right = width - LIVE_TEXT_PADDING;
+    let captured = live_text.filter(|text| !text.is_empty());
+
+    // The phase cue: a round chip (glass/box) or a bare dot (minimal). The chip
+    // is always painted so the card reads its phase even before the first word;
+    // the minimal variant's bare dot is skipped in the recording-empty state,
+    // where the listening pad is already the cue and a second dot would just
+    // read as a stray extra dot.
+    let text_x = if boxed {
+        let chip_cx = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS;
+        let chip_cy = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS;
+        draw_caption_chip(canvas, chip_cx, chip_cy, LIVE_TEXT_CHIP_RADIUS, phase, t);
+        LIVE_TEXT_PADDING
+    } else if minimal {
+        if captured.is_some() || !matches!(phase, Phase::Recording) {
+            let dot_cx = LIVE_TEXT_PADDING + 7.0;
+            fill_circle(canvas, dot_cx, cy, 7.0, bolden(phase_color(phase)));
+            dot_cx + 16.0
         } else {
-            // The simple-pulse treatment, matching the other styles: a dot that
-            // grows with the live level.
-            let lf = recording_level(levels);
-            let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
-            fill_circle(
-                canvas,
-                cx,
-                cy,
-                height * (0.09 + 0.08 * lf * (0.8 + 0.2 * pulse)),
-                LONG_PILL_LINE,
-            );
+            LIVE_TEXT_PADDING + 6.0
         }
-        return;
+    } else {
+        let chip_cx = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS;
+        draw_caption_chip(canvas, chip_cx, cy, LIVE_TEXT_CHIP_RADIUS, phase, t);
+        chip_cx + LIVE_TEXT_CHIP_RADIUS + LIVE_TEXT_CHIP_GAP
     };
 
-    let lines = text::caption_lines(&live_text.committed, &live_text.tentative, max_width);
-    text::draw_caption(
-        canvas,
-        text_x,
-        y_top,
-        max_width,
-        live_text,
-        text::CaptionColors {
+    if let Some(live_text) = captured {
+        let colors = text::CaptionColors {
             committed: LIVE_TEXT_COMMITTED,
             tentative: LIVE_TEXT_TENTATIVE,
             alpha: 1.0,
-        },
-    );
+        };
+        if boxed {
+            let max_width = (right - LIVE_TEXT_PADDING).max(40.0);
+            text::draw_caption(
+                canvas,
+                LIVE_TEXT_PADDING,
+                boxed_text_top,
+                max_width,
+                live_text,
+                colors,
+            );
+            return;
+        }
+        let line = text::caption_line(&live_text.committed, &live_text.tentative);
+        let line_w = text::line_width(&line);
+        let available = (right - text_x).max(40.0);
+        // Single line: when the words overrun, the newest stay in frame and the
+        // old dissolve off the left as the line slides left (the marquee).
+        let (x, clip) = if line_w <= available {
+            (text_x, None)
+        } else {
+            (right - line_w, Some(text_x))
+        };
+        text::draw_line(canvas, x, y_top, &line, &colors, clip);
+        // A soft caret after the newest word, only while words are arriving.
+        if matches!(phase, Phase::Recording | Phase::Transcribing) {
+            let caret_x = (x + line_w + 4.0).min(right - LIVE_TEXT_CARET_WIDTH);
+            if caret_x >= text_x {
+                let pulse = 0.5 + 0.5 * (0.5 + 0.5 * (t * std::f32::consts::TAU).sin());
+                let color = mix_color(LIVE_TEXT_BACKGROUND_BOTTOM, LIVE_TEXT_CARET, pulse);
+                fill_centered_bar(
+                    canvas,
+                    caret_x,
+                    line_center + 2.0,
+                    LIVE_TEXT_CARET_WIDTH,
+                    LIVE_TEXT_CARET_HEIGHT,
+                    color,
+                );
+            }
+        }
+        return;
+    }
 
-    // A thin caret after the newest line, marking where the tentative tail ends.
-    if let Some(last) = lines.last() {
-        let caret_x = (text_x + text::width_of(&last.text())).min(text_x + max_width);
-        let caret_center_y = y_top
-            + (lines.len() as f32 - 1.0) * text::CAPTION_LINE_HEIGHT
-            + text::CAPTION_LINE_HEIGHT / 2.0;
-        // A gentle pulse keeps the caret visibly alive without competing with
-        // the words; the phase colour ties it to the recording state.
-        let opacity = 0.55 + 0.45 * (0.5 + 0.5 * (t * std::f32::consts::TAU).sin());
-        fill_centered_bar(
-            canvas,
-            caret_x + 3.0,
-            caret_center_y,
-            3.0,
-            text::CAPTION_FONT_SIZE * 0.9,
-            mix_color(
-                LIVE_TEXT_BACKGROUND,
-                phase_color(phase),
-                opacity.clamp(0.0, 1.0),
-            ),
-        );
+    // No words yet.
+    match phase {
+        Phase::Recording if streaming => {
+            // The listening pad: streaming is live, waiting for the first word.
+            let pad_x = if boxed {
+                LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 22.0
+            } else {
+                text_x + 6.0
+            };
+            paint_listening_pad(canvas, pad_x, cy, t, bolden(phase_color(phase)));
+        }
+        Phase::Recording => {
+            // A caption style driven by a non-streaming model: the waveform
+            // fallback, so the caption never shows the bars for a model whose
+            // words will stream.
+            let left = if boxed {
+                LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 22.0
+            } else {
+                text_x + 8.0
+            };
+            let available = (right - left).max(40.0);
+            let center = left + available / 2.0;
+            if live_waveform {
+                paint_live_waveform(
+                    canvas,
+                    center,
+                    cy,
+                    available,
+                    height * 0.45,
+                    LONG_PILL_LINE,
+                    levels,
+                );
+            } else {
+                let lf = recording_level(levels);
+                let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
+                fill_circle(
+                    canvas,
+                    center,
+                    cy,
+                    height * (0.10 + 0.09 * lf * (0.8 + 0.2 * pulse)),
+                    LONG_PILL_LINE,
+                );
+            }
+        }
+        _ => {
+            // A terminal phase with no captured words: a short status message.
+            if let Some(message) = phase_message(phase) {
+                let colors = text::CaptionColors {
+                    committed: LIVE_TEXT_COMMITTED,
+                    tentative: LIVE_TEXT_COMMITTED,
+                    alpha: 0.9,
+                };
+                let line = text::caption_line(message, "");
+                let message_y = if boxed { boxed_text_top } else { y_top };
+                text::draw_line(canvas, text_x, message_y, &line, &colors, None);
+            }
+        }
+    }
+}
+
+/// The round phase chip at the caption's leading edge: a saturated phase disc
+/// with the same white state glyph the other styles use, so recording,
+/// transcribing, success, no-speech, clipboard, cancellation, and error all read
+/// from the chip.
+fn draw_caption_chip(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, phase: Phase, t: f32) {
+    fill_circle(canvas, cx, cy, radius, bolden(phase_color(phase)));
+    let glyph = GLYPH_COLOR;
+    match phase {
+        Phase::Recording => fill_circle(canvas, cx, cy, radius * 0.36, glyph),
+        Phase::Transcribing => {
+            let angle = t * std::f32::consts::TAU;
+            stroke_arc(
+                canvas,
+                cx,
+                cy,
+                radius * 0.55,
+                radius * 0.22,
+                (angle, std::f32::consts::PI * 1.2),
+                glyph,
+            );
+        }
+        Phase::Success | Phase::SubmitFailed => {
+            glyph_checkmark(canvas, cx, cy, radius * 0.5, radius * 0.2, glyph)
+        }
+        Phase::NoSpeech => glyph_muted_mic(canvas, cx, cy, radius * 0.5, radius * 0.16, glyph),
+        Phase::Copied | Phase::ClipboardFallback => {
+            glyph_clipboard(canvas, cx, cy, radius * 0.48, radius * 0.16, glyph)
+        }
+        Phase::Cancelled => fill_square(canvas, cx, cy, radius * 0.3, glyph),
+        Phase::Error => glyph_cross(canvas, cx, cy, radius * 0.5, radius * 0.2, glyph),
+    }
+}
+
+/// Three phase-coloured dots breathing in sequence - the caption's empty-state
+/// "listening" cue for a streaming recording, in place of the waveform.
+fn paint_listening_pad(canvas: &mut Canvas, x: f32, cy: f32, t: f32, color: (u8, u8, u8)) {
+    let pitch = LIVE_TEXT_LISTEN_RADIUS * 2.0 + LIVE_TEXT_LISTEN_GAP;
+    for index in 0..3 {
+        let wave = 0.5 + 0.5 * (t * std::f32::consts::TAU - index as f32 * 0.9).sin();
+        let radius = LIVE_TEXT_LISTEN_RADIUS * (0.8 + 0.3 * wave);
+        let cx = x + LIVE_TEXT_LISTEN_RADIUS + index as f32 * pitch;
+        fill_circle(canvas, cx, cy, radius, color);
+    }
+}
+
+/// A short status label for a terminal phase shown by a caption style that has
+/// no captured words (for example the configured `live-text` style driven by a
+/// non-streaming model).
+fn phase_message(phase: Phase) -> Option<&'static str> {
+    match phase {
+        Phase::Success => Some("Ready"),
+        Phase::NoSpeech => Some("No speech detected"),
+        Phase::Copied => Some("Copied to clipboard"),
+        Phase::ClipboardFallback => Some("Typing failed - on clipboard"),
+        Phase::SubmitFailed => Some("Text entered, but Enter failed"),
+        Phase::Cancelled => Some("Cancelled"),
+        Phase::Error => Some("Transcription failed"),
+        _ => None,
+    }
+}
+
+/// Fills a rounded rectangle (a stadium when `radius` is its half-height) with
+/// a vertical gradient from `top` to `bottom`, anti-aliased at the edge and
+/// scaled by `opacity`. Used for the caption's dark glass cards and the
+/// refreshed long pill.
+#[allow(clippy::too_many_arguments)]
+fn fill_rounded_rect(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    half_width: f32,
+    half_height: f32,
+    radius: f32,
+    top: (u8, u8, u8),
+    bottom: (u8, u8, u8),
+    opacity: f32,
+) {
+    let radius = radius.min(half_width).min(half_height);
+    let min_x = (cx - half_width - 1.0).floor().max(0.0) as i32;
+    let max_x = (cx + half_width + 1.0).ceil().min(canvas.width as f32) as i32;
+    let min_y = (cy - half_height - 1.0).floor().max(0.0) as i32;
+    let max_y = (cy + half_height + 1.0).ceil().min(canvas.height as f32) as i32;
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let px = x as f32 + 0.5 - cx;
+            let py = y as f32 + 0.5 - cy;
+            let qx = px.abs() - (half_width - radius);
+            let qy = py.abs() - (half_height - radius);
+            let outside =
+                (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - radius;
+            let coverage = (0.5 - outside).clamp(0.0, 1.0) * opacity;
+            if coverage <= 0.0 {
+                continue;
+            }
+            let gradient = ((py + half_height) / (2.0 * half_height)).clamp(0.0, 1.0);
+            canvas.blend(x, y, mix_color(top, bottom, gradient), coverage);
+        }
     }
 }
 
@@ -2634,7 +2926,7 @@ fn paint_half_circle(
 /// unpremultiplies, since PNG alpha is straight). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`/
-/// `live-text`;
+/// `live-text`/`live-text-minimal`/`live-text-box`;
 /// `recording`/`transcribing`/`success`/`no-speech`/`copied`/
 /// `clipboard-fallback`/`submit-failed`/`cancelled`/`error`), and
 /// `None` clears to fully transparent. `levels` is the live microphone history
@@ -2686,23 +2978,28 @@ pub fn render_frame_pixels(
             OverlayFrame {
                 levels: &history,
                 live_text: None,
+                // Preview a caption style as a streaming recording, so its empty
+                // state is the listening pad rather than the waveform fallback.
+                streaming: is_caption_style(style),
             },
         );
     }
     (width, height, pixels)
 }
 
-/// Offline renderer for the `live-text` streaming caption: paints the caption
-/// pill with `committed`/`tentative` text (or the live waveform when both are
-/// empty) into a pixel buffer, for the design-preview example and the headless
-/// layout tests. `levels` is the live microphone history the waveform fallback
-/// reacts to.
+/// Offline renderer for a `live-text` caption variant: paints the card with
+/// `committed`/`tentative` text (or its listening pad when both are empty) into
+/// a pixel buffer, for the design-preview example and the headless layout
+/// tests. `style` names any caption variant (`live-text`, `live-text-minimal`,
+/// `live-text-box`); an unknown name falls back to the glass variant. `levels`
+/// is the live microphone history the waveform fallback reacts to.
 pub fn render_live_text_pixels(
+    style: &str,
     committed: &str,
     tentative: &str,
     levels: &[f32],
 ) -> (u32, u32, Vec<u8>) {
-    let style = Style::LiveText;
+    let style = caption_variant(style_for(style));
     let mut history = LevelHistory::new();
     for level in levels {
         history.push(*level);
@@ -2729,6 +3026,7 @@ pub fn render_live_text_pixels(
             OverlayFrame {
                 levels: &history,
                 live_text: Some(&live_text),
+                streaming: true,
             },
         );
     }
@@ -2994,7 +3292,7 @@ mod tests {
         }
     }
 
-    const ALL_STYLES: [Style; 8] = [
+    const ALL_STYLES: [Style; 10] = [
         Style::Badge,
         Style::Minimal,
         Style::Pill,
@@ -3003,6 +3301,8 @@ mod tests {
         Style::HalfCircle,
         Style::LongPill,
         Style::LiveText,
+        Style::LiveTextMinimal,
+        Style::LiveTextBox,
     ];
 
     /// A quiet room: a faint steady hiss far below speech, which every style
@@ -3051,6 +3351,20 @@ mod tests {
         style: Style,
         levels: &LevelHistory,
     ) -> Vec<u8> {
+        paint_to_pixels_streaming(phase, t, breath, live_waveform, style, levels, false, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_to_pixels_streaming(
+        phase: Option<Phase>,
+        t: f32,
+        breath: f32,
+        live_waveform: bool,
+        style: Style,
+        levels: &LevelHistory,
+        streaming: bool,
+        live_text: Option<&LiveText>,
+    ) -> Vec<u8> {
         let (width, height) = surface_size_for(style);
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         {
@@ -3068,23 +3382,39 @@ mod tests {
                 style,
                 OverlayFrame {
                     levels,
-                    live_text: None,
+                    live_text,
+                    streaming,
                 },
             );
         }
         pixels
     }
 
-    /// The long pill's bar as it lands in the premultiplied buffer: its
-    /// `LONG_PILL_BACKGROUND` colour scaled by `LONG_PILL_BACKGROUND_OPACITY`
+    /// The long pill's bar as it lands in the premultiplied buffer at row `y`:
+    /// its vertical-gradient colour scaled by `LIVE_TEXT_BACKGROUND_OPACITY`
     /// and stored at that same opacity, blended source-over onto the
-    /// transparent surface (see `Canvas::blend`). Its three colour channels are
-    /// equal, so the BGRA bytes differ only in alpha from a solid fill.
-    fn long_pill_bar_pixel() -> [u8; 4] {
-        let channel = (LONG_PILL_BACKGROUND.0 as f32 / 255.0 * LONG_PILL_BACKGROUND_OPACITY * 255.0)
-            .round() as u8;
-        let alpha = (LONG_PILL_BACKGROUND_OPACITY * 255.0).round() as u8;
-        [channel, channel, channel, alpha]
+    /// transparent surface (see `Canvas::blend`). Returned BGRA, matching
+    /// `render_frame_pixels`' byte order.
+    fn long_pill_bar_at(y: u32) -> [u8; 4] {
+        let (_, height) = surface_size_for(Style::LongPill);
+        let half_height = height as f32 / 2.0;
+        let py = y as f32 + 0.5 - half_height;
+        let gradient = ((py + half_height) / (2.0 * half_height)).clamp(0.0, 1.0);
+        let color = mix_color(
+            LIVE_TEXT_BACKGROUND_TOP,
+            LIVE_TEXT_BACKGROUND_BOTTOM,
+            gradient,
+        );
+        let opacity = LIVE_TEXT_BACKGROUND_OPACITY;
+        let premultiply =
+            |channel: u8| -> u8 { (channel as f32 / 255.0 * opacity * 255.0).round() as u8 };
+        let alpha = (opacity * 255.0).round() as u8;
+        [
+            premultiply(color.2),
+            premultiply(color.1),
+            premultiply(color.0),
+            alpha,
+        ]
     }
 
     #[test]
@@ -3187,28 +3517,192 @@ mod tests {
         // snapshot clears. The explicit live-text style is unaffected either
         // way.
         for configured in STYLE_VALUES {
+            let expected = caption_variant(style_for(configured));
             assert_eq!(
-                resolved_style(configured, true),
-                Style::LiveText,
+                resolved_style(configured, true, false),
+                expected,
                 "{configured}"
             );
             assert_eq!(
-                resolved_style(configured, false),
+                resolved_style(configured, false, false),
                 style_for(configured),
+                "{configured}"
+            );
+            // A streaming recording adopts the caption before the first partial
+            // too, so no waveform frame can precede the words.
+            assert_eq!(
+                resolved_style(configured, false, true),
+                expected,
                 "{configured}"
             );
         }
     }
 
     #[test]
+    fn a_live_text_snapshot_never_drops_a_recordings_streaming_capability() {
+        // A streaming recording is marked streaming at its start; its partials
+        // arrive as paint-only snapshots that must not clear that capability, so
+        // a snapshot that momentarily empties (a StablePrefix tail revised back
+        // to nothing) still shows the listening pad rather than the waveform.
+        let streaming = streaming_after_command(true, true, false);
+        assert!(
+            streaming,
+            "a paint-only snapshot must not clear the recording's streaming capability"
+        );
+        // Only a real state transition changes it: a terminal event or a
+        // non-streaming recording clears it, a streaming start sets it.
+        assert!(!streaming_after_command(streaming, false, false));
+        assert!(streaming_after_command(false, false, true));
+    }
+
+    #[test]
+    fn a_streaming_caption_never_paints_the_waveform() {
+        // A streaming recording's caption empty state is the listening pad, not
+        // the waveform; a non-streaming recording of a caption style falls back
+        // to the waveform. The waveform's grey bars reach across the card while
+        // the listening pad stays on the left, so bright grey pixels in the
+        // right half tell the two apart.
+        let (width, _) = surface_size_for(Style::LiveText);
+        let grey_in_right_half = |pixels: &[u8]| -> usize {
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(index, pixel)| {
+                    (index % width as usize) >= width as usize / 2
+                        && pixel[0] > 150
+                        && pixel[1] > 150
+                        && pixel[2] > 150
+                })
+                .count()
+        };
+        let streaming = paint_to_pixels_streaming(
+            Some(Phase::Recording),
+            0.0,
+            0.0,
+            true,
+            Style::LiveText,
+            &speaking_history(),
+            true,
+            None,
+        );
+        let non_streaming = paint_to_pixels_streaming(
+            Some(Phase::Recording),
+            0.0,
+            0.0,
+            true,
+            Style::LiveText,
+            &speaking_history(),
+            false,
+            None,
+        );
+        assert_eq!(
+            grey_in_right_half(&streaming),
+            0,
+            "a streaming caption must not paint waveform bars"
+        );
+        assert!(
+            grey_in_right_half(&non_streaming) > 0,
+            "a non-streaming caption style should fall back to the waveform"
+        );
+        assert_ne!(streaming, non_streaming);
+    }
+
+    #[test]
+    fn a_caption_with_text_holds_the_words_and_a_caret() {
+        // While words stream the caption paints the text (no waveform), with the
+        // caret after the newest word.
+        let live = LiveText {
+            committed: "today I am testing".to_string(),
+            tentative: " local speech".to_string(),
+        };
+        let words = paint_to_pixels_streaming(
+            Some(Phase::Recording),
+            0.25,
+            0.25,
+            true,
+            Style::LiveText,
+            &speaking_history(),
+            true,
+            Some(&live),
+        );
+        let empty = paint_to_pixels_streaming(
+            Some(Phase::Recording),
+            0.25,
+            0.25,
+            true,
+            Style::LiveText,
+            &speaking_history(),
+            true,
+            None,
+        );
+        assert_ne!(words, empty, "a caption with words differs from the pad");
+        assert!(
+            words.iter().any(|&byte| byte != 0),
+            "the caption with text must paint pixels"
+        );
+    }
+
+    #[test]
+    fn boxed_caption_status_message_does_not_overlap_the_chip() {
+        // The box stacks its content below the leading chip, so a terminal
+        // status message with no captured words must paint in that same row
+        // rather than on top of the chip. Render the same phase with the word
+        // "Ready" captured - which already draws below the chip - and compare the
+        // chip's own region: an intruding status message would change it.
+        let (width, _) = surface_size_for(Style::LiveTextBox);
+        let chip_right = (LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0) as u32;
+        let chip_region = |pixels: &[u8]| -> Vec<u8> {
+            let mut out = Vec::new();
+            for y in LIVE_TEXT_PADDING as u32..=chip_right {
+                for x in LIVE_TEXT_PADDING as u32..=chip_right {
+                    let index = ((y * width + x) * 4) as usize;
+                    out.extend_from_slice(&pixels[index..index + 4]);
+                }
+            }
+            out
+        };
+        let status = paint_to_pixels_streaming(
+            Some(Phase::Success),
+            0.0,
+            0.0,
+            true,
+            Style::LiveTextBox,
+            &speaking_history(),
+            true,
+            None,
+        );
+        let words = paint_to_pixels_streaming(
+            Some(Phase::Success),
+            0.0,
+            0.0,
+            true,
+            Style::LiveTextBox,
+            &speaking_history(),
+            true,
+            Some(&LiveText {
+                committed: "Ready".to_string(),
+                tentative: String::new(),
+            }),
+        );
+        assert_eq!(
+            chip_region(&status),
+            chip_region(&words),
+            "the box's no-words status message must not paint over the phase chip"
+        );
+    }
+
+    #[test]
     fn live_text_renders_words_and_distinguishes_committed_from_tentative() {
-        let (width, height, words) = render_live_text_pixels("today I am", " testing", &[]);
+        let (width, height, words) =
+            render_live_text_pixels("live-text", "today I am", " testing", &[]);
         assert_eq!((width, height), LIVE_TEXT_SURFACE);
         assert!(
             words.iter().any(|&byte| byte != 0),
             "a caption with words must paint pixels"
         );
-        let (_, _, empty) = render_live_text_pixels("", "", &[]);
+        let (_, _, empty) = render_live_text_pixels("live-text", "", "", &[]);
         assert_ne!(
             words, empty,
             "the word caption differs from the empty fallback"
@@ -3216,8 +3710,8 @@ mod tests {
 
         // The frozen prefix and the revisable tail use different colours, so the
         // same text rendered as committed vs tentative must differ.
-        let (_, _, committed_only) = render_live_text_pixels("hello", "", &[]);
-        let (_, _, tentative_only) = render_live_text_pixels("", "hello", &[]);
+        let (_, _, committed_only) = render_live_text_pixels("live-text", "hello", "", &[]);
+        let (_, _, tentative_only) = render_live_text_pixels("live-text", "", "hello", &[]);
         assert_ne!(
             committed_only, tentative_only,
             "committed and tentative text must be visually distinct"
@@ -3817,13 +4311,20 @@ mod tests {
                 let proj_x = x.clamp(cx - half_segment, cx + half_segment);
                 (x - proj_x).powi(2) + (y - cy).powi(2) <= cy * cy + 1.0
             }
-            Style::LiveText => {
+            Style::LiveText | Style::LiveTextMinimal => {
                 // A capsule inset from the surface edge; the waveform fallback
                 // and the caption text both stay inside it.
                 let half_height = cy - LIVE_TEXT_INSET;
                 let half_segment = (cx - half_height).max(0.0);
                 let proj_x = x.clamp(cx - half_segment, cx + half_segment);
                 (x - proj_x).powi(2) + (y - cy).powi(2) <= half_height * half_height + 1.0
+            }
+            Style::LiveTextBox => {
+                // A rounded rectangle inset from the surface edge.
+                x >= LIVE_TEXT_INSET
+                    && x <= width as f32 - LIVE_TEXT_INSET
+                    && y >= LIVE_TEXT_INSET
+                    && y <= height as f32 - LIVE_TEXT_INSET
             }
         }
     }
@@ -4038,14 +4539,13 @@ mod tests {
                     .filter(|pixel| *pixel == &[255, 255, 255, 255])
                     .count() as u64
             } else if style == Style::LongPill {
-                // BGRA: any pixel whose colour differs from the bar's faint
-                // translucent fill means trace or button paint.
-                let bar = long_pill_bar_pixel();
+                // Count the bright trace/button pixels (any channel well above
+                // the dark glass bar's reach), so a louder voice paints more.
                 pixels
                     .as_chunks::<4>()
                     .0
                     .iter()
-                    .filter(|pixel| pixel[..3] != bar[..3])
+                    .filter(|pixel| pixel[0] > 140 || pixel[1] > 140 || pixel[2] > 140)
                     .count() as u64
             } else {
                 pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum()
@@ -4093,8 +4593,8 @@ mod tests {
         let fill = ((4 * width + width / 8) * 4) as usize;
         assert_eq!(
             &recording[fill..fill + 4],
-            &long_pill_bar_pixel(),
-            "the long pill's bar should be the reference's dark neutral fill, faintly translucent"
+            &long_pill_bar_at(4),
+            "the long pill's bar should be the dark glass gradient, faintly translucent"
         );
         // Its corners are transparent - the bar is a capsule, not a rectangle.
         assert_eq!(recording[3], 0, "top-left corner should be transparent");

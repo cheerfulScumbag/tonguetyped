@@ -895,17 +895,20 @@ pub struct OverlayConfig {
     // level through `audio::publish_level` to the overlay actor. Renamed from
     // `streaming_indicator`, which described the old synthetic stand-in for
     // Handy's streaming panel; the serde alias and `migrate_legacy_overlay_config`
-    // keep existing config files loading and rewrite the key on save. Live
-    // partial text is now a real, separate concern - a streaming model's
-    // partials adopt the `live-text` presentation automatically (see
-    // `overlay::Style::LiveText`) - so this option only picks the glyph for a
-    // recording with no live text yet.
+    // keep existing config files loading and rewrite the key on save. The
+    // live-text caption and the waveform are mutually exclusive by model
+    // capability: a streaming model's recording shows the caption (its
+    // listening pad before the first word, then the words), while a
+    // non-streaming recording shows this glyph. A `live-text` caption style
+    // driven by a non-streaming model therefore falls back to this waveform
+    // rather than showing a waveform and words together.
     #[serde(default = "default_true", alias = "streaming_indicator")]
     pub live_waveform: bool,
     // Which overlay look to show - the reviewed list lives in
-    // `overlay::STYLE_VALUES`. `src/overlay.rs::style_for` parses this,
-    // falling back to `badge` for an unrecognized value exactly like
-    // `anchor_for` falls back on `position`.
+    // `overlay::STYLE_VALUES`, which now includes the `live-text`,
+    // `live-text-minimal`, and `live-text-box` streaming caption family.
+    // `src/overlay.rs::style_for` parses this, falling back to `badge` for an
+    // unrecognized value exactly like `anchor_for` falls back on `position`.
     #[serde(default = "default_overlay_style")]
     pub style: String,
 }

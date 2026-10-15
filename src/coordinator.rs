@@ -513,18 +513,22 @@ impl ProductionRuntime {
             streamed: None,
         }
     }
+}
 
-    /// Whether the active model streams, read from the catalog capability so no
-    /// engine is loaded on the recording-start path: a cold load here (for
-    /// example after the idle unload) would delay audio capture and the
-    /// recording indicator for every dictation, including non-streaming models.
-    /// The streaming thread re-checks the capability on the actually-loaded
-    /// file before feeding it and falls back to the batch path, so this is a
-    /// fast pre-filter, not the runtime source of truth.
-    fn streaming_ready(config: &Config) -> bool {
-        crate::catalog::find(&config.model.active_model)
-            .is_some_and(|entry| entry.info().supports_streaming())
-    }
+/// Whether the active model streams, read from the catalog capability so no
+/// engine is loaded on the recording-start path: a cold load here (for
+/// example after the idle unload) would delay audio capture and the
+/// recording indicator for every dictation, including non-streaming models.
+/// The streaming thread re-checks the capability on the actually-loaded
+/// file before feeding it and falls back to the batch path, so this is a
+/// fast pre-filter, not the runtime source of truth.
+///
+/// Shared by the streaming start path and the recording signal to the overlay
+/// so the runtime's batch/stream decision and the overlay's caption choice can
+/// never diverge.
+fn streaming_ready(config: &Config) -> bool {
+    crate::catalog::find(&config.model.active_model)
+        .is_some_and(|entry| entry.info().supports_streaming())
 }
 
 impl CoordinatorRuntime for ProductionRuntime {
@@ -549,7 +553,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         feedback: Arc<dyn Feedback>,
     ) -> RecordingAttempt {
         let max_duration = Duration::from_secs(config.transcription.max_recording_seconds);
-        if !Self::streaming_ready(config) {
+        if !streaming_ready(config) {
             return self.capture(microphone, max_duration, signal_rx, started, clock, None);
         }
         let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>();
@@ -1110,7 +1114,13 @@ impl Coordinator {
                     "recording cancelled during startup".into(),
                 ));
             }
-            self.feedback.send(FeedbackEvent::Recording, &inner.config);
+            // Tell the overlay whether the active model streams, so a streaming
+            // recording adopts the caption from the start and never flashes the
+            // waveform before the first word. Read through `streaming_ready` so
+            // the overlay and the runtime share one capability rule, and no
+            // engine is loaded on this path.
+            self.feedback
+                .send_recording(streaming_ready(&inner.config), &inner.config);
         }
         Ok(response)
     }

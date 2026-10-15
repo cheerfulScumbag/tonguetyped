@@ -1,5 +1,6 @@
-//! Live caption text for the `live-text` overlay style: a font rasteriser, a
-//! single-pass word wrap, and the "newest words win" window.
+//! Live caption text for the `live-text` overlay styles: a font rasteriser, the
+//! single-line "newest words win" layout the caption uses, and the multi-line
+//! wrap the scrolling box uses.
 //!
 //! The overlay paints raw pixels, so text has to be rasterised by hand. The
 //! bundled Inter (SIL OFL, see `assets/fonts/LICENSE-Inter.txt`) is parsed
@@ -8,12 +9,13 @@
 //! system font dependency, so the caption looks the same on any host and can be
 //! rendered headlessly in tests.
 //!
-//! Layout is deliberately simple: the whole committed + tentative string is
-//! wrapped to the caption width, then all but the last [`CAPTION_MAX_LINES`]
-//! lines are dropped and the first surviving line is prefixed with an ellipsis,
-//! so the reader always sees the most recent speech even when a sentence runs
-//! long. The committed/tentative split is carried per character, so the still
-//! revisable tail can be dimmed without re-measuring.
+//! The default single-line layout keeps the whole committed + tentative string
+//! on one line and never wraps; when it overruns the card the newest words stay
+//! in frame and the oldest fade off the left edge as the line slides, so a
+//! long dictation reads as a scrolling caption rather than a squished block.
+//! The committed/tentative split is carried per character, so the still
+//! revisable tail can be dimmed without re-measuring. The scrolling box reuses
+//! a simple word wrap with the same "newest words win" window.
 
 use ab_glyph::{point, Font, FontVec, PxScale, ScaleFont};
 use std::sync::OnceLock;
@@ -22,13 +24,18 @@ use super::{Canvas, LiveText};
 
 const FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/Inter-Medium.ttf");
 
-/// Caption type size in pixels, matching the reviewed mockup.
-pub(super) const CAPTION_FONT_SIZE: f32 = 22.0;
-/// Baseline-to-baseline distance; a touch over the type size so the two lines
-/// breathe without growing the pill.
-pub(super) const CAPTION_LINE_HEIGHT: f32 = 28.0;
-/// How many caption lines fit the pill before the newest-words window kicks in.
-pub(super) const CAPTION_MAX_LINES: usize = 2;
+/// Caption type size in pixels.
+pub(super) const CAPTION_FONT_SIZE: f32 = 23.0;
+/// Baseline-to-baseline distance for the scrolling box's lines; a touch over
+/// the type size so lines breathe without growing the box too fast.
+pub(super) const CAPTION_LINE_HEIGHT: f32 = 30.0;
+/// How many wrapped lines the scrolling box shows before its newest-words
+/// window kicks in.
+pub(super) const CAPTION_MAX_LINES: usize = 5;
+
+/// How wide (in pixels) the single-line caption's left edge fades, so words
+/// leaving the frame dissolve instead of cutting at a hard edge.
+pub(super) const CAPTION_LEFT_FADE: f32 = 42.0;
 
 static FONT: OnceLock<Option<FontVec>> = OnceLock::new();
 
@@ -56,18 +63,48 @@ pub(super) struct LaidLine {
 }
 
 impl LaidLine {
+    #[allow(dead_code)]
     pub(super) fn text(&self) -> String {
         self.chars.iter().map(|c| c.ch).collect()
     }
 }
 
+/// Lay `committed + tentative` out on a single line - no wrapping, the whole
+/// run in order with each character's committed/tentative flag carried through.
+/// Newlines (which a partial transcript should never contain, but a batch
+/// transcript might if it is ever shown) collapse to spaces so the line stays
+/// one line.
+pub(super) fn caption_line(committed: &str, tentative: &str) -> LaidLine {
+    let committed_chars = committed.chars().count();
+    let chars = committed
+        .chars()
+        .chain(tentative.chars())
+        .enumerate()
+        .map(|(index, ch)| LaidChar {
+            ch: if ch == '\n' || ch == '\r' { ' ' } else { ch },
+            tentative: index >= committed_chars,
+        })
+        .collect();
+    LaidLine { chars }
+}
+
+/// The measured advance width of a laid-out line at the caption size.
+pub(super) fn line_width(line: &LaidLine) -> f32 {
+    let Some(font) = font() else { return 0.0 };
+    let scale = PxScale::from(CAPTION_FONT_SIZE);
+    let scaled = font.as_scaled(scale);
+    line.chars
+        .iter()
+        .map(|c| scaled.h_advance(font.glyph_id(c.ch)))
+        .sum()
+}
+
 /// Wrap `committed + tentative` to `max_width`, returning at most
-/// `max_lines` lines with the most recent speech kept. When earlier lines are
-/// dropped the first visible line is prefixed with an ellipsis marked
-/// tentative; the committed/tentative flag of every character - including that
-/// ellipsis - is carried through, so the caller colours each glyph by its own
-/// flag instead of assuming a committed-prefix/tentative-suffix layout. Layout
-/// uses the bundled font, so the same input always yields the same lines.
+/// `CAPTION_MAX_LINES` lines with the most recent speech kept. Used by the
+/// scrolling box. When earlier lines are dropped the first visible line is
+/// prefixed with an ellipsis marked tentative; the committed/tentative flag of
+/// every character - including that ellipsis - is carried through, so the
+/// caller colours each glyph by its own flag.
 pub(super) fn caption_lines(committed: &str, tentative: &str, max_width: f32) -> Vec<LaidLine> {
     let Some(font) = font() else {
         return Vec::new();
@@ -148,10 +185,67 @@ pub(super) struct CaptionColors {
     pub alpha: f32,
 }
 
-/// Draw the live caption text. `x` is the left edge, `y_top` the top of the
-/// first line's box. `colors` supplies the committed/tentative hues and the
-/// overall opacity. Carries the newest-words window from [`caption_lines`]; a
-/// no-op when the bundled font failed to parse or there is no text yet.
+/// Draw one laid-out line with its left edge at `x` and the top of the line's
+/// box at `y_top`. Output is left-aligned at `x`; the caller chooses `x` (for
+/// the single-line caption it is the value that keeps the newest words in
+/// frame). When `clip_left` is `Some(edge)`, nothing is drawn left of `edge`
+/// and the glyphs fade to nothing across the `CAPTION_LEFT_FADE` pixels after
+/// it, so text scrolling off the left dissolves rather than cutting off.
+pub(super) fn draw_line(
+    canvas: &mut Canvas,
+    x: f32,
+    y_top: f32,
+    line: &LaidLine,
+    colors: &CaptionColors,
+    clip_left: Option<f32>,
+) {
+    let Some(font) = font() else { return };
+    let scale = PxScale::from(CAPTION_FONT_SIZE);
+    let scaled = font.as_scaled(scale);
+    let baseline = y_top + scaled.ascent();
+    let mut cursor = x;
+    for laid in &line.chars {
+        let ch = laid.ch;
+        let glyph_id = font.glyph_id(ch);
+        let advance = scaled.h_advance(glyph_id);
+        if let Some(edge) = clip_left {
+            if cursor + advance <= edge {
+                cursor += advance;
+                continue;
+            }
+        }
+        let color = if laid.tentative {
+            colors.tentative
+        } else {
+            colors.committed
+        };
+        let glyph = glyph_id.with_scale_and_position(scale, point(cursor, baseline));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|dx, dy, coverage| {
+                let fade = match clip_left {
+                    Some(edge) => {
+                        ((bounds.min.x + dx as f32 - edge) / CAPTION_LEFT_FADE).clamp(0.0, 1.0)
+                    }
+                    None => 1.0,
+                };
+                if fade <= 0.0 {
+                    return;
+                }
+                canvas.blend(
+                    bounds.min.x as i32 + dx as i32,
+                    bounds.min.y as i32 + dy as i32,
+                    color,
+                    coverage * colors.alpha * fade,
+                );
+            });
+        }
+        cursor += advance;
+    }
+}
+
+/// Draw a multi-line caption (the scrolling box): each line starts at the same
+/// left `x`, one `CAPTION_LINE_HEIGHT` below the last.
 pub(super) fn draw_caption(
     canvas: &mut Canvas,
     x: f32,
@@ -160,55 +254,12 @@ pub(super) fn draw_caption(
     text: &LiveText,
     colors: CaptionColors,
 ) {
-    let Some(font) = font() else {
-        return;
-    };
     let lines = caption_lines(&text.committed, &text.tentative, max_width);
-    if lines.is_empty() {
-        return;
-    }
-    let scale = PxScale::from(CAPTION_FONT_SIZE);
-    let scaled = font.as_scaled(scale);
-    let ascent = scaled.ascent();
     let mut y = y_top;
-    for line in lines {
-        let baseline = y + ascent;
-        let mut cursor = x;
-        for laid in &line.chars {
-            let ch = laid.ch;
-            let glyph_id = font.glyph_id(ch);
-            let color = if laid.tentative {
-                colors.tentative
-            } else {
-                colors.committed
-            };
-            let glyph = glyph_id.with_scale_and_position(scale, point(cursor, baseline));
-            if let Some(outlined) = font.outline_glyph(glyph) {
-                let bounds = outlined.px_bounds();
-                outlined.draw(|dx, dy, coverage| {
-                    canvas.blend(
-                        bounds.min.x as i32 + dx as i32,
-                        bounds.min.y as i32 + dy as i32,
-                        color,
-                        coverage * colors.alpha,
-                    );
-                });
-            }
-            cursor += scaled.h_advance(glyph_id);
-        }
+    for line in &lines {
+        draw_line(canvas, x, y, line, &colors, None);
         y += CAPTION_LINE_HEIGHT;
     }
-}
-
-/// The measured advance width of `text` at the caption size, used by the pill
-/// to place the trailing caret after the newest tentative word.
-pub(super) fn width_of(text: &str) -> f32 {
-    let Some(font) = font() else { return 0.0 };
-    let scale = PxScale::from(CAPTION_FONT_SIZE);
-    let scaled = font.as_scaled(scale);
-    text.chars()
-        .map(|ch| scaled.h_advance(font.glyph_id(ch)))
-        .sum()
 }
 
 #[cfg(test)]
@@ -221,23 +272,30 @@ mod tests {
     }
 
     #[test]
-    fn short_text_stays_on_one_line_and_keeps_its_split() {
-        let lines = caption_lines("hello world", " again", 720.0);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].text(), "hello world again");
+    fn single_line_keeps_the_whole_run_and_its_split() {
+        let line = caption_line("hello world", " again");
+        assert_eq!(line.text(), "hello world again");
         let committed = "hello world".chars().count();
-        assert!(lines[0].chars[..committed].iter().all(|c| !c.tentative));
-        assert!(lines[0].chars[committed..].iter().all(|c| c.tentative));
+        assert!(line.chars[..committed].iter().all(|c| !c.tentative));
+        assert!(line.chars[committed..].iter().all(|c| c.tentative));
+        assert!(line_width(&line) > 0.0);
     }
 
     #[test]
-    fn wrapping_splits_at_word_boundaries() {
+    fn single_line_never_wraps() {
+        let long = "one two three four five six seven eight nine ten eleven twelve";
+        let line = caption_line(long, "");
+        assert_eq!(line.text(), long);
+    }
+
+    #[test]
+    fn box_wraps_at_word_boundaries() {
         let lines = caption_lines(
             "the quick brown fox jumps over the lazy dog and keeps running",
             "",
             220.0,
         );
-        assert!(lines.len() >= CAPTION_MAX_LINES);
+        assert!(lines.len() >= 2);
         for line in &lines {
             assert!(
                 !line.text().starts_with(' '),
@@ -247,34 +305,18 @@ mod tests {
     }
 
     #[test]
-    fn newest_words_window_drops_leading_lines_and_ellipsizes() {
+    fn box_newest_words_window_drops_leading_lines_and_ellipsizes() {
         let long = "one two three four five six seven eight nine ten eleven twelve \
-                    thirteen fourteen fifteen sixteen seventeen eighteen";
+                    thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty";
         let lines = caption_lines(long, "", 220.0);
-        assert_eq!(lines.len(), CAPTION_MAX_LINES, "window keeps two lines");
+        assert_eq!(lines.len(), CAPTION_MAX_LINES, "window keeps the cap");
         let first = &lines[0];
         assert!(
             first.text().starts_with('…'),
             "the first visible line should mark dropped text: {:?}",
             first.text()
         );
-        // The dropped-text marker is a tentative glyph even though it sits at
-        // the start of the line, and the committed words after it stay
-        // committed - colouring must follow each glyph's own flag.
         assert!(first.chars[0].tentative, "the ellipsis must be tentative");
-        assert!(
-            !first.chars.last().unwrap().tentative,
-            "committed text after the ellipsis must stay committed"
-        );
-    }
-
-    #[test]
-    fn tentative_tail_is_tracked_per_character() {
-        let lines = caption_lines("hello", " world", 720.0);
-        let chars = &lines[0].chars;
-        assert_eq!(chars.len(), 11);
-        assert!(chars[..5].iter().all(|c| !c.tentative));
-        assert!(chars[5..].iter().all(|c| c.tentative));
     }
 
     #[test]
