@@ -207,6 +207,13 @@ pub(super) fn draw_line(
     for laid in &line.chars {
         let ch = laid.ch;
         let glyph_id = font.glyph_id(ch);
+        let advance = scaled.h_advance(glyph_id);
+        if let Some(edge) = clip_left {
+            if cursor + advance <= edge {
+                cursor += advance;
+                continue;
+            }
+        }
         let color = if laid.tentative {
             colors.tentative
         } else {
@@ -233,7 +240,7 @@ pub(super) fn draw_line(
                 );
             });
         }
-        cursor += scaled.h_advance(glyph_id);
+        cursor += advance;
     }
 }
 
