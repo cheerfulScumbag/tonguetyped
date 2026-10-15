@@ -613,6 +613,16 @@ re-decoded on a timer), so the feature costs no extra CPU beyond the model
 itself. A streaming model has no separate batch decode: the finalized stream is
 the transcript.
 
+A streaming model's stream has a fixed output window - Moonshine-streaming caps
+its decoder at roughly 48 s of English - and once one stream reaches that cap it
+stops emitting words. So a live recording is decoded as a sequence of segments:
+when the running segment reaches the model-aware window (half the model's
+advertised ceiling, about 24 s), its text is committed and a fresh stream starts
+on the audio that follows, keeping the live text flowing for a long dictation.
+Each segment boundary is placed in a pause where the audio has one, and the
+finished segments are joined with a single space, so nothing at the seam is
+dropped or duplicated.
+
 ### Long recordings and file transcription
 
 A single live recording is capped by `transcription.max_recording_seconds`

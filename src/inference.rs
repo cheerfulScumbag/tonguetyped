@@ -566,18 +566,95 @@ fn run_result(
     }
 }
 
-/// Joins the per-chunk transcripts of one `transcribe` call in decode order:
-/// each is trimmed, the empty ones are dropped, and the rest are separated by a
-/// single space (matching Handy's `transcribe-rs` `merge_sequential`). The
-/// chunks are contiguous and non-overlapping, so there is no duplication to
-/// reconcile and no overlap/dedup is needed.
-fn merge_transcripts(chunks: &[Transcription]) -> String {
-    chunks
-        .iter()
-        .map(|chunk| chunk.text.trim())
+/// Joins texts in order: each is trimmed, the empty ones are dropped, and the
+/// rest are separated by a single space (matching Handy's `transcribe-rs`
+/// `merge_sequential`). Every join here is between contiguous, non-overlapping
+/// pieces of one dictation, so there is no duplication to reconcile.
+fn join_texts<'a>(texts: impl IntoIterator<Item = &'a str>) -> String {
+    texts
+        .into_iter()
+        .map(str::trim)
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Joins the per-chunk transcripts of one `transcribe` call in decode order.
+fn merge_transcripts(chunks: &[Transcription]) -> String {
+    join_texts(chunks.iter().map(|chunk| chunk.text.as_str()))
+}
+
+/// Joins the finalized text of every live segment of one streaming dictation,
+/// in decode order, the same way `merge_transcripts` joins batch chunks. The
+/// segments are contiguous and non-overlapping, so the seam cannot duplicate a
+/// word; the rollover seeks a pause so it does not straddle one either.
+fn merge_segment_texts(segments: &[String]) -> String {
+    join_texts(segments.iter().map(String::as_str))
+}
+
+/// The live `committed` text to display while a segment is streaming: every
+/// already-finalized segment's text, space-joined, then the current segment's
+/// committed prefix. Keeping the earlier segments in the caption is what makes
+/// the live text stable across a rollover - the words already shown never
+/// disappear when a new segment starts.
+fn live_committed_prefix(segments: &[String], committed: &str) -> String {
+    let mut joined = join_texts(segments.iter().map(String::as_str));
+    let committed = committed.trim();
+    if committed.is_empty() {
+        return joined;
+    }
+    if !joined.is_empty() {
+        joined.push(' ');
+    }
+    joined.push_str(committed);
+    joined
+}
+
+/// The authoritative final text of a just-finalized stream: the model's `full`
+/// hypothesis, or the `committed + tentative` display when it left `full` empty
+/// but produced committed text.
+fn finalized_text(text: &transcribe_cpp::StreamText) -> String {
+    let full = text.full.trim();
+    if full.is_empty() {
+        text.display().trim().to_string()
+    } else {
+        full.to_string()
+    }
+}
+
+/// How far a live segment may run before it *must* roll over even without a
+/// pause: the window plus the same tenth-window search the batch splitter
+/// (`split_chunks`) allows, so continuous speech still cannot run into the
+/// decoder cap.
+fn rollover_hard_limit(window: usize) -> usize {
+    window + (window / 10).max(CHUNK_PROBE_SAMPLES)
+}
+
+/// RMS below which a 16 kHz frame counts as a pause for the rollover seam
+/// (~-46 dBFS), so a segment boundary lands between words rather than through
+/// one.
+const ROLLOVER_PAUSE_RMS: f32 = 0.005;
+
+/// Whether `frame` is quiet enough to end a live segment on.
+fn frame_is_pause(frame: &[f32]) -> bool {
+    if frame.is_empty() {
+        return true;
+    }
+    let mean_square = frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32;
+    mean_square.sqrt() < ROLLOVER_PAUSE_RMS
+}
+
+/// Whether to commit the current live segment and start a new one before
+/// feeding `frame`. `fed` is the samples the current segment has already
+/// consumed and `window` its model-aware rollover boundary (`None` never rolls
+/// over). A segment rolls over once it has consumed the window *and* the frame
+/// is a pause, so the seam lands in silence; it rolls over at the hard limit
+/// regardless, so continuous speech cannot stall at the decoder cap.
+fn rollover_due(fed: usize, window: Option<usize>, frame: &[f32]) -> bool {
+    let Some(window) = window else {
+        return false;
+    };
+    fed >= window && (fed >= rollover_hard_limit(window) || frame_is_pause(frame))
 }
 
 /// Folds one chunked call's per-chunk results into a single [`Transcription`],
@@ -819,6 +896,17 @@ impl InferenceEngine {
     /// displayed string changes, so a caller can paint live text. Returns the
     /// finalized transcript.
     ///
+    /// A streaming model has a fixed *output* window (Moonshine-streaming's
+    /// decoder position cap, roughly 48 s of English): once one stream reaches
+    /// it the model stops emitting new text and the transcript is capped there,
+    /// even though the user kept speaking. So the capture is decoded as a
+    /// sequence of segments: when the current one reaches the model-aware
+    /// rollover window (`decode_window_samples`, half the model's advertised
+    /// ceiling), it is finalized - committing everything decoded so far - and a
+    /// fresh stream starts on the continuing audio. Segments are space-joined
+    /// on finalize and the earlier segments stay in the live caption, so both
+    /// the running text and the final transcript remain whole across the seam.
+    ///
     /// Errors with "does not support streaming" when the loaded model reports
     /// no streaming capability, so the coordinator can fall back to the batch
     /// path instead of pretending partials exist. Like `transcribe`, this is
@@ -835,6 +923,11 @@ impl InferenceEngine {
         if !loaded.supports_streaming {
             anyhow::bail!("this model does not support streaming transcription");
         }
+        // The same model-aware window the batch path uses bounds each live
+        // segment, so the model's advertised ceiling is never overrun. `None`
+        // means nothing bounds a segment (no advertised limit and chunking
+        // off), so the stream runs to finalize exactly as it did before.
+        let window = decode_window_samples(config, self.long_form, loaded.max_audio_ms);
         let options = run_options(config, loaded.decode_support);
         // `StablePrefix` freezes a word once consecutive hypotheses agree on it,
         // so the committed prefix only grows and partial text does not flicker;
@@ -843,33 +936,59 @@ impl InferenceEngine {
             commit_policy: transcribe_cpp::CommitPolicy::StablePrefix,
             ..Default::default()
         };
-        let mut stream = loaded
-            .session
-            .stream(&options, &stream_options)
-            .context("failed to begin streaming transcription")?;
-        let mut last = String::new();
-        while let Some(frame) = next_frame() {
-            if frame.is_empty() {
-                continue;
-            }
-            stream.feed(&frame).context("streaming feed failed")?;
-            let text = stream.text();
-            let display = format!("{}{}", text.committed, text.tentative);
-            if display != last {
-                on_partial(&text.committed, &text.tentative);
-                last = display;
+
+        let mut segments: Vec<String> = Vec::new();
+        let mut truncated = false;
+        // The last display string painted, kept across segments so a rollover
+        // only repaints the caption if it actually changed.
+        let mut last_display = String::new();
+        // A frame that triggers a rollover is held here and fed to the *next*
+        // segment rather than dropped, so no audio is lost at the seam.
+        let mut pending: Option<Vec<f32>> = None;
+
+        loop {
+            let mut fed = 0usize;
+            let rolled = {
+                let mut stream = loaded
+                    .session
+                    .stream(&options, &stream_options)
+                    .context("failed to begin streaming transcription")?;
+                let mut rolled = false;
+                while let Some(frame) = pending.take().or_else(&mut next_frame) {
+                    if frame.is_empty() {
+                        continue;
+                    }
+                    if rollover_due(fed, window, &frame) {
+                        pending = Some(frame);
+                        rolled = true;
+                        break;
+                    }
+                    stream.feed(&frame).context("streaming feed failed")?;
+                    fed += frame.len();
+                    let text = stream.text();
+                    let committed = live_committed_prefix(&segments, &text.committed);
+                    let display = format!("{}{}", committed, text.tentative);
+                    if display != last_display {
+                        on_partial(&committed, &text.tentative);
+                        last_display = display;
+                    }
+                }
+                stream.finalize().context("streaming finalize failed")?;
+                segments.push(finalized_text(&stream.text()));
+                rolled
+            };
+            // `stream_begin` clears the truncation flag per stream, so this
+            // reports only the segment just finalized: a segment that reached
+            // its cap anyway still marks the whole dictation incomplete.
+            truncated |= loaded.session.was_truncated();
+            if !rolled {
+                break;
             }
         }
-        stream.finalize().context("streaming finalize failed")?;
-        let text = stream.text();
-        // `full` is the authoritative final hypothesis; fall back to the
-        // display split only if the model left it empty but committed text.
-        let full = text.full.trim();
-        let display = text.display();
-        let display = display.trim();
+
         Ok(Transcription {
-            text: if full.is_empty() { display } else { full }.to_string(),
-            truncated: false,
+            text: merge_segment_texts(&segments),
+            truncated,
         })
     }
 
@@ -1529,5 +1648,127 @@ mod tests {
             "the split should snap back into the quiet gap, not cut at the limit"
         );
         assert_eq!(ranges[1].start, 1_800);
+    }
+
+    fn streaming_entry(id: &str) -> &'static crate::catalog::VariantInfo {
+        crate::catalog::find(id).unwrap().info()
+    }
+
+    #[test]
+    fn streaming_rollover_window_is_half_the_models_advertised_ceiling() {
+        // moonshine_streaming advertises ~48.5 s (its 194-token decoder cap at
+        // the advisory 4 tokens/s), so a live segment rolls over at half that,
+        // ~24.25 s - below the 30 s chunk default, so the model bound wins.
+        let entry = streaming_entry("moonshine-streaming-tiny-q8_0");
+        assert!(entry.supports_streaming());
+        assert_eq!(
+            decode_window_samples(&config_with_chunk_seconds(30), entry.long_form, 48_500),
+            Some(388_000),
+            "half of 48.5 s is 24.25 s = 388_000 samples"
+        );
+    }
+
+    #[test]
+    fn streaming_rollover_window_is_none_without_a_bound_or_chunking() {
+        // A streaming model that advertises no ceiling and has chunking off
+        // never rolls over, so the stream runs to finalize as it did before.
+        assert_eq!(
+            decode_window_samples(
+                &config_with_chunk_seconds(0),
+                crate::catalog::LongForm::Unbounded,
+                0
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rollover_waits_for_the_window_then_prefers_a_pause() {
+        let window = 24 * 16_000;
+        let quiet = vec![0.0_f32; 1_024];
+        let loud = vec![0.5_f32; 1_024];
+        // Before the window: never, even in a pause.
+        assert!(!rollover_due(window - 1, Some(window), &quiet));
+        // At the window: yes on a pause, no while speech is still running.
+        assert!(rollover_due(window, Some(window), &quiet));
+        assert!(!rollover_due(window, Some(window), &loud));
+    }
+
+    #[test]
+    fn rollover_is_forced_at_the_hard_limit_without_a_pause() {
+        let window = 24 * 16_000;
+        let limit = rollover_hard_limit(window);
+        assert!(limit > window);
+        let loud = vec![0.5_f32; 1_024];
+        assert!(!rollover_due(limit - 1, Some(window), &loud));
+        assert!(
+            rollover_due(limit, Some(window), &loud),
+            "continuous speech must still roll over at the hard limit"
+        );
+    }
+
+    #[test]
+    fn rollover_is_never_due_without_a_window() {
+        assert!(!rollover_due(usize::MAX, None, &[1.0; 8]));
+    }
+
+    #[test]
+    fn frame_is_a_pause_only_below_the_silence_floor() {
+        assert!(frame_is_pause(&[]));
+        assert!(frame_is_pause(&[0.0; 1_024]));
+        assert!(!frame_is_pause(&[0.5; 1_024]));
+        // A single loud sample lifts the RMS of an otherwise quiet frame above
+        // the pause floor, so the seam does not cut through it.
+        let mut mostly_quiet = vec![0.0_f32; 1_024];
+        mostly_quiet[0] = 1.0;
+        assert!(!frame_is_pause(&mostly_quiet));
+    }
+
+    #[test]
+    fn finalized_segments_merge_in_order_with_single_spaces() {
+        let segments = vec![
+            "  the first part ".to_string(),
+            "   ".to_string(),
+            "the second part".to_string(),
+        ];
+        assert_eq!(
+            merge_segment_texts(&segments),
+            "the first part the second part"
+        );
+        assert!(merge_segment_texts(&[]).is_empty());
+    }
+
+    #[test]
+    fn live_prefix_keeps_earlier_segments_visible_across_a_rollover() {
+        // Segment 1 finalized as "the first part"; segment 2 is mid-stream. The
+        // caption must still show segment 1's words, not restart at segment 2.
+        let finalized = vec!["the first part".to_string()];
+        assert_eq!(
+            live_committed_prefix(&finalized, "the second part"),
+            "the first part the second part"
+        );
+        // A fresh segment before any committed text still shows the prefix.
+        assert_eq!(live_committed_prefix(&finalized, ""), "the first part");
+        assert_eq!(live_committed_prefix(&finalized, "   "), "the first part");
+        // The first segment has no earlier text to carry.
+        assert_eq!(live_committed_prefix(&[], " hello "), "hello");
+        assert_eq!(live_committed_prefix(&[], ""), "");
+    }
+
+    #[test]
+    fn finalized_stream_text_prefers_full_and_falls_back_to_display() {
+        let full = transcribe_cpp::StreamText {
+            full: " the whole thing ".to_string(),
+            committed: "the whole".to_string(),
+            tentative: " thing".to_string(),
+        };
+        assert_eq!(finalized_text(&full), "the whole thing");
+
+        let display_only = transcribe_cpp::StreamText {
+            full: String::new(),
+            committed: "kept".to_string(),
+            tentative: " tail".to_string(),
+        };
+        assert_eq!(finalized_text(&display_only), "kept tail");
     }
 }
