@@ -2653,11 +2653,13 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
     let radius = canvas.width.min(canvas.height) as f32 * 0.26;
     let color = phase_color(phase);
     let lf = recording_level(levels);
-    // A bright body with an even brighter inner glow and a near-white sheen,
-    // so the blob stays luminous rather than turning dark and silvered.
-    let body = scale_color(lighten(color, 0.1), 0.88);
-    let core = lighten(color, 0.62);
-    let sheen = lighten(color, 0.98);
+    // A bold, saturated body in the phase hue - the same `bolden` finish the
+    // other overlay styles use - with a light inner glow and a pulled-in
+    // sheen, so the blob reads as a big bright sphere rather than a pale,
+    // silvered one. The dome shading and the rim are unchanged.
+    let body = scale_color(bolden(color), 0.85);
+    let core = lighten(bolden(color), 0.4);
+    let sheen = lighten(bolden(color), 0.6);
 
     // Light and its half-vector (view direction is +z), for the specular dot.
     let (lx, ly, lz) = normalize3(-0.45, -0.68, 0.58);
