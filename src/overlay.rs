@@ -30,12 +30,12 @@
 //! Besides the state cues above, the overlay can paint **live text**: when a
 //! streaming model is active, the coordinator forwards its partial transcript
 //! through [`OverlayHandle::try_send_live_text`] and the overlay draws it as a
-//! wide dark pill with the frozen prefix bright, the still-revisable tail
-//! dimmed, and a caret. Those partials adopt the `live-text` caption
-//! presentation for the streaming duration (see [`Style::LiveText`]) even when
-//! another style is configured, so words appear as they are spoken without a
-//! style change. That text is preview only: it is never typed, persisted, or
-//! mirrored to the fallback chain.
+//! dark glass card with a leading phase chip, the frozen prefix bright, the
+//! still-revisable tail dimmed, and a caret. Those partials adopt the
+//! `live-text` caption presentation for the streaming duration (see
+//! [`Style::LiveText`]) even when another style is configured, so words appear
+//! as they are spoken without a style change. That text is preview only: it is
+//! never typed, persisted, or mirrored to the fallback chain.
 
 use crate::config::OverlayConfig;
 use crate::feedback::FeedbackEvent;
