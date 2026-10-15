@@ -130,6 +130,7 @@ in
               "wtype"
               "enigo"
               "dotool"
+              "eitype"
             ]) "Which helper types the transcript.";
             auto_submit = setting types.bool "Press Enter after the transcript is typed or pasted. Requires `method = \"type\"` or `\"paste\"`.";
             paste_keys = setting (types.enum [

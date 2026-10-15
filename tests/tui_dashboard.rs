@@ -1296,7 +1296,8 @@ fn pty_transcript_output_configures_paste_and_enter() {
 fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     // The sandbox PATH has no typing helper and the session is pinned to
     // Wayland + KDE, so this is the exact "no helper installed" state the
-    // warning exists for, and it must name dotool (wtype cannot work on KWin).
+    // warning exists for, and it must name eitype (which needs no
+    // /dev/uinput, unlike dotool on KWin).
     let sandbox = Sandbox::new("output-no-helper");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
@@ -1317,7 +1318,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
         Duration::from_secs(3),
     );
     assert!(
-        screen.contains("install dotool"),
+        screen.contains("install eitype"),
         "the screen must say what to install:\n{screen}"
     );
 
@@ -1326,7 +1327,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     session.send(KEY_ENTER);
     let refused = session.wait_for("Cannot apply", Duration::from_secs(3));
     assert!(
-        refused.contains("install dotool"),
+        refused.contains("install eitype"),
         "the install warning must stay visible next to the refusal:\n{refused}"
     );
     assert!(

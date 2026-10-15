@@ -1274,7 +1274,7 @@ impl Config {
         }
         if !matches!(
             self.output.typing_backend.as_str(),
-            "auto" | "wtype" | "enigo" | "dotool"
+            "auto" | "wtype" | "enigo" | "dotool" | "eitype"
         ) {
             anyhow::bail!("unsupported typing backend: {}", self.output.typing_backend);
         }
@@ -1669,6 +1669,11 @@ mod tests {
     #[test]
     fn rejects_unsupported_runtime_selections() {
         let mut config = Config::default();
+        // Every supported backend, including `eitype`, must validate.
+        for backend in ["auto", "wtype", "enigo", "dotool", "eitype"] {
+            config.output.typing_backend = backend.to_string();
+            config.validate().unwrap();
+        }
         config.output.typing_backend = "typo".to_string();
         assert!(config.validate().is_err());
 

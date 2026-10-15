@@ -180,6 +180,15 @@ fn type_text(text: &str, backend: &str) -> anyhow::Result<()> {
             }
             require_success("dotool", child.wait()?)?;
         }
+        "eitype" => {
+            require_success(
+                "eitype",
+                Command::new("eitype")
+                    .args(eitype_type_args(text, compositor_is_kde()))
+                    .status()
+                    .context("failed to spawn eitype")?,
+            )?;
+        }
         _ => {
             anyhow::bail!("unsupported typing backend: {}", backend);
         }
@@ -215,6 +224,15 @@ fn press_enter(backend: &str) -> anyhow::Result<()> {
                 writeln!(stdin, "key enter")?;
             }
             require_success("dotool", child.wait()?)?;
+        }
+        "eitype" => {
+            require_success(
+                "eitype",
+                Command::new("eitype")
+                    .args(["-k", "return"])
+                    .status()
+                    .context("failed to spawn eitype")?,
+            )?;
         }
         _ => {
             anyhow::bail!("unsupported typing backend: {}", backend);
@@ -259,6 +277,13 @@ fn press_paste(keys: PasteKeys, backend: &str) -> anyhow::Result<()> {
             }
             require_success("dotool", child.wait()?)?;
         }
+        "eitype" => {
+            let status = Command::new("eitype")
+                .args(eitype_paste_args(keys))
+                .status()
+                .context("failed to spawn eitype")?;
+            require_success("eitype", status)?;
+        }
         _ => {
             anyhow::bail!("unsupported typing backend: {}", backend);
         }
@@ -275,6 +300,37 @@ fn wtype_paste_args(keys: PasteKeys) -> Vec<String> {
         .into_iter()
         .map(str::to_string)
         .collect()
+}
+
+/// KWin can acknowledge a zero-delay `eitype` process even when it has dropped
+/// the tail of a fast key burst, so typing on KDE gets the smallest positive
+/// inter-key delay that keeps the whole transcript. One millisecond is
+/// Voxtype's source-backed value for the same compositor behavior
+/// (`V:src/output/eitype.rs:16-34`).
+const EITYPE_KDE_TYPE_DELAY_MS: u32 = 1;
+
+/// The `eitype` arguments that type `text`: `eitype <text>`, with a forced
+/// small inter-key delay on KDE. `eitype` maps `\n` in the text to Return, so
+/// newlines need no separate key press. Kept separate from the command so the
+/// KDE pacing is testable without mutating the process-global environment.
+fn eitype_type_args(text: &str, kde: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if kde {
+        args.push("-d".to_string());
+        args.push(EITYPE_KDE_TYPE_DELAY_MS.to_string());
+    }
+    args.push(text.to_string());
+    args
+}
+
+/// The `eitype` arguments that press one paste combination. Held modifiers are
+/// released at the end of `eitype`'s action list, so no explicit release key
+/// (`wtype`'s trailing `-m`) is needed and no modifier is left stuck.
+fn eitype_paste_args(keys: PasteKeys) -> [&'static str; 4] {
+    match keys {
+        PasteKeys::CtrlV => ["-M", "ctrl", "-k", "v"],
+        PasteKeys::ShiftInsert => ["-M", "shift", "-k", "Insert"],
+    }
 }
 
 fn dotool_paste_keys(keys: PasteKeys) -> &'static str {
@@ -393,6 +449,9 @@ pub fn probe_type_backend() -> String {
     if dotool_available() {
         return "dotool".to_string();
     }
+    if eitype_installed() {
+        return "eitype".to_string();
+    }
     "none".to_string()
 }
 
@@ -407,11 +466,14 @@ pub fn list_available_backends() -> Vec<String> {
     if dotool_available() {
         backends.push("dotool".to_string());
     }
+    if eitype_installed() {
+        backends.push("eitype".to_string());
+    }
     backends
 }
 
 pub fn has_any_type_backend() -> bool {
-    helper_self_test("wtype") || enigo_available() || dotool_available()
+    helper_self_test("wtype") || enigo_available() || dotool_available() || eitype_installed()
 }
 
 pub fn type_backend_available(backend: &str) -> bool {
@@ -420,6 +482,7 @@ pub fn type_backend_available(backend: &str) -> bool {
         "wtype" => helper_self_test("wtype"),
         "dotool" => dotool_available(),
         "enigo" => enigo_available(),
+        "eitype" => eitype_installed(),
         _ => false,
     }
 }
@@ -427,12 +490,14 @@ pub fn type_backend_available(backend: &str) -> bool {
 /// The warning the configuration UIs and the daemon startup log show when no
 /// typing helper is usable, naming the one action that makes a helper work for
 /// this compositor. `enigo` needs no install - it is built in - so the missing
-/// piece is always one of the two external helpers: `wtype`, which types
-/// through the Wayland virtual-keyboard protocol that only wlroots-based
-/// compositors implement, or `dotool`, which types through `/dev/uinput` and
-/// so works on KDE's KWin and other compositors too. When `dotool` is already
-/// installed but `/dev/uinput` is not writable, the warning names the
-/// permission remedy instead of telling the user to install a binary they
+/// piece is always one of the external helpers: `wtype`, which types through
+/// the Wayland virtual-keyboard protocol that only wlroots-based compositors
+/// implement; `dotool`, which types through `/dev/uinput` and so works on KDE's
+/// KWin and other compositors too; or `eitype`, which types through the
+/// RemoteDesktop portal's libei path and needs no `/dev/uinput` access, making
+/// it the helper that works on KDE and GNOME Wayland without it. When `dotool`
+/// is already installed but `/dev/uinput` is not writable, the warning names
+/// the permission remedy instead of telling the user to install a binary they
 /// already have.
 /// The restart note is real, not boilerplate: `cached_auto_backend`, this
 /// warning, and the daemon process all memoize the probe, so a helper
@@ -450,14 +515,21 @@ pub fn typing_helper_warning() -> &'static str {
     })
 }
 
-/// The external helper to name for this session: `wtype` only on a Wayland
+/// The external helper to name for this session. `wtype` only on a Wayland
 /// session whose compositor is wlroots-based (sway, Hyprland, niri, ...),
 /// which implements the `zwp_virtual_keyboard_manager_v1` protocol `wtype`
-/// needs. Everywhere else - KDE's KWin, other Wayland compositors, and X11 -
-/// `dotool` is the helper that can work.
+/// needs. On any other Wayland session - KDE's KWin, GNOME's Mutter, and the
+/// rest - `wtype` cannot work and `dotool` needs `/dev/uinput`, so `eitype`
+/// (libei through the RemoteDesktop portal) is the helper that works without
+/// it. On X11, `enigo` is built in and covers typing, so `dotool` remains the
+/// named fallback.
 fn recommended_helper() -> &'static str {
-    if session_is_wayland() && compositor_is_wlroots() {
-        "wtype"
+    if session_is_wayland() {
+        if compositor_is_wlroots() {
+            "wtype"
+        } else {
+            "eitype"
+        }
     } else {
         "dotool"
     }
@@ -466,6 +538,12 @@ fn recommended_helper() -> &'static str {
 fn warning_for(helper: &str, dotool_installed: bool, uinput_writable: bool) -> &'static str {
     if helper == "wtype" {
         "No typing helper found - install wtype, then restart TongueTyped."
+    } else if helper == "eitype" {
+        if dotool_installed && !uinput_writable {
+            "dotool is installed but cannot open /dev/uinput - install eitype (it types through the RemoteDesktop portal and needs no /dev/uinput), or add your user to the 'input' group or add a udev rule granting write access to /dev/uinput, then restart TongueTyped."
+        } else {
+            "No typing helper found - install eitype (it types through the RemoteDesktop portal and needs no /dev/uinput access), then restart TongueTyped."
+        }
     } else if dotool_installed && !uinput_writable {
         "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or add a udev rule granting write access to /dev/uinput, then restart TongueTyped."
     } else {
@@ -480,17 +558,28 @@ fn session_is_wayland() -> bool {
 /// Whether this session's desktop identifies a wlroots-based compositor, the
 /// only family that implements the `zwp_virtual_keyboard_manager_v1` protocol
 /// `wtype` types through. KWin advertises `KDE`, not a wlroots name, so it
-/// takes the `dotool` branch.
+/// takes the `eitype` branch.
 fn compositor_is_wlroots() -> bool {
-    let desktops: Vec<String> = [
+    desktop_names_are_wlroots(&session_desktops())
+}
+
+/// Whether this session's desktop identifies KDE Plasma, whose KWin can drop
+/// the tail of a fast `eitype` key burst and so needs the forced small
+/// inter-key delay in `eitype_type_args`.
+fn compositor_is_kde() -> bool {
+    desktop_names_are_kde(&session_desktops())
+}
+
+/// The desktop-identification environment values, in preference order.
+fn session_desktops() -> Vec<String> {
+    [
         "XDG_CURRENT_DESKTOP",
         "XDG_SESSION_DESKTOP",
         "DESKTOP_SESSION",
     ]
     .iter()
     .filter_map(|key| std::env::var(key).ok())
-    .collect();
-    desktop_names_are_wlroots(&desktops)
+    .collect()
 }
 
 /// Pure core of `compositor_is_wlroots`, kept separate so it is testable
@@ -503,6 +592,17 @@ fn desktop_names_are_wlroots(desktops: &[String]) -> bool {
         let desktop = desktop.to_ascii_lowercase();
         WLROOTS.iter().any(|name| desktop.contains(name))
     })
+}
+
+/// Pure core of `compositor_is_kde`. `XDG_CURRENT_DESKTOP` is colon-separated
+/// and KDE is one component (`KDE`, or `KDE:foo`), so match a whole component
+/// case-insensitively rather than a substring that could match an unrelated
+/// name.
+fn desktop_names_are_kde(desktops: &[String]) -> bool {
+    desktops
+        .iter()
+        .flat_map(|desktop| desktop.split(':'))
+        .any(|component| component.eq_ignore_ascii_case("kde"))
 }
 
 fn enigo_available() -> bool {
@@ -521,6 +621,19 @@ fn enigo_available() -> bool {
 /// permission remedy in `warning_for` reachable.
 fn dotool_installed() -> bool {
     binary_on_path("dotool", std::env::var_os("PATH").as_deref())
+}
+
+/// Whether the `eitype` binary is installed. This is a PATH lookup, never a
+/// live call: any `eitype` invocation opens a RemoteDesktop portal session, and
+/// on the first run that pops the authorization dialog, so probing by running
+/// it would surprise the user from `doctor` or `setup` before they ever type.
+/// Voxtype probes the same way for the same reason
+/// (`V:src/output/eitype.rs:246-256`). Unlike `dotool`, `eitype` has no
+/// separate device check: its permission grant is stored as a portal restore
+/// token by the helper itself, and whether the portal will allow it cannot be
+/// known without the dialog this probe exists to avoid.
+fn eitype_installed() -> bool {
+    binary_on_path("eitype", std::env::var_os("PATH").as_deref())
 }
 
 /// Whether an executable named `name` appears in `path`, the `PATH`
@@ -881,6 +994,55 @@ mod tests {
     }
 
     #[test]
+    fn eitype_paste_args_press_one_combination_with_no_stuck_modifier() {
+        // `eitype` releases held modifiers at the end of the action list, so
+        // the arguments carry `-M` with no matching explicit release.
+        assert_eq!(
+            eitype_paste_args(PasteKeys::CtrlV),
+            ["-M", "ctrl", "-k", "v"]
+        );
+        assert_eq!(
+            eitype_paste_args(PasteKeys::ShiftInsert),
+            ["-M", "shift", "-k", "Insert"]
+        );
+    }
+
+    #[test]
+    fn eitype_type_args_add_the_kde_delay_only_on_kde() {
+        assert_eq!(eitype_type_args("hi", false), vec!["hi".to_string()]);
+        assert_eq!(
+            eitype_type_args("hi", true),
+            vec![
+                "-d".to_string(),
+                EITYPE_KDE_TYPE_DELAY_MS.to_string(),
+                "hi".to_string()
+            ]
+        );
+        // A newline is passed through in the one text argument; eitype maps it
+        // to Return internally, so no separate key press is needed.
+        assert_eq!(eitype_type_args("a\nb", false), vec!["a\nb".to_string()]);
+    }
+
+    #[test]
+    fn kde_desktop_names_match_a_whole_component() {
+        for (desktop, kde) in [
+            ("KDE", true),
+            ("kde", true),
+            ("KDE:GNOME", true),
+            ("ubuntu:GNOME", false),
+            ("GNOME", false),
+            ("sway:GNOME", false),
+            ("X-Cinnamon", false),
+        ] {
+            assert_eq!(
+                desktop_names_are_kde(&[desktop.to_string()]),
+                kde,
+                "{desktop}"
+            );
+        }
+    }
+
+    #[test]
     fn test_probe_returns_string() {
         let backend = probe_type_backend();
         assert!(!backend.is_empty());
@@ -892,6 +1054,7 @@ mod tests {
         assert!(
             warning.contains("install wtype")
                 || warning.contains("install dotool")
+                || warning.contains("install eitype")
                 || warning.contains("input"),
             "the warning must name a concrete remedy: {warning}"
         );
@@ -951,6 +1114,33 @@ mod tests {
         assert!(
             warning.contains("udev") || warning.contains("rule"),
             "the permission warning must name the udev-rule alternative: {warning}"
+        );
+    }
+
+    #[test]
+    fn eitype_warning_points_at_the_portal_helper_not_only_uinput() {
+        // KDE/GNOME Wayland with neither dotool nor eitype: the warning must
+        // name eitype, the helper that works without /dev/uinput access.
+        let missing = warning_for("eitype", false, false);
+        assert!(
+            missing.contains("install eitype"),
+            "the eitype warning must name eitype to install: {missing}"
+        );
+        assert!(
+            missing.contains("/dev/uinput"),
+            "the eitype warning must say no /dev/uinput access is needed: {missing}"
+        );
+        assert!(
+            missing.contains("RemoteDesktop"),
+            "the eitype warning must say how it types: {missing}"
+        );
+        // dotool installed but forbidden: keep the permission remedy, but also
+        // offer eitype so a KDE/GNOME user has a path that needs no uinput.
+        let forbidden = warning_for("eitype", true, false);
+        assert!(forbidden.contains("install eitype"), "{forbidden}");
+        assert!(
+            forbidden.contains("input") && forbidden.contains("/dev/uinput"),
+            "the eitype warning must still name the dotool permission remedy: {forbidden}"
         );
     }
 

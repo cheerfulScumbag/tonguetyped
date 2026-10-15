@@ -37,8 +37,9 @@ an interactive dashboard for every setting.
 - **Keyboard-first.** Bind "Start or stop dictation" once in your desktop's
   shortcut dialog. Hold to talk, or press once to start and once to stop.
 - **Types where you are.** The transcript is typed or pasted into the focused
-  app through `wtype`, `dotool`, or `enigo` - whichever actually works on your
-  compositor. When typing fails, the transcript is left on the clipboard.
+  app through `wtype`, `dotool`, `enigo`, or `eitype` - whichever actually works
+  on your compositor. When typing fails, the transcript is left on the
+  clipboard.
 - **Dictate into files.** Point `transcript_folder` at a directory and every
   finished transcript is also written there as a plain-text file, independent of
   the focused app or the clipboard.
@@ -170,7 +171,10 @@ daemon starts, so on NixOS `settings` needs `autostart` set to `"systemd"` or
 
 Typing on KWin goes through `dotool`, which needs `/dev/uinput` access. On
 NixOS, set `hardware.uinput.enable = true` and add your user to the `uinput`
-group.
+group. If you would rather not grant `/dev/uinput` access, install `eitype`
+(`cargo install eitype`, as nixpkgs does not package it): it types through the
+RemoteDesktop portal's libei path, works on KDE and GNOME Wayland without
+uinput, and is selected automatically when `dotool` cannot open the device.
 
 ### Arch Linux (AUR)
 
@@ -609,23 +613,34 @@ and does not need the daemon to be running.
 
 ## Platform notes
 
-Typing into the focused application uses one of three backends. Automatic
-selection tries `wtype`, then `enigo` on X11, then `dotool`, and only ever uses
-a backend that actually works.
+Typing into the focused application uses one of four backends. Automatic
+selection tries `wtype`, then `enigo` on X11, then `dotool`, then `eitype`, and
+only ever uses a backend that actually works.
 
 | Session | Typing helper | Notes |
 | --- | --- | --- |
 | wlroots Wayland (sway, Hyprland, niri) | `wtype` | Types through the Wayland virtual-keyboard protocol |
 | X11 | `enigo` / `xdotool` | Built in; `xdotool` provides the X11 backend |
-| KDE KWin and other Wayland compositors | `dotool` | `wtype` cannot type here; `dotool` writes through `/dev/uinput` |
+| KDE KWin, GNOME, and other Wayland compositors | `dotool`, then `eitype` | `wtype` cannot type here; `dotool` writes through `/dev/uinput`, and when that is unavailable `eitype` types through the RemoteDesktop portal's libei path |
 
 `dotool` needs write access to `/dev/uinput`, which is not granted by default.
 Add your user to the `input` group or install a matching udev rule; a present
 `dotool` that cannot open the device is treated as unavailable. **Debian has no
 `dotool` package** - KDE Wayland users installing from the `.deb` must build
-`dotool` from source (`go build` from its upstream repository) to type on KWin.
-Without it, the `clipboard` output method still works, and `type` falls back to
-leaving the transcript on the clipboard.
+`dotool` from source (`go build` from its upstream repository) or install
+`eitype` to type on KWin. Without either, the `clipboard` output method still
+works, and `type` falls back to leaving the transcript on the clipboard.
+
+`eitype` needs no `/dev/uinput` access: it opens a RemoteDesktop portal session
+per dictation and types through libei. That path requires KDE Plasma 6.1+ or
+GNOME 45+. The first run shows a portal authorization dialog and stores a
+single-use restore token; later runs are silent. On KDE, the desktop's
+"Remote Control" indicator briefly appears in the tray on each dictation. That
+flash is accepted because the alternative for a KDE or GNOME user without
+uinput access is no typing at all, and it never appears when `dotool` wins the
+`auto` probe, which it does whenever it can open `/dev/uinput`. To avoid it
+entirely, grant uinput access (and, if needed, pin `typing_backend = "dotool"`),
+or use the `clipboard` output method, which presses no keys.
 
 The Nix package and the AUR package both carry the helpers, so a normal install
 works out of the box. When a method's helper is missing, the dashboard and the
@@ -677,7 +692,7 @@ timeout_minutes = 15
 
 [output]
 method = "type"            # "none", "type", "clipboard", or "paste"
-typing_backend = "auto"    # "auto", "wtype", "enigo", or "dotool"
+typing_backend = "auto"    # "auto", "wtype", "enigo", "dotool", or "eitype"
 auto_submit = false        # press Enter after "type" or "paste"
 paste_keys = "ctrl-v"      # "ctrl-v" or "shift-insert", for "paste"
 

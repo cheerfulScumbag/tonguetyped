@@ -34,8 +34,8 @@ fn run_setup(
         // helper on a developer's desktop, and replace PATH entirely when a
         // bin directory is given so helper detection only sees its stubs.
         // `desktop` pins the compositor so the install warning is
-        // deterministic: KDE names dotool, a wlroots name such as sway names
-        // wtype.
+        // deterministic: KDE (and GNOME) name eitype, the helper that needs no
+        // /dev/uinput, while a wlroots name such as sway names wtype.
         .env("XDG_SESSION_TYPE", "wayland")
         .env("XDG_CURRENT_DESKTOP", desktop)
         .env("XDG_SESSION_DESKTOP", desktop)
@@ -133,8 +133,9 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
 
     // Answer 2 at "Transcript output" (type) while the sandbox PATH has no
     // helper and the compositor is KDE: the setup must refuse it with the
-    // install warning, naming dotool (wtype cannot work on KWin), re-prompt,
-    // then accept 1 (keep in TongueTyped) and finish normally.
+    // install warning, naming eitype (which types through the RemoteDesktop
+    // portal and needs no /dev/uinput, unlike dotool on KWin), re-prompt, then
+    // accept 1 (keep in TongueTyped) and finish normally.
     let output = run_setup(
         &root,
         &answers(&["", "", "", "2", "1", "", "", "", "", "", "", ""]),
@@ -154,11 +155,15 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
         "both transcript output choices must be listed even with no helper:\n{stdout}"
     );
     assert!(
-        stdout.contains("install dotool"),
-        "KDE must be told to install dotool, not wtype:\n{stdout}"
+        stdout.contains("install eitype"),
+        "KDE must be told to install eitype (no /dev/uinput needed), not wtype:\n{stdout}"
     );
     assert!(
-        stderr.contains("install dotool"),
+        !stdout.contains("install wtype"),
+        "KDE must not be told to install wtype, which cannot type on KWin:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("install eitype"),
         "the refused choice must repeat what to install:\n{stderr}"
     );
 
