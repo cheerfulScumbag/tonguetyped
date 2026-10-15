@@ -896,9 +896,10 @@ pub struct OverlayConfig {
     // `streaming_indicator`, which described the old synthetic stand-in for
     // Handy's streaming panel; the serde alias and `migrate_legacy_overlay_config`
     // keep existing config files loading and rewrite the key on save. Live
-    // partial text is now a real, separate concern - the `live-text` style
-    // driven by a streaming model (see `overlay::Style::LiveText`) - so this
-    // option only picks the glyph for a recording with no live text yet.
+    // partial text is now a real, separate concern - a streaming model's
+    // partials adopt the `live-text` presentation automatically (see
+    // `overlay::Style::LiveText`) - so this option only picks the glyph for a
+    // recording with no live text yet.
     #[serde(default = "default_true", alias = "streaming_indicator")]
     pub live_waveform: bool,
     // Which overlay look to show - the reviewed list lives in

@@ -29,11 +29,13 @@
 //!
 //! Besides the state cues above, the overlay can paint **live text**: when a
 //! streaming model is active, the coordinator forwards its partial transcript
-//! through [`OverlayHandle::try_send_live_text`] and the `live-text` style (see
-//! [`Style::LiveText`]) draws it - a wide dark pill with the frozen prefix
-//! bright, the still-revisable tail dimmed, and a caret. That text is preview
-//! only: it is never typed, persisted, or mirrored to the fallback chain, and
-//! every other style ignores it.
+//! through [`OverlayHandle::try_send_live_text`] and the overlay draws it as a
+//! wide dark pill with the frozen prefix bright, the still-revisable tail
+//! dimmed, and a caret. Those partials adopt the `live-text` caption
+//! presentation for the streaming duration (see [`Style::LiveText`]) even when
+//! another style is configured, so words appear as they are spoken without a
+//! style change. That text is preview only: it is never typed, persisted, or
+//! mirrored to the fallback chain.
 
 use crate::config::OverlayConfig;
 use crate::feedback::FeedbackEvent;
@@ -192,8 +194,8 @@ const LIVE_TEXT_TENTATIVE: (u8, u8, u8) = (0x8A, 0x8A, 0x8A);
 /// One live-text snapshot: the frozen `committed` prefix and the still-revisable
 /// `tentative` tail a streaming model reports while the user speaks. Produced by
 /// the coordinator from `transcribe_cpp::StreamText` and painted by the
-/// `live-text` style only; it never reaches the focused application, history, or
-/// the transcript, so partial words can never be typed.
+/// `live-text` presentation; it never reaches the focused application, history,
+/// or the transcript, so partial words can never be typed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveText {
     pub committed: String,
@@ -246,8 +248,9 @@ impl OverlayHandle {
     /// the layer-shell overlay. Like [`try_send`](Self::try_send), returns
     /// `false` when no wlr-layer-shell compositor is available, so the caller
     /// simply drops the partial rather than falling back to a notification
-    /// (partial text must never be mirrored into a desktop OSD). The snapshot is
-    /// painted only by the `live-text` style; every other style ignores it.
+    /// (partial text must never be mirrored into a desktop OSD). While a
+    /// snapshot is active the overlay paints the caption presentation for the
+    /// streaming duration, whatever `overlay.style` says.
     pub fn try_send_live_text(&self, live_text: LiveText, config: &OverlayConfig) -> bool {
         let config = config.clone();
         let sender = self.sender.get_or_init(spawn_actor);
@@ -262,6 +265,13 @@ impl OverlayHandle {
             None => false,
         }
     }
+
+    /// Whether the actor has already been probed (whether or not it turned out
+    /// to be available). Once true, a send is a non-blocking channel write, so
+    /// a caller can send inline instead of paying for an OS thread per call.
+    pub(crate) fn is_started(&self) -> bool {
+        self.sender.get().is_some()
+    }
 }
 
 impl Default for OverlayHandle {
@@ -272,8 +282,9 @@ impl Default for OverlayHandle {
 
 struct Command {
     event: FeedbackEvent,
-    /// A live-text snapshot to paint, or `None` for a plain state event. Carried
-    /// alongside the event (always `FeedbackEvent::Recording`) so the actor's
+    /// A live-text snapshot to paint, or `None` for a plain state event. A
+    /// `Some` command is a paint-only update; the carried event (always
+    /// `FeedbackEvent::Recording`) is only a placeholder so the actor's
     /// phase/style/config handling is shared.
     live_text: Option<LiveText>,
     config: OverlayConfig,
@@ -516,34 +527,48 @@ struct State {
     /// Live microphone levels sampled once per tick while recording (newest
     /// last) - what the recording animations react to.
     levels: LevelHistory,
-    /// The most recent live-text snapshot from a streaming model, painted by
-    /// the `live-text` style. Cleared by any non-`Recording` event and by the
-    /// start-of-recording event, so a finished dictation never leaves stale
-    /// partial words on screen.
+    /// The most recent live-text snapshot from a streaming model. While this is
+    /// `Some` the overlay adopts the `live-text` presentation; it is cleared by
+    /// any non-`Recording` event and by the start-of-recording event, so a
+    /// finished dictation never leaves stale partial words on screen.
     live_text: Option<LiveText>,
     loop_signal: LoopSignal,
 }
 
 impl State {
     fn handle_command(&mut self, command: Command, loop_handle: &LoopHandle<'static, State>) {
-        let phase = Phase::from_event(command.event);
-        let previous_phase = self.phase;
-        self.phase = Some(phase);
-        self.deadline = phase.dwell().map(|dwell| Instant::now() + dwell);
-        self.anim_start = Instant::now();
+        let paint_only = command.live_text.is_some();
+        // A live-text snapshot is preview paint, not a state transition: it
+        // must not advance the phase, restart the animation clock, or reset the
+        // dwell deadline. It only paints while a recording is already on
+        // screen, so a partial that lands after a terminal event (a cancel, a
+        // stop) is dropped instead of resurrecting Recording - with a `None`
+        // deadline - and stranding the overlay on stale words.
+        if paint_only {
+            if self.phase != Some(Phase::Recording) {
+                return;
+            }
+            self.live_text = command.live_text;
+        } else {
+            let phase = Phase::from_event(command.event);
+            let previous_phase = self.phase;
+            self.phase = Some(phase);
+            self.deadline = phase.dwell().map(|dwell| Instant::now() + dwell);
+            self.anim_start = Instant::now();
+            // Every non-live-text command clears the snapshot, so partials are
+            // gone the moment the dictation leaves Recording and a fresh
+            // recording starts blank.
+            self.live_text = command.live_text;
+            if phase == Phase::Recording && previous_phase != Some(Phase::Recording) {
+                // A new dictation starts a fresh waveform; the previous
+                // recording's voice must never scroll into the new one.
+                self.levels.clear();
+            }
+        }
         self.live_waveform = command.config.live_waveform;
-        self.style = style_for(&command.config.style);
+        self.style = resolved_style(&command.config.style, self.live_text.is_some());
         self.position = command.config.position.clone();
         self.target = target_for(&command.config.monitor);
-        // A live-text command carries its snapshot; every other command clears
-        // it, so partials are gone the moment the dictation leaves Recording
-        // (Processing/Success/...) and a fresh recording starts blank.
-        self.live_text = command.live_text;
-        if phase == Phase::Recording && previous_phase != Some(Phase::Recording) {
-            // A new dictation starts a fresh waveform; the previous recording's
-            // voice must never scroll into the new one.
-            self.levels.clear();
-        }
 
         let spec = layer_spec(&command.config, self.style);
         if self.layer_spec.as_ref() != Some(&spec) {
@@ -1481,8 +1506,24 @@ pub(crate) enum Style {
     LongPill,
     /// The streaming caption pill: a wide dark card holding the live partial
     /// transcript from a streaming model, or the live waveform until words
-    /// arrive. Only this style paints [`LiveText`].
+    /// arrive. This is the only style that paints [`LiveText`], and it is also
+    /// adopted automatically for the streaming duration while a model's live
+    /// text is active, even when another style is configured.
     LiveText,
+}
+
+/// The style the overlay actually paints: a streaming model's live text adopts
+/// the caption presentation for as long as its partials are arriving, so the
+/// words appear as they are spoken without the user also changing
+/// `overlay.style`; once the snapshot clears the configured style returns. The
+/// explicit `live-text` style is honoured whether or not the model streams
+/// (showing its live-waveform fallback before the first words).
+fn resolved_style(configured: &str, live_text_active: bool) -> Style {
+    if live_text_active {
+        Style::LiveText
+    } else {
+        style_for(configured)
+    }
 }
 
 /// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
@@ -1670,8 +1711,8 @@ fn phase_color(phase: Phase) -> (u8, u8, u8) {
 
 /// The per-frame inputs a style draws from, grouped so `paint` and the style
 /// functions keep a readable argument list: the live microphone level history
-/// and the most recent live-text snapshot (only the `live-text` style reads the
-/// latter).
+/// and the most recent live-text snapshot (only the `live-text` presentation
+/// reads the latter).
 struct OverlayFrame<'a> {
     levels: &'a LevelHistory,
     live_text: Option<&'a LiveText>,
@@ -2158,7 +2199,8 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
 /// dimmed, with a thin phase-coloured caret after the newest word; the
 /// newest-words window lives in [`text::caption_lines`]. Partial text is painted
 /// here and nowhere else - it is never typed, persisted, or shown in the
-/// fallback notification chain.
+/// fallback notification chain. The overlay adopts this presentation whenever a
+/// streaming model's partials are active (see [`resolved_style`]).
 fn paint_live_text(
     canvas: &mut Canvas,
     phase: Phase,
@@ -3134,6 +3176,27 @@ mod tests {
         assert_eq!(surface_size_for(Style::LiveText), LIVE_TEXT_SURFACE);
         let (width, height) = LIVE_TEXT_SURFACE;
         assert!(width > height * 4, "the caption pill is a wide bar");
+    }
+
+    #[test]
+    fn streaming_partials_adopt_the_caption_regardless_of_configured_style() {
+        // While a streaming model's partials are active the overlay paints the
+        // caption presentation whatever style is configured, so words appear
+        // without a style change; the configured style returns once the
+        // snapshot clears. The explicit live-text style is unaffected either
+        // way.
+        for configured in STYLE_VALUES {
+            assert_eq!(
+                resolved_style(configured, true),
+                Style::LiveText,
+                "{configured}"
+            );
+            assert_eq!(
+                resolved_style(configured, false),
+                style_for(configured),
+                "{configured}"
+            );
+        }
     }
 
     #[test]

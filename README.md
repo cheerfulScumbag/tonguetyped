@@ -415,7 +415,7 @@ and a no-speech outcome (an empty capture). `overlay.style` picks the look:
 | `half-circle` | A gleaming semicircle docked to the top-centre edge |
 | `border` | A full-screen frame that glows along every edge, brightest in the corners |
 | `long-pill` | A wide dark bar with a squiggly live waveform and a round status button |
-| `live-text` | A wide dark pill that streams a streaming model's live words (see "Live text"); shows the live waveform until the first words arrive |
+| `live-text` | A wide dark pill that streams a streaming model's live words (see "Live text"), used automatically for the streaming duration even when another style is configured; shows the live waveform until the first words arrive |
 
 Every style's recording animation follows your live microphone level: `badge`,
 `minimal`, and `pill` show a scrolling multi-bar waveform when
@@ -591,9 +591,15 @@ Two things to know before choosing a streaming model:
 - **Live text appears in the overlay only.** Partial words are preview: they are
   never typed into the focused application, and the transcript that is actually
   typed is the model's finalized result. Rewrites mid-recording therefore never
-  reach your editor. To see the streaming text, set the overlay style to
-  **Live Text** (`overlay.style = "live-text"`); the other overlay styles
-  ignore partials.
+  reach your editor.
+- **Live text shows automatically, whatever your overlay style.** As soon as
+  partials arrive the overlay switches to the caption presentation (a wide dark
+  pill with the committed text bright, the still-revisable tail dimmed, and a
+  caret) and returns to your configured style when the dictation ends, so no
+  style change is needed. The explicit **Live Text** (`overlay.style =
+  "live-text"`) style is still available if you want that presentation for
+  every recording, including non-streaming models, where it falls back to the
+  live waveform until words could appear.
 - **Every streaming model is English-only.** The small, fast models that stream
   have no multilingual variant, so live text is an English feature. Pick a
   Whisper (or other multilingual) model when you dictate in another language;

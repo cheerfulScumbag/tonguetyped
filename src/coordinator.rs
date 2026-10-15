@@ -514,35 +514,16 @@ impl ProductionRuntime {
         }
     }
 
-    /// Loads the active model (if not already) and reports whether it can
-    /// stream, so the worker can pick the streaming recording path before any
-    /// audio is captured. A load failure returns `false` and is logged; the
-    /// batch path will surface the same failure as a normal transcription
-    /// error, so a broken model is not hidden here.
-    fn streaming_ready(&self, config: &Config) -> bool {
-        let engine_key = format!(
-            "{}@{}",
-            config.model.active_model, config.model.preferred_backend
-        );
-        let cancel_token = crate::inference::CancelToken::new();
-        let mut lifecycle = self.inference.lock().unwrap_or_else(|e| e.into_inner());
-        match lifecycle.ensure(&engine_key, || {
-            let mut engine = crate::inference::InferenceEngine::new_with_token(
-                crate::catalog::model_path(&config.model.active_model)?,
-                crate::inference::BackendPreference::parse(&config.model.preferred_backend)?,
-                cancel_token.clone(),
-            );
-            engine.load()?;
-            Ok(engine)
-        }) {
-            Ok(engine) => engine.supports_streaming(),
-            Err(error) => {
-                tracing::warn!(
-                    "could not probe the model for streaming; using the batch path: {error:#}"
-                );
-                false
-            }
-        }
+    /// Whether the active model streams, read from the catalog capability so no
+    /// engine is loaded on the recording-start path: a cold load here (for
+    /// example after the idle unload) would delay audio capture and the
+    /// recording indicator for every dictation, including non-streaming models.
+    /// The streaming thread re-checks the capability on the actually-loaded
+    /// file before feeding it and falls back to the batch path, so this is a
+    /// fast pre-filter, not the runtime source of truth.
+    fn streaming_ready(config: &Config) -> bool {
+        crate::catalog::find(&config.model.active_model)
+            .is_some_and(|entry| entry.info().supports_streaming())
     }
 }
 
@@ -568,7 +549,7 @@ impl CoordinatorRuntime for ProductionRuntime {
         feedback: Arc<dyn Feedback>,
     ) -> RecordingAttempt {
         let max_duration = Duration::from_secs(config.transcription.max_recording_seconds);
-        if !self.streaming_ready(config) {
+        if !Self::streaming_ready(config) {
             return self.capture(microphone, max_duration, signal_rx, started, clock, None);
         }
         let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>();

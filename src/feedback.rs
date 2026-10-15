@@ -38,7 +38,7 @@ pub trait Feedback: Send + Sync {
 
     /// Show a live-text snapshot (a streaming model's partial transcript) in
     /// the overlay. This is preview-only and never a state transition: it is
-    /// painted by the `live-text` overlay style alone, never typed, persisted,
+    /// painted by the `live-text` overlay presentation, never typed, persisted,
     /// or mirrored to the notification fallback chain (partial words rewriting
     /// in a desktop OSD would be worse than showing nothing). The default is a
     /// no-op, so runtimes and test fakes that do not show live text compile
@@ -87,14 +87,20 @@ impl Feedback for DesktopFeedback {
         if !overlay_config.enabled {
             return;
         }
-        // Same off-thread send as `send`: the first overlay probe blocks
-        // briefly, every send after it is a non-blocking channel write. A
-        // partial that the compositor cannot show is dropped, never routed to
-        // the desktop notification fallback.
         let overlay = self.overlay.clone();
-        std::thread::spawn(move || {
+        // Once the actor is up the send is a non-blocking channel write, so
+        // send inline: partials arrive at the rate the model's text changes,
+        // and a fresh OS thread per snapshot buys nothing on this path. Only
+        // the first call, before the one-time probe has resolved, stays
+        // off-thread like `send`. A partial the compositor cannot show is
+        // dropped, never routed to the desktop notification fallback.
+        if overlay.is_started() {
             overlay.try_send_live_text(text, &overlay_config);
-        });
+        } else {
+            std::thread::spawn(move || {
+                overlay.try_send_live_text(text, &overlay_config);
+            });
+        }
     }
 }
 
