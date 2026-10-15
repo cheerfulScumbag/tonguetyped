@@ -169,9 +169,10 @@ reload` if the daemon is up; the NixOS module applies them each time the
 daemon starts, so on NixOS `settings` needs `autostart` set to `"systemd"` or
 `"xdg"`.
 
-Typing on KWin goes through `dotool`, which needs `/dev/uinput` access. On
-NixOS, set `hardware.uinput.enable = true` and add your user to the `uinput`
-group.
+`dotool`, used on KDE KWin and other non-wlroots Wayland compositors, needs
+`/dev/uinput` access (see [platform notes](#platform-notes) for the built-in
+`libei` alternative). On NixOS, set `hardware.uinput.enable = true` and add your
+user to the `uinput` group.
 
 ### Arch Linux (AUR)
 
@@ -201,8 +202,8 @@ backend. Every `.deb` installs the `tonguetyped` binary plus its bash, zsh, and
 fish shell completions and man pages.
 
 The `.deb` recommends `wtype` and `wl-clipboard`. Debian does not package
-`dotool`, so KDE Wayland users must build it from source to type (see
-[platform notes](#platform-notes)) or use the `clipboard` output method.
+`dotool`, but KDE and GNOME Wayland still type out of the box through the
+built-in `libei` backend (see [platform notes](#platform-notes)).
 
 ### Fedora / RHEL (.rpm)
 
@@ -240,7 +241,8 @@ gpg --verify <artifact>.asc <artifact>
 ### Build from source
 
 You need Rust, CMake, libclang, OpenSSL, pkg-config, ALSA development files,
-libxdo development files, and Wayland client development files:
+libxdo development files, libxkbcommon development files, and Wayland client
+development files:
 
 ```sh
 cargo build --release
