@@ -610,8 +610,18 @@ Three things to know before choosing a streaming model:
 
 Streaming models are recorded through the model's own native stream (nothing is
 re-decoded on a timer), so the feature costs no extra CPU beyond the model
-itself. A streaming model has no separate batch decode: the finalized stream is
+itself. A streaming model has no separate batch decode: the finalized text is
 the transcript.
+
+A streaming model's stream has a fixed output window - Moonshine-streaming caps
+its decoder at roughly 48 s of English - and once one stream reaches that cap it
+stops emitting words. So a live recording is decoded as a sequence of segments:
+when the running segment reaches the model-aware window (half the model's
+advertised ceiling, about 24 s), its text is committed and a fresh stream starts
+on the audio that follows, keeping the live text flowing for a long dictation.
+Each segment boundary is placed in a pause where the audio has one, and the
+finished segments are joined with a single space, so nothing at the seam is
+dropped or duplicated.
 
 ### Long recordings and file transcription
 
@@ -771,7 +781,7 @@ model's input into windows within that limit even when `chunk_seconds = 0` - and
 (`min(max_recording_seconds, chunk_seconds)`, or just `max_recording_seconds`
 with chunking off) would exceed it. A streaming model bypasses that offline path:
 `ProductionRuntime::record_streaming` feeds it the live capture and takes the
-finalized stream as the transcript, so it is never handed a single offline
+joined finalized text as the transcript, so it is never handed a single offline
 buffer.
 
 **Benchmarking.** `examples/transcribe_benchmark.rs` measures cold load and warm

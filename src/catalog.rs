@@ -33,10 +33,10 @@
 //! separately from the offline families: they do not go through
 //! `Session::run`, so a transcription never feeds one of them a single offline
 //! buffer. While a streaming model is active the coordinator records through
-//! the model's native `Stream` and takes the finalized stream text as the
-//! transcript (see `src/coordinator.rs`), which is also what draws the live
-//! overlay text; the offline families keep the VAD-then-single-buffer path
-//! unchanged.
+//! the model's native `Stream`, rolling it over to a fresh stream when the
+//! model's window fills and taking the joined finalized text as the transcript
+//! (see `src/inference.rs`), which is also what draws the live overlay text;
+//! the offline families keep the VAD-then-single-buffer path unchanged.
 //!
 //! Entries were derived by reading the transcribe.cpp `catalog/*.json` records
 //! (family, languages, downloads) and resolving each published HuggingFace
