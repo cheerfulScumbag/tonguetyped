@@ -567,6 +567,19 @@ struct State {
     loop_signal: LoopSignal,
 }
 
+/// The recording's streaming capability after applying a command. A paint-only
+/// live-text snapshot only repaints the words, so it must leave the capability
+/// untouched: otherwise a streaming recording would read as non-streaming from
+/// its first partial, and a momentarily-empty snapshot would fall back to the
+/// waveform - the two presentations showing at once.
+fn streaming_after_command(current: bool, paint_only: bool, command_streaming: bool) -> bool {
+    if paint_only {
+        current
+    } else {
+        command_streaming
+    }
+}
+
 impl State {
     fn handle_command(&mut self, command: Command, loop_handle: &LoopHandle<'static, State>) {
         let paint_only = command.live_text.is_some();
@@ -601,7 +614,7 @@ impl State {
             }
         }
         self.live_waveform = command.config.live_waveform;
-        self.streaming = command.streaming;
+        self.streaming = streaming_after_command(self.streaming, paint_only, command.streaming);
         self.style = resolved_style(
             &command.config.style,
             self.live_text.is_some(),
@@ -2913,7 +2926,7 @@ fn paint_half_circle(
 /// unpremultiplies, since PNG alpha is straight). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`/
-/// `live-text`;
+/// `live-text`/`live-text-minimal`/`live-text-box`;
 /// `recording`/`transcribing`/`success`/`no-speech`/`copied`/
 /// `clipboard-fallback`/`submit-failed`/`cancelled`/`error`), and
 /// `None` clears to fully transparent. `levels` is the live microphone history
@@ -3523,6 +3536,23 @@ mod tests {
                 "{configured}"
             );
         }
+    }
+
+    #[test]
+    fn a_live_text_snapshot_never_drops_a_recordings_streaming_capability() {
+        // A streaming recording is marked streaming at its start; its partials
+        // arrive as paint-only snapshots that must not clear that capability, so
+        // a snapshot that momentarily empties (a StablePrefix tail revised back
+        // to nothing) still shows the listening pad rather than the waveform.
+        let streaming = streaming_after_command(true, true, false);
+        assert!(
+            streaming,
+            "a paint-only snapshot must not clear the recording's streaming capability"
+        );
+        // Only a real state transition changes it: a terminal event or a
+        // non-streaming recording clears it, a streaming start sets it.
+        assert!(!streaming_after_command(streaming, false, false));
+        assert!(streaming_after_command(false, false, true));
     }
 
     #[test]
