@@ -1628,7 +1628,14 @@ mod tests {
         let screen = TypingBackendScreen::new(&capabilities, &Config::default());
         assert_eq!(screen.values, vec!["auto".to_string()]);
         let warning = screen.warning.expect("no helpers should warn");
-        assert!(warning.contains("install"));
+        // The remedy the warning names depends on the host session: install a
+        // helper where one is needed, or switch to the native libei backend
+        // where it works (KDE/GNOME Wayland). Either way the warning must name
+        // a concrete remedy, so this stays independent of the test machine.
+        assert!(
+            warning.contains("install") || warning.contains("typing_backend"),
+            "the warning must name a concrete remedy: {warning}"
+        );
     }
 
     #[test]
