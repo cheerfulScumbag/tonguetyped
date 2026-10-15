@@ -321,6 +321,11 @@ struct OverlayPreview {
 /// until it goes stale.
 const DAEMON_STATUS_REFRESH: Duration = Duration::from_secs(1);
 
+/// The Overlay screen's preview band: its total height in rows including the
+/// border and title. Kept small so the preview reads as a preview rather than
+/// dominating the screen the way the old side panel did.
+const PREVIEW_BAND_HEIGHT: u16 = 8;
+
 impl App {
     fn new(config: Config) -> Self {
         Self {
@@ -1787,15 +1792,17 @@ impl App {
     }
 
     fn render_overlay(&self, frame: &mut Frame, area: Rect, screen: &screens::OverlayScreen) {
-        // With the overlay enabled, a preview of the selected style sits beside
-        // the list so the choice is visible before it is applied.
+        // With the overlay enabled, a preview of the selected style runs as a
+        // modest band across the bottom, below the list and its hint rows, so
+        // the choice is visible before it is applied without the preview
+        // crowding the list or dominating the screen.
         let show_preview = self.config.overlay.enabled;
         let (list_area, preview_area) = if show_preview {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(34), Constraint::Length(44)])
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(PREVIEW_BAND_HEIGHT)])
                 .split(area);
-            (columns[0], Some(columns[1]))
+            (rows[0], Some(rows[1]))
         } else {
             (area, None)
         };
@@ -1829,19 +1836,24 @@ impl App {
                 inner.width,
                 inner.height,
             );
-            frame.render_widget(Paragraph::new(lines), inner);
+            let cols = lines.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
+            let rows = lines.len() as u16;
+            frame.render_widget(Paragraph::new(lines), centered_rect(inner, cols, rows));
         }
     }
 
     /// The preview cells for the selected overlay style, reusing the cached
     /// rasterisation when the style and waveform toggle are unchanged so the
-    /// dashboard does not re-render the full-resolution frame every tick.
+    /// dashboard does not re-render the full-resolution frame every tick. The
+    /// raster is fitted uniformly into the `max_cols` x `max_rows` box at its
+    /// true aspect ratio (see `preview_cell_size`), so wide styles stay wide
+    /// and square styles stay square instead of stretching to fill the box.
     fn overlay_preview_lines(
         &self,
         style: &str,
         live_waveform: bool,
-        cols: u16,
-        rows: u16,
+        max_cols: u16,
+        max_rows: u16,
     ) -> Vec<Line<'static>> {
         let mut cache = self.overlay_preview.borrow_mut();
         let stale = match cache.as_ref() {
@@ -1865,6 +1877,7 @@ impl App {
             });
         }
         let preview = cache.as_ref().expect("preview populated above");
+        let (cols, rows) = preview_cell_size(preview.width, preview.height, max_cols, max_rows);
         preview_lines_from_pixels(preview.width, preview.height, &preview.pixels, cols, rows)
     }
 
@@ -1957,6 +1970,44 @@ fn rendered_output_lines(lines: &[OutputLine]) -> Vec<Line<'static>> {
             Line::from(Span::styled(output.text.clone(), style))
         })
         .collect()
+}
+
+/// Fits a rasterised overlay frame of `pixels_width` x `pixels_height` image
+/// pixels into a `max_cols` x `max_rows` terminal-cell box at its true aspect
+/// ratio, returning the cell dimensions to render into.
+///
+/// The preview draws two image pixels per row inside a half-block cell, and a
+/// terminal cell is roughly twice as tall as it is wide, so a uniformly scaled
+/// raster satisfies `cols / (rows * 2) == pixels_width / pixels_height`. Limiting
+/// the row count by the available width before the available height keeps that
+/// ratio instead of stretching each style to fill the box on both axes, which
+/// is what turned the wide `pill` and `long-pill` styles into tall blobs.
+fn preview_cell_size(
+    pixels_width: u32,
+    pixels_height: u32,
+    max_cols: u16,
+    max_rows: u16,
+) -> (u16, u16) {
+    if pixels_width == 0 || pixels_height == 0 || max_cols == 0 || max_rows == 0 {
+        return (0, 0);
+    }
+    let aspect = pixels_width as f64 / pixels_height as f64;
+    let rows = ((max_cols as f64 / (2.0 * aspect)).floor() as u16).clamp(1, max_rows);
+    let cols = (2.0 * aspect * rows as f64).round() as u16;
+    (cols.clamp(1, max_cols), rows)
+}
+
+/// Centers a `width` x `height` region inside `area`, clamping to its bounds so
+/// a region larger than the area stays put instead of underflowing.
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 /// Downsamples a rasterised overlay frame (from the overlay's own offline
@@ -2254,10 +2305,19 @@ mod tests {
         for style in crate::overlay::STYLE_VALUES {
             let (width, height, pixels) =
                 crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, false, &[]);
-            let lines = preview_lines_from_pixels(width, height, &pixels, 24, 8);
-            assert_eq!(lines.len(), 8, "{style}: one line per preview row");
+            let (cols, rows) = preview_cell_size(width, height, 24, 8);
+            let lines = preview_lines_from_pixels(width, height, &pixels, cols, rows);
+            assert_eq!(
+                lines.len(),
+                rows as usize,
+                "{style}: one line per preview row"
+            );
             for line in &lines {
-                assert_eq!(line.spans.len(), 24, "{style}: one cell per column");
+                assert_eq!(
+                    line.spans.len(),
+                    cols as usize,
+                    "{style}: one cell per column"
+                );
             }
             let painted = lines
                 .iter()
@@ -2266,6 +2326,37 @@ mod tests {
                 .count();
             assert!(painted > 0, "{style}: the preview should paint something");
         }
+    }
+
+    #[test]
+    fn overlay_preview_keeps_each_styles_aspect_ratio() {
+        // The preview band is wide and short, so a uniformly fitted raster must
+        // still let a wide style render wider than it is tall. The `pill` raster
+        // is ~2:1; the old side panel stretched it into a tall blob instead.
+        let (width, height, _) =
+            crate::overlay::render_frame_pixels("pill", Some("recording"), 0.0, false, &[]);
+        let (cols, rows) = preview_cell_size(width, height, 40, 6);
+        assert!(
+            cols > rows,
+            "the pill preview should be wider than tall, got {cols} cols x {rows} rows"
+        );
+
+        // A square raster (`badge`) maps to a physically square region: its cell
+        // box is twice as wide as it is tall because a half-block cell is 2:1.
+        let (width, height, _) =
+            crate::overlay::render_frame_pixels("badge", Some("recording"), 0.0, false, &[]);
+        let (cols, rows) = preview_cell_size(width, height, 40, 6);
+        assert_eq!(cols, 2 * rows, "a square style must render 2:1 in cells");
+
+        // A very wide raster (`long-pill`, 8:1) must still render much wider
+        // than it is tall rather than filling the band vertically.
+        let (width, height, _) =
+            crate::overlay::render_frame_pixels("long-pill", Some("recording"), 0.0, false, &[]);
+        let (cols, rows) = preview_cell_size(width, height, 40, 6);
+        assert!(
+            cols > 2 * rows,
+            "long-pill should stay wide, got {cols} x {rows}"
+        );
     }
 
     #[test]
