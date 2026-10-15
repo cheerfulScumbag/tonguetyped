@@ -521,11 +521,9 @@ impl ProductionRuntime {
 /// recording indicator for every dictation, including non-streaming models.
 /// The streaming thread re-checks the capability on the actually-loaded
 /// file before feeding it and falls back to the batch path, so this is a
-/// fast pre-filter, not the runtime source of truth.
-///
-/// Shared by the streaming start path and the recording signal to the overlay
-/// so the runtime's batch/stream decision and the overlay's caption choice can
-/// never diverge.
+/// fast pre-filter, not the runtime source of truth. It selects the runtime's
+/// batch/stream path only; the overlay style is the user's choice and never
+/// switches on the model.
 fn streaming_ready(config: &Config) -> bool {
     crate::catalog::find(&config.model.active_model)
         .is_some_and(|entry| entry.info().supports_streaming())
@@ -1114,13 +1112,12 @@ impl Coordinator {
                     "recording cancelled during startup".into(),
                 ));
             }
-            // Tell the overlay whether the active model streams, so a streaming
-            // recording adopts the caption from the start and never flashes the
-            // waveform before the first word. Read through `streaming_ready` so
-            // the overlay and the runtime share one capability rule, and no
-            // engine is loaded on this path.
-            self.feedback
-                .send_recording(streaming_ready(&inner.config), &inner.config);
+            // Show the recording start. The overlay paints the configured
+            // style, whatever the model is: a streaming model's partials are
+            // forwarded separately through `send_live_text` and painted only
+            // when a live-text style is selected, so nothing here has to switch
+            // the overlay into caption mode.
+            self.feedback.send(FeedbackEvent::Recording, &inner.config);
         }
         Ok(response)
     }

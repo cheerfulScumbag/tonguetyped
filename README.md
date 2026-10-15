@@ -418,7 +418,7 @@ and a no-speech outcome (an empty capture). `overlay.style` picks the look:
 | `half-circle` | A gleaming semicircle docked to the top-centre edge |
 | `border` | A full-screen frame that glows along every edge, brightest in the corners |
 | `long-pill` | A wide dark glass bar with a squiggly live waveform and a round status button |
-| `live-text` | The streaming caption (glass): a dark glass card with a leading phase chip and one line of a streaming model's live words (see "Live text"), used automatically for a streaming model even when another style is configured; shows the listening pad until the first word |
+| `live-text` | The streaming caption (glass): a dark glass card with a leading phase chip and one line of a streaming model's live words (see "Live text"); shows the listening pad until the first word. Pick this style to see live text - it is never shown by any other style |
 | `live-text-minimal` | The streaming caption with a single leading phase dot instead of the full chip |
 | `live-text-box` | The streaming caption as a taller wrapped card that scrolls internally, for long passages |
 
@@ -584,12 +584,13 @@ CPU or GPU model.
 ### Live text (streaming models)
 
 Some models transcribe *as you speak*: while a recording is running their words
-stream across the overlay, and the finalized text is typed when you stop.
-Whether a model can do this is a property of the model, not a setting, so it
-works exactly the way Handy does it. `tonguetyped model list` marks the
-streaming models with a `live (en)` tag under **STREAMING**, and the dashboard's
-model screen tags them `LIVE`; the rest of the catalog produces no live text and
-shows only the recording indicator.
+can stream across the overlay, and the finalized text is typed when you stop.
+Whether a model can do this is a property of the model, not a setting, so the
+live decode runs the way Handy does it. Whether the words are *shown* is your
+call: choose a `live-text` overlay style (below) to see them. `tonguetyped model
+list` marks the streaming models with a `live (en)` tag under **STREAMING**, and
+the dashboard's model screen tags them `LIVE`; the rest of the catalog produces
+no live text and shows only the recording indicator.
 
 Four things to know before choosing a streaming model:
 
@@ -597,21 +598,21 @@ Four things to know before choosing a streaming model:
   never typed into the focused application, and the transcript that is actually
   typed is the model's finalized result. Rewrites mid-recording therefore never
   reach your editor.
-- **Live text shows automatically, whatever your overlay style.** The moment a
-  streaming recording starts, the overlay switches to the caption presentation
-  (a dark glass card with a leading phase chip, the committed text bright, the
-  still-revisable tail dimmed, and a caret; a listening pad before the first
-  word) and holds the words through the terminal phases, so no style change is
-  needed. The explicit caption styles are also selectable on their own: **Live
-  Text (glass)** (`overlay.style = "live-text"`), **Live Text (minimal)**
-  (`live-text-minimal`, a leading dot instead of the chip), and **Live Text
+- **Live text is a choice of overlay style, not a model behaviour.** Pick one
+  of the caption styles to see it: **Live Text (glass)**
+  (`overlay.style = "live-text"`), **Live Text (minimal)**
+  (`live-text-minimal`, a leading dot instead of the chip), or **Live Text
   (box)** (`live-text-box`, a taller wrapped card that scrolls, for long
-  passages).
-- **Live text and the waveform never appear together.** The active model decides
-  which one you see: a streaming model shows the caption (no waveform), and any
-  other model shows the waveform (no live text). A caption style selected with a
-  non-streaming model therefore falls back to the waveform rather than drawing
-  bars and words at once.
+  passages). The caption is a dark glass card with a leading phase chip, the
+  committed text bright, the still-revisable tail dimmed, and a caret; a
+  listening pad shows before the first word, and the words hold through the
+  terminal phases. The single-line caption sizes its pill to its content - a
+  small card while empty, growing only as words arrive. With any other style
+  (for example `blob`) the overlay shows that style and no live text at all,
+  even with a streaming model active.
+- **Live text and the waveform never appear together.** The caption styles
+  paint words (or the listening pad) and never a waveform; every other style
+  paints its own recording animation and never live words.
 - **Every streaming model is English-only.** The small, fast models that stream
   have no multilingual variant, so live text is an English feature. Pick a
   Whisper (or other multilingual) model when you dictate in another language;

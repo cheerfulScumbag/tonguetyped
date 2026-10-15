@@ -36,16 +36,6 @@ pub enum FeedbackEvent {
 pub trait Feedback: Send + Sync {
     fn send(&self, event: FeedbackEvent, config: &Config);
 
-    /// Show the recording-phase start, carrying whether the active model
-    /// streams. A streaming model's recording adopts the caption presentation
-    /// from the start (its empty state is the listening pad), so the waveform
-    /// never flashes before the first word; a non-streaming recording keeps the
-    /// configured style and its waveform. Defaults to an ordinary `Recording`
-    /// event, so runtimes and test fakes that do not care compile unchanged.
-    fn send_recording(&self, _streaming: bool, config: &Config) {
-        self.send(FeedbackEvent::Recording, config);
-    }
-
     /// Show a live-text snapshot (a streaming model's partial transcript) in
     /// the overlay. This is preview-only and never a state transition: it is
     /// painted by the `live-text` overlay presentation, never typed, persisted,
@@ -69,10 +59,8 @@ impl DesktopFeedback {
     }
 
     /// Shows `event` off-thread, falling back to the desktop notification path
-    /// when the overlay is unavailable. `streaming` is `Some` only for a
-    /// recording start, carrying whether the active model streams so the overlay
-    /// adopts the caption up front instead of flashing the waveform.
-    fn send_command(&self, event: FeedbackEvent, streaming: Option<bool>, config: &Config) {
+    /// when the overlay is unavailable.
+    fn send_command(&self, event: FeedbackEvent, config: &Config) {
         let overlay_config = config.overlay.clone();
         let audio = config.audio.clone();
         if !overlay_config.enabled && !audio.feedback_sounds {
@@ -85,14 +73,8 @@ impl DesktopFeedback {
         // the same way the legacy D-Bus calls below already were.
         let overlay = self.overlay.clone();
         std::thread::spawn(move || {
-            if overlay_config.enabled {
-                let sent = match streaming {
-                    Some(streaming) => overlay.try_send_recording(streaming, &overlay_config),
-                    None => overlay.try_send(event, &overlay_config),
-                };
-                if !sent {
-                    show_visual(event);
-                }
+            if overlay_config.enabled && !overlay.try_send(event, &overlay_config) {
+                show_visual(event);
             }
             if audio.feedback_sounds {
                 play_sound(event, audio.feedback_volume, &audio.feedback_device);
@@ -103,11 +85,7 @@ impl DesktopFeedback {
 
 impl Feedback for DesktopFeedback {
     fn send(&self, event: FeedbackEvent, config: &Config) {
-        self.send_command(event, None, config);
-    }
-
-    fn send_recording(&self, streaming: bool, config: &Config) {
-        self.send_command(FeedbackEvent::Recording, Some(streaming), config);
+        self.send_command(event, config);
     }
 
     fn send_live_text(&self, text: crate::overlay::LiveText, config: &Config) {

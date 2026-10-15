@@ -888,25 +888,24 @@ pub struct OverlayConfig {
     // to pin the overlay to. See `overlay::target_for`.
     #[serde(default = "default_overlay_monitor")]
     pub monitor: String,
-    // Which recording glyph the overlay shows: the plain pulsing dot
-    // (`false`) or the live multi-bar microphone waveform (`true`, the
-    // default). Every style's recording animation is voice-reactive either
+    // Which recording glyph the non-caption overlay styles show: the plain
+    // pulsing dot (`false`) or the live multi-bar microphone waveform (`true`,
+    // the default). Every style's recording animation is voice-reactive either
     // way - this only picks the busier glyph, feeding the real microphone
     // level through `audio::publish_level` to the overlay actor. Renamed from
     // `streaming_indicator`, which described the old synthetic stand-in for
     // Handy's streaming panel; the serde alias and `migrate_legacy_overlay_config`
-    // keep existing config files loading and rewrite the key on save. The
-    // live-text caption and the waveform are mutually exclusive by model
-    // capability: a streaming model's recording shows the caption (its
-    // listening pad before the first word, then the words), while a
-    // non-streaming recording shows this glyph. A `live-text` caption style
-    // driven by a non-streaming model therefore falls back to this waveform
-    // rather than showing a waveform and words together.
+    // keep existing config files loading and rewrite the key on save. This
+    // toggle never affects the live-text caption styles, which paint words or
+    // their listening pad and never a waveform.
     #[serde(default = "default_true", alias = "streaming_indicator")]
     pub live_waveform: bool,
     // Which overlay look to show - the reviewed list lives in
     // `overlay::STYLE_VALUES`, which now includes the `live-text`,
-    // `live-text-minimal`, and `live-text-box` streaming caption family.
+    // `live-text-minimal`, and `live-text-box` streaming caption family. The
+    // configured style is authoritative: choosing a `live-text` style is what
+    // shows live streaming text, and any other style stays on screen and shows
+    // no live text even with a streaming model.
     // `src/overlay.rs::style_for` parses this, falling back to `badge` for an
     // unrecognized value exactly like `anchor_for` falls back on `position`.
     #[serde(default = "default_overlay_style")]
