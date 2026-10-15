@@ -309,16 +309,20 @@ fn wtype_paste_args(keys: PasteKeys) -> Vec<String> {
 /// (`V:src/output/eitype.rs:16-34`).
 const EITYPE_KDE_TYPE_DELAY_MS: u32 = 1;
 
-/// The `eitype` arguments that type `text`: `eitype <text>`, with a forced
-/// small inter-key delay on KDE. `eitype` maps `\n` in the text to Return, so
-/// newlines need no separate key press. Kept separate from the command so the
-/// KDE pacing is testable without mutating the process-global environment.
+/// The `eitype` arguments that type `text`: `eitype -- <text>`, with a forced
+/// small inter-key delay on KDE. The `--` end-of-options separator keeps a
+/// transcript that begins with `-` (for example `--help`) from being parsed as
+/// an option, which would print help, exit 0, and type nothing. `eitype` maps
+/// `\n` in the text to Return, so newlines need no separate key press. Kept
+/// separate from the command so the KDE pacing is testable without mutating the
+/// process-global environment.
 fn eitype_type_args(text: &str, kde: bool) -> Vec<String> {
     let mut args = Vec::new();
     if kde {
         args.push("-d".to_string());
         args.push(EITYPE_KDE_TYPE_DELAY_MS.to_string());
     }
+    args.push("--".to_string());
     args.push(text.to_string());
     args
 }
@@ -1009,18 +1013,45 @@ mod tests {
 
     #[test]
     fn eitype_type_args_add_the_kde_delay_only_on_kde() {
-        assert_eq!(eitype_type_args("hi", false), vec!["hi".to_string()]);
+        assert_eq!(
+            eitype_type_args("hi", false),
+            vec!["--".to_string(), "hi".to_string()]
+        );
         assert_eq!(
             eitype_type_args("hi", true),
             vec![
                 "-d".to_string(),
                 EITYPE_KDE_TYPE_DELAY_MS.to_string(),
+                "--".to_string(),
                 "hi".to_string()
             ]
         );
         // A newline is passed through in the one text argument; eitype maps it
         // to Return internally, so no separate key press is needed.
-        assert_eq!(eitype_type_args("a\nb", false), vec!["a\nb".to_string()]);
+        assert_eq!(
+            eitype_type_args("a\nb", false),
+            vec!["--".to_string(), "a\nb".to_string()]
+        );
+    }
+
+    #[test]
+    fn eitype_type_args_place_text_after_the_end_of_options_separator() {
+        // A transcript that begins with a hyphen (for example `--help`) must
+        // reach eitype as the positional text, not be parsed as an option:
+        // `eitype --help` would print help, exit 0, and type nothing.
+        assert_eq!(
+            eitype_type_args("--help", false),
+            vec!["--".to_string(), "--help".to_string()]
+        );
+        assert_eq!(
+            eitype_type_args("--help", true),
+            vec![
+                "-d".to_string(),
+                EITYPE_KDE_TYPE_DELAY_MS.to_string(),
+                "--".to_string(),
+                "--help".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1065,10 +1096,9 @@ mod tests {
     }
 
     #[test]
-    fn wlroots_compositors_recommend_wtype_and_others_dotool() {
-        // Only wlroots-based compositors implement the virtual-keyboard
-        // protocol wtype needs; KDE's KWin and everything else must get
-        // dotool instead.
+    fn desktop_names_are_wlroots_classifies_wlroots_compositors() {
+        // `desktop_names_are_wlroots` is true only for wlroots-based
+        // compositors; KDE, GNOME, and every other desktop are not wlroots.
         for (desktop, wlroots) in [
             ("sway", true),
             ("Hyprland", true),
