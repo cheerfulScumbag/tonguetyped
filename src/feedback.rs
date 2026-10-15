@@ -36,6 +36,16 @@ pub enum FeedbackEvent {
 pub trait Feedback: Send + Sync {
     fn send(&self, event: FeedbackEvent, config: &Config);
 
+    /// Show the recording-phase start, carrying whether the active model
+    /// streams. A streaming model's recording adopts the caption presentation
+    /// from the start (its empty state is the listening pad), so the waveform
+    /// never flashes before the first word; a non-streaming recording keeps the
+    /// configured style and its waveform. Defaults to an ordinary `Recording`
+    /// event, so runtimes and test fakes that do not care compile unchanged.
+    fn send_recording(&self, _streaming: bool, config: &Config) {
+        self.send(FeedbackEvent::Recording, config);
+    }
+
     /// Show a live-text snapshot (a streaming model's partial transcript) in
     /// the overlay. This is preview-only and never a state transition: it is
     /// painted by the `live-text` overlay presentation, never typed, persisted,
@@ -78,6 +88,30 @@ impl Feedback for DesktopFeedback {
             }
             if audio.feedback_sounds {
                 play_sound(event, audio.feedback_volume, &audio.feedback_device);
+            }
+        });
+    }
+
+    fn send_recording(&self, streaming: bool, config: &Config) {
+        let overlay_config = config.overlay.clone();
+        let audio = config.audio.clone();
+        if !overlay_config.enabled && !audio.feedback_sounds {
+            return;
+        }
+        // Same off-thread shape as `send`; the only difference is the extra
+        // streaming flag, which lets the overlay adopt the caption from the
+        // start of a streaming recording instead of flashing the waveform.
+        let overlay = self.overlay.clone();
+        std::thread::spawn(move || {
+            if overlay_config.enabled && !overlay.try_send_recording(streaming, &overlay_config) {
+                show_visual(FeedbackEvent::Recording);
+            }
+            if audio.feedback_sounds {
+                play_sound(
+                    FeedbackEvent::Recording,
+                    audio.feedback_volume,
+                    &audio.feedback_device,
+                );
             }
         });
     }

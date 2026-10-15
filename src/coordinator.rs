@@ -1110,7 +1110,14 @@ impl Coordinator {
                     "recording cancelled during startup".into(),
                 ));
             }
-            self.feedback.send(FeedbackEvent::Recording, &inner.config);
+            // Tell the overlay whether the active model streams, so a streaming
+            // recording adopts the caption from the start and never flashes the
+            // waveform before the first word. This is the same fast catalog
+            // capability check `streaming_ready` uses, so no engine is loaded
+            // on this path.
+            let streaming = crate::catalog::find(&inner.config.model.active_model)
+                .is_some_and(|entry| entry.info().supports_streaming());
+            self.feedback.send_recording(streaming, &inner.config);
         }
         Ok(response)
     }

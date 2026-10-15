@@ -1770,6 +1770,19 @@ impl App {
     }
 
     fn render_overlay(&self, frame: &mut Frame, area: Rect, screen: &screens::OverlayScreen) {
+        // With the overlay enabled, a preview of the selected style sits beside
+        // the list so the choice is visible before it is applied.
+        let show_preview = self.config.overlay.enabled;
+        let (list_area, preview_area) = if show_preview {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(34), Constraint::Length(44)])
+                .split(area);
+            (columns[0], Some(columns[1]))
+        } else {
+            (area, None)
+        };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1777,13 +1790,30 @@ impl App {
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
-            .split(area);
+            .split(list_area);
         frame.render_widget(screen.list_widget(&self.config), chunks[0]);
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
         frame.render_widget(
             Paragraph::new("↑/↓ choose  Enter change  Esc back  q quit"),
             chunks[2],
         );
+
+        if let Some(preview_area) = preview_area {
+            let title = format!(
+                "Preview - {}",
+                screens::overlay_style_label(&self.config.overlay.style)
+            );
+            let block = Block::default().borders(Borders::ALL).title(title);
+            let inner = block.inner(preview_area);
+            frame.render_widget(block, preview_area);
+            let lines = overlay_preview_lines(
+                &self.config.overlay.style,
+                self.config.overlay.live_waveform,
+                inner.width,
+                inner.height,
+            );
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
     }
 
     fn render_text_fields(
@@ -1875,6 +1905,85 @@ fn rendered_output_lines(lines: &[OutputLine]) -> Vec<Line<'static>> {
             Line::from(Span::styled(output.text.clone(), style))
         })
         .collect()
+}
+
+/// Renders a preview of one overlay style into terminal half-block cells, for
+/// the Overlay screen. It reuses the overlay's own offline rasteriser
+/// (`overlay::render_frame_pixels`), so the preview matches what the compositor
+/// shows at this style's recording state; each cell carries two vertical image
+/// pixels (`▀` with the upper pixel as the foreground and the lower as the
+/// background), which any truecolour terminal renders without a graphics
+/// protocol.
+fn overlay_preview_lines(
+    style: &str,
+    live_waveform: bool,
+    cols: u16,
+    rows: u16,
+) -> Vec<Line<'static>> {
+    let (pixels_width, pixels_height, pixels) =
+        crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, live_waveform, &[]);
+    if pixels_width == 0 || pixels_height == 0 || cols == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let sample_rows = rows as usize * 2;
+    let mut lines = Vec::with_capacity(rows as usize);
+    for row in 0..rows as usize {
+        let mut spans = Vec::with_capacity(cols as usize);
+        for col in 0..cols as usize {
+            let top = preview_sample(
+                &pixels,
+                pixels_width,
+                pixels_height,
+                col,
+                cols as usize,
+                row * 2,
+                sample_rows,
+            );
+            let bottom = preview_sample(
+                &pixels,
+                pixels_width,
+                pixels_height,
+                col,
+                cols as usize,
+                row * 2 + 1,
+                sample_rows,
+            );
+            spans.push(preview_span(top, bottom));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// Samples one image pixel for the preview cell at (`col`, `sample_row`) of a
+/// `cols` x `sample_rows` grid, returning straight RGB and whether the pixel is
+/// opaque enough to draw. The rasteriser's buffer is premultiplied BGRA over a
+/// transparent surface, so the premultiplied channels are already the colour to
+/// show against a dark terminal.
+fn preview_sample(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    col: usize,
+    cols: usize,
+    sample_row: usize,
+    sample_rows: usize,
+) -> (u8, u8, u8, bool) {
+    let x = (col as u64 * width as u64 / cols as u64).min(width as u64 - 1) as u32;
+    let y = (sample_row as u64 * height as u64 / sample_rows as u64).min(height as u64 - 1) as u32;
+    let index = ((y * width + x) * 4) as usize;
+    let pixel = &pixels[index..index + 4];
+    (pixel[2], pixel[1], pixel[0], pixel[3] > 40)
+}
+
+fn preview_span(top: (u8, u8, u8, bool), bottom: (u8, u8, u8, bool)) -> Span<'static> {
+    let fg = |pixel: (u8, u8, u8, bool)| Style::default().fg(Color::Rgb(pixel.0, pixel.1, pixel.2));
+    match (top.3, bottom.3) {
+        (false, false) => Span::raw(" "),
+        (true, false) => Span::styled("▀", fg(top)),
+        (false, true) => Span::styled("▄", fg(bottom)),
+        (true, true) => Span::styled("▀", fg(top).bg(Color::Rgb(bottom.0, bottom.1, bottom.2))),
+    }
 }
 
 async fn ipc_task(request: ipc::Request) -> Vec<OutputLine> {
@@ -2086,6 +2195,26 @@ async fn backend_activation_task(name: &'static str) -> Vec<OutputLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_preview_draws_a_grid_of_half_block_cells() {
+        // Every style must render a full grid; the badge preview centres an
+        // opaque disc, so at least one cell carries a foreground colour while
+        // the transparency around it stays blank.
+        for style in crate::overlay::STYLE_VALUES {
+            let lines = overlay_preview_lines(style, false, 24, 8);
+            assert_eq!(lines.len(), 8, "{style}: one line per preview row");
+            for line in &lines {
+                assert_eq!(line.spans.len(), 24, "{style}: one cell per column");
+            }
+            let painted = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .filter(|span| span.style.fg.is_some())
+                .count();
+            assert!(painted > 0, "{style}: the preview should paint something");
+        }
+    }
 
     #[test]
     fn home_items_cover_every_real_cli_command_in_declared_order_excluding_help_start_stop_and_settings_areas(

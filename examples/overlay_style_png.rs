@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use tonguetyped::overlay::render_frame_pixels;
 use tonguetyped::overlay::render_live_text_pixels;
 
-const STYLES: [&str; 8] = [
+const STYLES: [&str; 10] = [
     "badge",
     "minimal",
     "pill",
@@ -29,6 +29,8 @@ const STYLES: [&str; 8] = [
     "half-circle",
     "long-pill",
     "live-text",
+    "live-text-minimal",
+    "live-text-box",
 ];
 const PHASES: [&str; 8] = [
     "recording",
@@ -118,21 +120,41 @@ fn main() -> std::io::Result<()> {
         )?;
     }
 
-    // The live-text caption: the streaming pill with the committed prefix in
-    // near-white and the tentative tail dimmed, over a couple of windows up to
-    // the two-line cap; plus the waveform fallback before any words arrive.
-    for (label, committed, tentative) in [
-        ("words", "today I am testing local speech", " recognition"),
+    // The live-text caption family: the glass single-line caption, the minimal
+    // variant, and the scrolling box, each with the committed prefix in
+    // near-white and the tentative tail dimmed, plus the empty (listening pad)
+    // state. The rest of the states come from the style x phase loop above.
+    for (variant, label, committed, tentative) in [
         (
-            "wrap",
-            "the quick brown fox jumps over the lazy dog",
-            " and keeps on running past the edge",
+            "live-text",
+            "words",
+            "today I am testing local speech",
+            " recognition",
         ),
-        ("empty", "", ""),
+        (
+            "live-text",
+            "overrun",
+            "the quick brown fox jumps over the lazy dog and keeps running past the edge",
+            "",
+        ),
+        ("live-text", "empty", "", ""),
+        (
+            "live-text-minimal",
+            "words",
+            "today I am testing local speech",
+            " recognition",
+        ),
+        (
+            "live-text-box",
+            "words",
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen",
+            " fifteen sixteen",
+        ),
     ] {
-        let (width, height, pixels) = render_live_text_pixels(committed, tentative, &speaking);
+        let (width, height, pixels) =
+            render_live_text_pixels(variant, committed, tentative, &speaking);
         write_png(
-            &out.join(format!("live-text-{label}.png")),
+            &out.join(format!("{variant}-{label}.png")),
             width,
             height,
             &pixels,

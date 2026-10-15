@@ -417,8 +417,10 @@ and a no-speech outcome (an empty capture). `overlay.style` picks the look:
 | `blob` | A bright, glowing orb that stays soft and round in silence and spikes with your voice |
 | `half-circle` | A gleaming semicircle docked to the top-centre edge |
 | `border` | A full-screen frame that glows along every edge, brightest in the corners |
-| `long-pill` | A wide dark bar with a squiggly live waveform and a round status button |
-| `live-text` | A wide dark pill that streams a streaming model's live words (see "Live text"), used automatically for the streaming duration even when another style is configured; shows the live waveform until the first words arrive |
+| `long-pill` | A wide dark glass bar with a squiggly live waveform and a round status button |
+| `live-text` | The streaming caption (glass): a dark glass card with a leading phase chip and one line of a streaming model's live words (see "Live text"), used automatically for a streaming model even when another style is configured; shows the listening pad until the first word |
+| `live-text-minimal` | The streaming caption with a single leading phase dot instead of the full chip |
+| `live-text-box` | The streaming caption as a taller wrapped card that scrolls internally, for long passages |
 
 Every style's recording animation follows your live microphone level: `badge`,
 `minimal`, and `pill` show a scrolling multi-bar waveform when
@@ -595,14 +597,21 @@ Three things to know before choosing a streaming model:
   never typed into the focused application, and the transcript that is actually
   typed is the model's finalized result. Rewrites mid-recording therefore never
   reach your editor.
-- **Live text shows automatically, whatever your overlay style.** As soon as
-  partials arrive the overlay switches to the caption presentation (a wide dark
-  pill with the committed text bright, the still-revisable tail dimmed, and a
-  caret) and returns to your configured style when the dictation ends, so no
-  style change is needed. The explicit **Live Text** (`overlay.style =
-  "live-text"`) style is still available if you want that presentation for
-  every recording, including non-streaming models, where it falls back to the
-  live waveform until words could appear.
+- **Live text shows automatically, whatever your overlay style.** The moment a
+  streaming recording starts, the overlay switches to the caption presentation
+  (a dark glass card with a leading phase chip, the committed text bright, the
+  still-revisable tail dimmed, and a caret; a listening pad before the first
+  word) and holds the words through the terminal phases, so no style change is
+  needed. The explicit caption styles are also selectable on their own: **Live
+  Text (glass)** (`overlay.style = "live-text"`), **Live Text (minimal)**
+  (`live-text-minimal`, a leading dot instead of the chip), and **Live Text
+  (box)** (`live-text-box`, a taller wrapped card that scrolls, for long
+  passages).
+- **Live text and the waveform never appear together.** The active model decides
+  which one you see: a streaming model shows the caption (no waveform), and any
+  other model shows the waveform (no live text). A caption style selected with a
+  non-streaming model therefore falls back to the waveform rather than drawing
+  bars and words at once.
 - **Every streaming model is English-only.** The small, fast models that stream
   have no multilingual variant, so live text is an English feature. Pick a
   Whisper (or other multilingual) model when you dictate in another language;
