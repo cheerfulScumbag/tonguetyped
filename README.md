@@ -44,7 +44,7 @@ an interactive dashboard for every setting.
   finished transcript is also written there as a plain-text file, independent of
   the focused app or the clipboard.
 - **Unobtrusive feedback.** A click-through overlay shows recording,
-  transcribing, success, and failure - eight styles, on any number of screens.
+  transcribing, success, and failure - ten styles, on any number of screens.
 - **Terminal-native control.** Script it, or use the dashboard. Every command is
   a plain subcommand over a local Unix socket.
 - **Your transcripts stay yours.** History is a local SQLite database with
@@ -591,7 +591,7 @@ streaming models with a `live (en)` tag under **STREAMING**, and the dashboard's
 model screen tags them `LIVE`; the rest of the catalog produces no live text and
 shows only the recording indicator.
 
-Three things to know before choosing a streaming model:
+Four things to know before choosing a streaming model:
 
 - **Live text appears in the overlay only.** Partial words are preview: they are
   never typed into the focused application, and the transcript that is actually
