@@ -176,6 +176,7 @@ in
               "border"
               "half-circle"
               "long-pill"
+              "live-text"
             ]) "Overlay look.";
             monitor = setting types.str "`all`, or one output name from `tonguetyped doctor`.";
             live_waveform = setting types.bool "Show the live microphone waveform instead of a pulsing dot.";

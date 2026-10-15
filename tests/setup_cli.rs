@@ -342,7 +342,7 @@ fn cancellation_preserves_the_existing_file_byte_for_byte() {
 #[test]
 fn invalid_answers_are_rejected_and_eof_does_not_write() {
     let root = root("invalid");
-    let output = run_setup(&root, "99\n", None, "KDE");
+    let output = run_setup(&root, "999\n", None, "KDE");
     assert!(output.status.success());
     assert!(String::from_utf8(output.stderr)
         .unwrap()

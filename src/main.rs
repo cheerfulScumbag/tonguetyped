@@ -148,8 +148,8 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
         ModelCommand::List => {
             let config = config::Config::load()?;
             println!(
-                "{:<32} {:<10} {:>10}  {:<11}  {:<12} {:<14}  license",
-                "MODEL ID", "QUANT", "SIZE", "STATUS", "FAMILY", "LANGUAGES"
+                "{:<32} {:<10} {:>10}  {:<11}  {:<10} {:<12} {:<14}  license",
+                "MODEL ID", "QUANT", "SIZE", "STATUS", "STREAMING", "FAMILY", "LANGUAGES"
             );
             for entry in catalog::ENTRIES {
                 let installed = catalog::is_installed(entry.id);
@@ -159,12 +159,21 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                     (false, _) => "-",
                 };
                 let info = entry.info();
+                // Streaming models are the only ones that show live text while
+                // you speak, and every one of them is English-only, so the tag
+                // carries both facts.
+                let streaming = if info.supports_streaming() {
+                    "live (en)"
+                } else {
+                    "-"
+                };
                 println!(
-                    "{:<32} {:<10} {:>10}  {:<11}  {:<12} {:<14}  {}",
+                    "{:<32} {:<10} {:>10}  {:<11}  {:<10} {:<12} {:<14}  {}",
                     entry.id,
                     entry.quant,
                     commands::human_size(entry.size_bytes),
                     status,
+                    streaming,
                     info.family_label(),
                     info.language_summary(),
                     entry.license_spdx,

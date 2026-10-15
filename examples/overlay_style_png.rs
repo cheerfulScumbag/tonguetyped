@@ -18,8 +18,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tonguetyped::overlay::render_frame_pixels;
+use tonguetyped::overlay::render_live_text_pixels;
 
-const STYLES: [&str; 7] = [
+const STYLES: [&str; 8] = [
     "badge",
     "minimal",
     "pill",
@@ -27,6 +28,7 @@ const STYLES: [&str; 7] = [
     "border",
     "half-circle",
     "long-pill",
+    "live-text",
 ];
 const PHASES: [&str; 8] = [
     "recording",
@@ -110,6 +112,27 @@ fn main() -> std::io::Result<()> {
             render_frame_pixels("long-pill", Some(phase), 0.0, true, &speaking);
         write_png(
             &out.join(format!("long-pill-{phase}-speaking-review.png")),
+            width,
+            height,
+            &pixels,
+        )?;
+    }
+
+    // The live-text caption: the streaming pill with the committed prefix in
+    // near-white and the tentative tail dimmed, over a couple of windows up to
+    // the two-line cap; plus the waveform fallback before any words arrive.
+    for (label, committed, tentative) in [
+        ("words", "today I am testing local speech", " recognition"),
+        (
+            "wrap",
+            "the quick brown fox jumps over the lazy dog",
+            " and keeps on running past the edge",
+        ),
+        ("empty", "", ""),
+    ] {
+        let (width, height, pixels) = render_live_text_pixels(committed, tentative, &speaking);
+        write_png(
+            &out.join(format!("live-text-{label}.png")),
             width,
             height,
             &pixels,

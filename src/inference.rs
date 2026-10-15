@@ -331,6 +331,11 @@ struct LoadedSession {
     /// Whether `DecodeSupport::warn_unsupported` already logged for this
     /// load, so a dropped option is reported once rather than per dictation.
     warned_unsupported: bool,
+    /// The loaded model's own `Capabilities::supports_streaming`. A whisper (or
+    /// any other offline) family reports `false`; only a streaming port can be
+    /// fed through `Session::stream`. Read once at load because the coordinator
+    /// picks the streaming or batch recording path from it before decoding.
+    supports_streaming: bool,
 }
 
 /// Which of `TranscriptionConfig`'s decode options the loaded model can take,
@@ -722,6 +727,7 @@ impl InferenceEngine {
                         // the model default), so the model-level read is enough.
                         max_audio_ms: model.capabilities().max_audio_ms,
                         warned_unsupported: false,
+                        supports_streaming: model.capabilities().supports_streaming,
                         session,
                     });
                     return Ok(());
@@ -792,6 +798,79 @@ impl InferenceEngine {
             }
             _ => run_result(session.run(audio, &options)),
         }
+    }
+
+    /// Whether the loaded model advertises live streaming support
+    /// (`Capabilities::supports_streaming`). `false` when nothing is loaded.
+    /// This is read from the GGUF at load, so it reflects the actual file
+    /// rather than the catalog's family guess: a streaming port that lost the
+    /// capability in a future repin is correctly reported as non-streaming.
+    pub fn supports_streaming(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|loaded| loaded.supports_streaming)
+    }
+
+    /// Transcribe a live capture through the model's native `Stream`.
+    ///
+    /// `next_frame` pulls the next 16 kHz mono block, returning `None` when the
+    /// recording ends and the stream should be finalized. `on_partial` is
+    /// called with the current `(committed, tentative)` text whenever the
+    /// displayed string changes, so a caller can paint live text. Returns the
+    /// finalized transcript.
+    ///
+    /// Errors with "does not support streaming" when the loaded model reports
+    /// no streaming capability, so the coordinator can fall back to the batch
+    /// path instead of pretending partials exist. Like `transcribe`, this is
+    /// the only place a `Session` is driven; the caller owns the engine lock
+    /// for the whole recording, which is what keeps the stream and a later
+    /// batch decode from overlapping.
+    pub fn transcribe_streaming(
+        &mut self,
+        config: &crate::config::TranscriptionConfig,
+        mut next_frame: impl FnMut() -> Option<Vec<f32>>,
+        mut on_partial: impl FnMut(&str, &str),
+    ) -> anyhow::Result<Transcription> {
+        let loaded = self.session.as_mut().context("engine not loaded")?;
+        if !loaded.supports_streaming {
+            anyhow::bail!("this model does not support streaming transcription");
+        }
+        let options = run_options(config, loaded.decode_support);
+        // `StablePrefix` freezes a word once consecutive hypotheses agree on it,
+        // so the committed prefix only grows and partial text does not flicker;
+        // the still-revisable tail stays in `tentative`.
+        let stream_options = transcribe_cpp::StreamOptions {
+            commit_policy: transcribe_cpp::CommitPolicy::StablePrefix,
+            ..Default::default()
+        };
+        let mut stream = loaded
+            .session
+            .stream(&options, &stream_options)
+            .context("failed to begin streaming transcription")?;
+        let mut last = String::new();
+        while let Some(frame) = next_frame() {
+            if frame.is_empty() {
+                continue;
+            }
+            stream.feed(&frame).context("streaming feed failed")?;
+            let text = stream.text();
+            let display = format!("{}{}", text.committed, text.tentative);
+            if display != last {
+                on_partial(&text.committed, &text.tentative);
+                last = display;
+            }
+        }
+        stream.finalize().context("streaming finalize failed")?;
+        let text = stream.text();
+        // `full` is the authoritative final hypothesis; fall back to the
+        // display split only if the model left it empty but committed text.
+        let full = text.full.trim();
+        let display = text.display();
+        let display = display.trim();
+        Ok(Transcription {
+            text: if full.is_empty() { display } else { full }.to_string(),
+            truncated: false,
+        })
     }
 
     /// The GGUF file backing the loaded engine - always the exact path passed
@@ -1134,6 +1213,20 @@ mod tests {
         let engine = engine(BackendPreference::Auto);
         assert!(engine.active_model_path().is_none());
         assert!(engine.active_backend_info().is_none());
+    }
+
+    #[test]
+    fn unloaded_engine_does_not_claim_streaming_support() {
+        let mut engine = engine(BackendPreference::Auto);
+        assert!(!engine.supports_streaming());
+        // Streaming is only meaningful on a loaded model; without one it is a
+        // clean error rather than a panic.
+        let result = engine.transcribe_streaming(
+            &crate::config::TranscriptionConfig::default(),
+            || None,
+            |_, _| {},
+        );
+        assert!(result.is_err());
     }
 
     #[test]

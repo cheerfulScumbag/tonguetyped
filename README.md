@@ -43,7 +43,7 @@ an interactive dashboard for every setting.
   finished transcript is also written there as a plain-text file, independent of
   the focused app or the clipboard.
 - **Unobtrusive feedback.** A click-through overlay shows recording,
-  transcribing, success, and failure - seven styles, on any number of screens.
+  transcribing, success, and failure - eight styles, on any number of screens.
 - **Terminal-native control.** Script it, or use the dashboard. Every command is
   a plain subcommand over a local Unix socket.
 - **Your transcripts stay yours.** History is a local SQLite database with
@@ -415,6 +415,7 @@ and a no-speech outcome (an empty capture). `overlay.style` picks the look:
 | `half-circle` | A gleaming semicircle docked to the top-centre edge |
 | `border` | A full-screen frame that glows along every edge, brightest in the corners |
 | `long-pill` | A wide dark bar with a squiggly live waveform and a round status button |
+| `live-text` | A wide dark pill that streams a streaming model's live words (see "Live text"), used automatically for the streaming duration even when another style is configured; shows the live waveform until the first words arrive |
 
 Every style's recording animation follows your live microphone level: `badge`,
 `minimal`, and `pill` show a scrolling multi-bar waveform when
@@ -575,6 +576,40 @@ corrupt download is deleted, not kept. The active model lives in
 `model.active_model` and is used by every backend alike - there is no separate
 CPU or GPU model.
 
+### Live text (streaming models)
+
+Some models transcribe *as you speak*: while a recording is running their words
+stream across the overlay, and the finalized text is typed when you stop.
+Whether a model can do this is a property of the model, not a setting, so it
+works exactly the way Handy does it. `tonguetyped model list` marks the
+streaming models with a `live (en)` tag under **STREAMING**, and the dashboard's
+model screen tags them `LIVE`; the rest of the catalog produces no live text and
+shows only the recording indicator.
+
+Three things to know before choosing a streaming model:
+
+- **Live text appears in the overlay only.** Partial words are preview: they are
+  never typed into the focused application, and the transcript that is actually
+  typed is the model's finalized result. Rewrites mid-recording therefore never
+  reach your editor.
+- **Live text shows automatically, whatever your overlay style.** As soon as
+  partials arrive the overlay switches to the caption presentation (a wide dark
+  pill with the committed text bright, the still-revisable tail dimmed, and a
+  caret) and returns to your configured style when the dictation ends, so no
+  style change is needed. The explicit **Live Text** (`overlay.style =
+  "live-text"`) style is still available if you want that presentation for
+  every recording, including non-streaming models, where it falls back to the
+  live waveform until words could appear.
+- **Every streaming model is English-only.** The small, fast models that stream
+  have no multilingual variant, so live text is an English feature. Pick a
+  Whisper (or other multilingual) model when you dictate in another language;
+  you keep the full transcript, just without live text.
+
+Streaming models are recorded through the model's own native stream (nothing is
+re-decoded on a timer), so the feature costs no extra CPU beyond the model
+itself. A streaming model has no separate batch decode: the finalized stream is
+the transcript.
+
 ### Long recordings and file transcription
 
 A single live recording is capped by `transcription.max_recording_seconds`
@@ -710,10 +745,13 @@ substitutes a different model or family.
 
 **A curated catalog.** `src/catalog.rs` tracks reviewed GGUF models from the
 offline families this project has checked against its VAD-then-single-buffer
-pipeline (whisper, parakeet, moonshine, canary, and cohere), published by
+pipeline (whisper, parakeet, moonshine, canary, and cohere), plus the streaming
+`moonshine_streaming` ports that feed live text (see "Live text" above), all
+published by
 [handy-computer](https://huggingface.co/handy-computer). Each entry is pinned to
 a commit with an expected byte size and SHA-256, and `tonguetyped model list`
-labels it with its family and language coverage. Families differ in how much
+labels it with its family and language coverage (and its `live (en)` streaming
+tag). Families differ in how much
 audio one call accepts: whisper and parakeet take any length, moonshine's
 decoder has a fixed output budget (about 48 s of English, kept partially if a
 run still hits it), and canary and
@@ -722,7 +760,10 @@ keeps each call within the active model's advertised limit - splitting any such
 model's input into windows within that limit even when `chunk_seconds = 0` - and
 `Config::validate` additionally refuses a config whose per-call buffer
 (`min(max_recording_seconds, chunk_seconds)`, or just `max_recording_seconds`
-with chunking off) would exceed it.
+with chunking off) would exceed it. A streaming model bypasses that offline path:
+`ProductionRuntime::record_streaming` feeds it the live capture and takes the
+finalized stream as the transcript, so it is never handed a single offline
+buffer.
 
 **Benchmarking.** `examples/transcribe_benchmark.rs` measures cold load and warm
 inference on a 16 kHz mono WAV:
