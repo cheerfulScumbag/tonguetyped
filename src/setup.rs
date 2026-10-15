@@ -453,7 +453,10 @@ fn configure(
         .iter()
         .map(|entry| {
             if entry.info().supports_streaming() {
-                format!("{}  (live text, English only)", entry.id)
+                format!(
+                    "{}  (live text with a caption style, English only)",
+                    entry.id
+                )
             } else {
                 entry.id.to_string()
             }
