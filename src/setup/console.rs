@@ -121,8 +121,9 @@ struct ConsoleState {
     step: StepKind,
     model_values: Vec<String>,
     /// Display labels matching `model_values` position for position: the id,
-    /// plus a "live text with a live-text look, English only" tag for a
-    /// streaming model so the trade-off is visible at selection time.
+    /// plus a "live text with a live-text look" tag for a streaming model (with
+    /// an "English only" note when that holds) so the trade-off is visible at
+    /// selection time.
     model_labels: Vec<String>,
     model_selection: usize,
     inference_backend_values: Vec<&'static str>,
@@ -174,13 +175,16 @@ impl ConsoleState {
         let model_labels: Vec<String> = crate::catalog::ENTRIES
             .iter()
             .map(|entry| {
-                if entry.info().supports_streaming() {
-                    format!(
-                        "{}  (live text with a live-text look, English only)",
-                        entry.id
-                    )
-                } else {
-                    entry.id.to_string()
+                let info = entry.info();
+                match (info.supports_streaming(), info.is_english_only()) {
+                    (false, _) => entry.id.to_string(),
+                    (true, true) => {
+                        format!(
+                            "{}  (live text with a live-text look, English only)",
+                            entry.id
+                        )
+                    }
+                    (true, false) => format!("{}  (live text with a live-text look)", entry.id),
                 }
             })
             .collect();

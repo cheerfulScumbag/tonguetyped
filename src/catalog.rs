@@ -29,10 +29,11 @@
 //!   live recording limit would exceed a hard cap.
 //!
 //! Diarization (`sortformer`) stays out: it produces speaker segments, not a
-//! transcript. Streaming-only families (`moonshine_streaming`) are admitted
-//! separately from the offline families: they do not go through
-//! `Session::run`, so a transcription never feeds one of them a single offline
-//! buffer. While a streaming model is active the coordinator records through
+//! transcript. Streaming ports are admitted separately from the offline ones,
+//! marked per variant by [`VariantInfo::streaming`] rather than by family (the
+//! `parakeet` family mixes both): they do not go through `Session::run`, so a
+//! transcription never feeds one of them a single offline buffer. While a
+//! streaming model is active the coordinator records through
 //! the model's native `Stream`, rolling it over to a fresh stream when the
 //! model's window fills and taking the joined finalized text as the transcript
 //! (see `src/inference.rs`), which is also what draws the live overlay text;
@@ -75,6 +76,13 @@ pub struct VariantInfo {
     /// Languages the port transcribes, in the spellings it advertises.
     pub languages: &'static [&'static str],
     pub long_form: LongForm,
+    /// Whether this variant's GGUF advertises live streaming (the
+    /// transcribe.cpp `Capabilities::supports_streaming` capability). It is a
+    /// property of the model, not of its family: the `parakeet` family ships
+    /// both offline and streaming ports, so a family check would mislabel the
+    /// streaming ones as offline. The engine re-checks the capability on the
+    /// loaded file, which is the runtime source of truth.
+    pub streaming: bool,
 }
 
 impl VariantInfo {
@@ -99,21 +107,27 @@ impl VariantInfo {
             "moonshine_streaming" => "Moonshine Streaming",
             "canary" => "Canary",
             "cohere_asr" => "Cohere",
+            "voxtral_realtime" => "Voxtral Realtime",
             other => other,
         }
     }
 
-    /// Whether this family transcribes live while the user speaks - the
-    /// transcribe.cpp `Capabilities::supports_streaming` capability. It is a
-    /// property of the model, not a library switch: the offline families this
-    /// catalog otherwise ships (whisper, the non-streaming moonshine/parakeet
-    /// ports, canary, cohere) report `false`, and only the streaming ports
-    /// (their GGUF `general.architecture` is `moonshine_streaming`) can feed
-    /// partial text. The model list flags those entries before download; the
-    /// engine still re-checks the capability on the loaded file, which is the
-    /// runtime source of truth.
+    /// Whether this variant transcribes live while the user speaks, read from
+    /// its GGUF's `stt.capability.streaming` capability and carried per variant
+    /// rather than derived from [`Self::family`]: the `parakeet` family ships
+    /// both offline and streaming ports, so a family check would treat the
+    /// streaming ones as offline. The model list flags those entries before
+    /// download; the engine still re-checks the capability on the loaded file,
+    /// which is the runtime source of truth.
     pub fn supports_streaming(&self) -> bool {
-        self.family == "moonshine_streaming"
+        self.streaming
+    }
+
+    /// Whether English is this variant's only language. The streaming UI tags
+    /// carry an "(en)" note only when this holds, so a multilingual streaming
+    /// port is not mislabelled English-only.
+    pub fn is_english_only(&self) -> bool {
+        self.languages == ["en"]
     }
 }
 
@@ -460,6 +474,19 @@ pub const ENTRIES: &[CatalogModel] = &[
         sha256: "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
     },
     CatalogModel {
+        id: "moonshine-streaming-medium-q8_0",
+        variant: "moonshine-streaming-medium",
+        display_name: "moonshine-streaming-medium",
+        quant: "Q8_0",
+        upstream_repo: "UsefulSensors/moonshine-streaming-medium",
+        license_spdx: "mit",
+        hf_repo: "handy-computer/moonshine-streaming-medium-gguf",
+        revision: "56302cde2ae162d1357a833d91775bcd06e91e1b",
+        filename: "moonshine-streaming-medium-Q8_0.gguf",
+        size_bytes: 295793568,
+        sha256: "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
+    },
+    CatalogModel {
         id: "parakeet-tdt-0.6b-v2-f16",
         variant: "parakeet-tdt-0.6b-v2",
         display_name: "parakeet-tdt-0.6b-v2",
@@ -536,6 +563,71 @@ pub const ENTRIES: &[CatalogModel] = &[
         filename: "parakeet-tdt-0.6b-v2-Q8_0.gguf",
         size_bytes: 729574912,
         sha256: "f0d0e99cebb6d3b83f1f7069b82b5d3c2e39a54545b0da039cb4bafd9c4e5caa",
+    },
+    CatalogModel {
+        id: "parakeet-unified-en-0.6b-q4_k_m",
+        variant: "parakeet-unified-en-0.6b",
+        display_name: "parakeet-unified-en-0.6b",
+        quant: "Q4_K_M",
+        upstream_repo: "nvidia/parakeet-unified-en-0.6b",
+        license_spdx: "nvidia-open-model-license",
+        hf_repo: "handy-computer/parakeet-unified-en-0.6b-gguf",
+        revision: "843b1b175ace04f5a89d379c79e2518c0d065b25",
+        filename: "parakeet-unified-en-0.6b-Q4_K_M.gguf",
+        size_bytes: 477274496,
+        sha256: "a8bf3de2b393bd14ead5a858c3748d5e3b07a20fdeabdd3b498fba4f463fa929",
+    },
+    CatalogModel {
+        id: "nemotron-speech-streaming-en-0.6b-q4_k_m",
+        variant: "nemotron-speech-streaming-en-0.6b",
+        display_name: "nemotron-speech-streaming-en-0.6b",
+        quant: "Q4_K_M",
+        upstream_repo: "nvidia/nemotron-speech-streaming-en-0.6b",
+        license_spdx: "nvidia-open-model-license",
+        hf_repo: "handy-computer/nemotron-speech-streaming-en-0.6b-gguf",
+        revision: "7df420cc3fb915a3b334560dac712af44fc41ef5",
+        filename: "nemotron-speech-streaming-en-0.6b-Q4_K_M.gguf",
+        size_bytes: 475436032,
+        sha256: "dc959ca31499b114e395c44eb4f0778968f20e5cfb03305a08a39925b2da8e1e",
+    },
+    CatalogModel {
+        id: "nemotron-3.5-asr-streaming-0.6b-q4_k_m",
+        variant: "nemotron-3.5-asr-streaming-0.6b",
+        display_name: "nemotron-3.5-asr-streaming-0.6b",
+        quant: "Q4_K_M",
+        upstream_repo: "nvidia/nemotron-3.5-asr-streaming-0.6b",
+        license_spdx: "openmdw-1.1",
+        hf_repo: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+        revision: "53ce288f69326b415aeef030cfcb02a08a8096dd",
+        filename: "nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
+        size_bytes: 495831520,
+        sha256: "41c99fa5fb6f3d35f68e79adc3e755eca2232a8d921178bd647b71194792b8fd",
+    },
+    CatalogModel {
+        id: "multitalker-parakeet-streaming-0.6b-v1-q4_k_m",
+        variant: "multitalker-parakeet-streaming-0.6b-v1",
+        display_name: "multitalker-parakeet-streaming-0.6b-v1",
+        quant: "Q4_K_M",
+        upstream_repo: "nvidia/multitalker-parakeet-streaming-0.6b-v1",
+        license_spdx: "nvidia-open-model-license",
+        hf_repo: "handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf",
+        revision: "e9671411e593f17994f37540ac061e6b5dfe043b",
+        filename: "bundle/multitalker-parakeet-streaming-0.6b-v1-Q4_K_M.gguf",
+        size_bytes: 617132160,
+        sha256: "d24307ac22e9e691c146a7e2339891638a44a8492a765e4b6c11cff8960cd998",
+    },
+    CatalogModel {
+        id: "voxtral-mini-4b-realtime-2602-q4_k_m",
+        variant: "voxtral-mini-4b-realtime-2602",
+        display_name: "voxtral-mini-4b-realtime-2602",
+        quant: "Q4_K_M",
+        upstream_repo: "mistralai/Voxtral-Mini-4B-Realtime-2602",
+        license_spdx: "apache-2.0",
+        hf_repo: "handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
+        revision: "7fd3d424fc558edca2c53808578b0541ef52a81a",
+        filename: "Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf",
+        size_bytes: 2830493984,
+        sha256: "39dc1f65539373a406edea7490505822d77c12edff521744678717eef4da4723",
     },
     CatalogModel {
         id: "whisper-base-f16",
@@ -1510,127 +1602,203 @@ const COHERE_LANGUAGES: &[&str] = &[
     "en", "fr", "de", "es", "it", "pt", "nl", "pl", "el", "ar", "ja", "zh", "vi", "ko",
 ];
 
+/// Languages `voxtral-mini-4b-realtime-2602` advertises (13), in the spellings
+/// its transcribe.cpp catalog record lists.
+const VOXTRAL_REALTIME_LANGUAGES: &[&str] = &[
+    "en", "fr", "es", "de", "ru", "zh", "ja", "it", "pt", "nl", "ar", "hi", "ko",
+];
+
+/// The 32 language-locales `nemotron-3.5-asr-streaming-0.6b` advertises, in the
+/// BCP-47 spellings its transcribe.cpp catalog record lists.
+const NEMOTRON_35_LANGUAGES: &[&str] = &[
+    "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT", "pt-BR", "pt-PT", "nl-NL",
+    "de-DE", "tr-TR", "ru-RU", "ar-AR", "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA", "pl-PL",
+    "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI", "hr-HR", "sk-SK", "zh-CN", "hu-HU",
+    "ro-RO", "et-EE",
+];
+
 /// Capability data for every transcribe.cpp variant the catalog draws from,
 /// so the UI can label each entry with its family and language coverage and
 /// config validation can read each family's single-buffer limit. The
 /// non-whisper offline families were admitted after checking their output and
 /// long-form behavior against this project's pipeline (see the module docs);
-/// the `moonshine_streaming` ports are admitted for the native streaming path
-/// instead, marked by [`VariantInfo::supports_streaming`].
+/// the streaming ports are admitted for the native streaming path instead,
+/// marked per variant by [`VariantInfo::streaming`].
 pub const VARIANTS: &[VariantInfo] = &[
     VariantInfo {
         variant: "breeze-asr-25",
         family: "whisper",
         languages: BREEZE_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "canary-1b-v2",
         family: "canary",
         languages: CANARY_LANGUAGES,
         long_form: LongForm::HardCap { cap_seconds: 400 },
+        streaming: false,
     },
     VariantInfo {
         variant: "cohere-transcribe-03-2026",
         family: "cohere_asr",
         languages: COHERE_LANGUAGES,
         long_form: LongForm::HardCap { cap_seconds: 400 },
+        streaming: false,
     },
     VariantInfo {
         variant: "moonshine-base",
         family: "moonshine",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::SoftWindow { window_seconds: 48 },
+        streaming: false,
+    },
+    VariantInfo {
+        variant: "moonshine-streaming-medium",
+        family: "moonshine_streaming",
+        languages: ENGLISH_LANGUAGES,
+        long_form: LongForm::Unbounded,
+        streaming: true,
     },
     VariantInfo {
         variant: "moonshine-streaming-small",
         family: "moonshine_streaming",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: true,
     },
     VariantInfo {
         variant: "moonshine-streaming-tiny",
         family: "moonshine_streaming",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: true,
+    },
+    VariantInfo {
+        variant: "multitalker-parakeet-streaming-0.6b-v1",
+        family: "parakeet",
+        languages: ENGLISH_LANGUAGES,
+        long_form: LongForm::Unbounded,
+        streaming: true,
+    },
+    VariantInfo {
+        variant: "nemotron-3.5-asr-streaming-0.6b",
+        family: "parakeet",
+        languages: NEMOTRON_35_LANGUAGES,
+        long_form: LongForm::Unbounded,
+        streaming: true,
+    },
+    VariantInfo {
+        variant: "nemotron-speech-streaming-en-0.6b",
+        family: "parakeet",
+        languages: ENGLISH_LANGUAGES,
+        long_form: LongForm::Unbounded,
+        streaming: true,
     },
     VariantInfo {
         variant: "parakeet-tdt-0.6b-v2",
         family: "parakeet",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: false,
+    },
+    VariantInfo {
+        variant: "parakeet-unified-en-0.6b",
+        family: "parakeet",
+        languages: ENGLISH_LANGUAGES,
+        long_form: LongForm::Unbounded,
+        streaming: true,
+    },
+    VariantInfo {
+        variant: "voxtral-mini-4b-realtime-2602",
+        family: "voxtral_realtime",
+        languages: VOXTRAL_REALTIME_LANGUAGES,
+        long_form: LongForm::Unbounded,
+        streaming: true,
     },
     VariantInfo {
         variant: "whisper-base",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-base.en",
         family: "whisper",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-large",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-large-v2",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-large-v3",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL_V3,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-large-v3-turbo",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL_V3,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-medium",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-medium.en",
         family: "whisper",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-small",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-small.en",
         family: "whisper",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-tiny",
         family: "whisper",
         languages: WHISPER_MULTILINGUAL,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
     VariantInfo {
         variant: "whisper-tiny.en",
         family: "whisper",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
+        streaming: false,
     },
 ];
 
@@ -1651,7 +1819,16 @@ pub fn find(id: &str) -> Option<&'static CatalogModel> {
 /// entry.
 pub fn entry_for_path(path: &std::path::Path) -> Option<&'static CatalogModel> {
     let filename = path.file_name().and_then(|name| name.to_str())?;
-    ENTRIES.iter().find(|entry| entry.filename == filename)
+    // Compare basenames, not the stored `filename` verbatim: an entry whose
+    // file lives in a repo subdirectory (the multitalker bundle) keeps that
+    // prefix in `filename` so `download_url` resolves, while the installed file
+    // is matched by its trailing component alone.
+    ENTRIES.iter().find(|entry| {
+        std::path::Path::new(entry.filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(filename)
+    })
 }
 
 /// Local path a catalog model is (or would be) installed at.
@@ -1785,26 +1962,60 @@ mod tests {
     }
 
     #[test]
-    fn streaming_models_are_marked_and_english_only() {
+    fn streaming_models_are_marked() {
+        // Every variant the catalog ships that can produce live text must
+        // report `supports_streaming`, whatever its family: streaming spans
+        // `moonshine_streaming`, the streaming `parakeet` ports, and
+        // `voxtral_realtime`.
         for id in [
             "moonshine-streaming-tiny-q8_0",
             "moonshine-streaming-small-q8_0",
+            "moonshine-streaming-medium-q8_0",
+            "parakeet-unified-en-0.6b-q4_k_m",
+            "nemotron-speech-streaming-en-0.6b-q4_k_m",
+            "nemotron-3.5-asr-streaming-0.6b-q4_k_m",
+            "multitalker-parakeet-streaming-0.6b-v1-q4_k_m",
+            "voxtral-mini-4b-realtime-2602-q4_k_m",
         ] {
             let info = find(id).expect(id).info();
             assert!(info.supports_streaming(), "{id} must be marked streaming");
-            assert_eq!(
-                info.languages,
-                ["en"],
-                "{id}: every streaming model in the catalog is English-only"
+        }
+    }
+
+    #[test]
+    fn streaming_models_report_their_real_language_coverage() {
+        // Streaming is not English-only: the multilingual ports carry their
+        // real language set, so the UI's "(en)" streaming note stays honest.
+        for id in [
+            "moonshine-streaming-tiny-q8_0",
+            "moonshine-streaming-small-q8_0",
+            "moonshine-streaming-medium-q8_0",
+            "parakeet-unified-en-0.6b-q4_k_m",
+            "nemotron-speech-streaming-en-0.6b-q4_k_m",
+            "multitalker-parakeet-streaming-0.6b-v1-q4_k_m",
+        ] {
+            let info = find(id).expect(id).info();
+            assert!(info.is_english_only(), "{id} is English-only");
+        }
+        for (id, summary) in [
+            ("nemotron-3.5-asr-streaming-0.6b-q4_k_m", "32 languages"),
+            ("voxtral-mini-4b-realtime-2602-q4_k_m", "13 languages"),
+        ] {
+            let info = find(id).expect(id).info();
+            assert!(
+                !info.is_english_only(),
+                "{id} is multilingual and must not be tagged English-only"
             );
-            assert_eq!(info.family_label(), "Moonshine Streaming");
+            assert_eq!(info.language_summary(), summary, "{id}");
         }
     }
 
     #[test]
     fn offline_families_are_not_marked_streaming() {
-        // The catalog's offline families go through `Session::run`, not the
-        // streaming path, so the model list must not tag them `live`.
+        // The catalog's offline entries go through `Session::run`, not the
+        // streaming path, so the model list must not tag them `live`. Streaming
+        // is per variant, not per family: the `parakeet` family mixes both, so
+        // this checks ids rather than a whole family.
         for id in [
             "whisper-small-q5_k_m",
             "moonshine-base-q8_0",
@@ -1817,22 +2028,37 @@ mod tests {
                 "{id} is an offline model and must not be tagged streaming"
             );
         }
+        // The `parakeet` family is the reason a family check is wrong: some of
+        // its variants stream and some do not.
+        let parakeet_modes: Vec<bool> = ENTRIES
+            .iter()
+            .filter(|entry| entry.info().family == "parakeet")
+            .map(|entry| entry.info().supports_streaming())
+            .collect();
+        assert!(
+            parakeet_modes.contains(&true) && parakeet_modes.contains(&false),
+            "the parakeet family must mix streaming and offline variants"
+        );
     }
 
     #[test]
     fn streaming_entries_pin_a_commit_and_a_checksum() {
-        // The two streaming entries were derived from their HuggingFace repos
-        // like every other entry, so they must carry the same pinned-commit and
+        // The streaming entries were derived from their HuggingFace repos like
+        // every other entry, so they must carry the same pinned-commit and
         // SHA-256 guarantees (guarded globally too, but called out here so a
         // bad streaming repin fails with a clear name).
-        for id in [
-            "moonshine-streaming-tiny-q8_0",
-            "moonshine-streaming-small-q8_0",
-        ] {
-            let entry = find(id).expect(id);
-            assert_eq!(entry.revision.len(), 40, "{id} must pin a full commit");
-            assert_eq!(entry.sha256.len(), 64, "{id} must pin a SHA-256");
-            assert!(entry.size_bytes > 0, "{id} must pin a size");
+        for entry in ENTRIES
+            .iter()
+            .filter(|entry| entry.info().supports_streaming())
+        {
+            assert_eq!(
+                entry.revision.len(),
+                40,
+                "{} must pin a full commit",
+                entry.id
+            );
+            assert_eq!(entry.sha256.len(), 64, "{} must pin a SHA-256", entry.id);
+            assert!(entry.size_bytes > 0, "{} must pin a size", entry.id);
         }
     }
 

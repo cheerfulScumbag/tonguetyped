@@ -186,10 +186,10 @@ impl ModelScreen {
             Span::styled("Input limit ", label),
             Span::raw(long_form_note(row.info.long_form)),
         ]);
-        let streaming = if row.info.supports_streaming() {
-            "live text with a live-text look while you speak; English only"
-        } else {
-            "no live text - the transcript appears after transcription"
+        let streaming = match (row.info.supports_streaming(), row.info.is_english_only()) {
+            (false, _) => "no live text - the transcript appears after transcription",
+            (true, true) => "live text with a live-text look while you speak; English only",
+            (true, false) => "live text with a live-text look while you speak",
         };
         let streaming_note = Line::from(vec![
             Span::styled("Streaming ", label),

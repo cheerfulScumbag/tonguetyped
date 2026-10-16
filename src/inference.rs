@@ -880,7 +880,7 @@ impl InferenceEngine {
     /// Whether the loaded model advertises live streaming support
     /// (`Capabilities::supports_streaming`). `false` when nothing is loaded.
     /// This is read from the GGUF at load, so it reflects the actual file
-    /// rather than the catalog's family guess: a streaming port that lost the
+    /// rather than the catalog's mark: a streaming port that lost the
     /// capability in a future repin is correctly reported as non-streaming.
     pub fn supports_streaming(&self) -> bool {
         self.session
@@ -896,7 +896,7 @@ impl InferenceEngine {
     /// displayed string changes, so a caller can paint live text. Returns the
     /// finalized transcript.
     ///
-    /// A streaming model has a fixed *output* window (Moonshine-streaming's
+    /// Some streaming models have a fixed *output* window (Moonshine-streaming's
     /// decoder position cap, roughly 48 s of English): once one stream reaches
     /// it the model stops emitting new text and the transcript is capped there,
     /// even though the user kept speaking. So the capture is decoded as a
