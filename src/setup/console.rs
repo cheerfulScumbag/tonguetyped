@@ -37,6 +37,10 @@ const LOGO_HEIGHT: u16 = 8;
 const ACTIVATION_LABELS: [&str; 2] = crate::config::ACTIVATION_MODE_LABELS;
 const STARTUP_LABELS: [&str; 2] = crate::config::STARTUP_LABELS;
 const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
+
+/// The Overlay steps' preview band height in rows, including its border and
+/// title - the same modest band the dashboard uses, so the two read as one UI.
+const PREVIEW_BAND_HEIGHT: u16 = 7;
 const TRANSLATE_LABELS: [&str; 2] = crate::config::TRANSLATE_LABELS;
 
 /// The two opt-in text passes as one four-way choice, in the order
@@ -407,7 +411,9 @@ impl ConsoleState {
     fn handle_downloading_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
         match key.code {
             KeyCode::Char('q') => return Ok(ControlFlow::Finish(SetupOutcome::Cancelled)),
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => return Ok(self.retreat()),
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                return Ok(self.retreat());
+            }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.downloads_finished() => {
                 return self.advance();
             }
@@ -422,7 +428,9 @@ impl ConsoleState {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => return self.advance(),
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => return Ok(self.retreat()),
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                return Ok(self.retreat());
+            }
             _ => {}
         }
         Ok(ControlFlow::Continue)
@@ -435,7 +443,7 @@ impl ConsoleState {
                 // this the handle stays pending across a retreat/return (and
                 // Ctrl+R stays swallowed) until the 120s timeout, which is the
                 // "stuck in the shortcut menu" dead end.
-                KeyCode::Esc => {
+                KeyCode::Esc | KeyCode::Backspace => {
                     self.cancel_shortcut_reconfigure();
                     Ok(self.retreat())
                 }
@@ -461,7 +469,7 @@ impl ConsoleState {
         }
         match key.code {
             KeyCode::Enter => return self.advance(),
-            KeyCode::Esc => return Ok(self.retreat()),
+            KeyCode::Esc | KeyCode::Backspace => return Ok(self.retreat()),
             _ => {}
         }
         Ok(ControlFlow::Continue)
@@ -494,7 +502,7 @@ impl ConsoleState {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
                 ControlFlow::Finish(SetupOutcome::Cancelled)
             }
-            KeyCode::Esc | KeyCode::Left => self.retreat(),
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => self.retreat(),
             _ => ControlFlow::Continue,
         })
     }
@@ -960,7 +968,7 @@ impl ConsoleState {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "Step {} of {}: {}",
+                "Step {} of {}   Setup \u{203a} {}",
                 self.step_index(),
                 self.step_total(),
                 self.step_title()
@@ -990,17 +998,19 @@ impl ConsoleState {
     fn hint_text(&self) -> &'static str {
         match self.step {
             StepKind::Shortcut if self.shortcut_handle.is_some() => {
-                "System dialog open - Enter keep current  Ctrl+R reopen  Esc back"
+                "Enter keep current   Ctrl+R reopen   Esc/\u{232b} back"
             }
-            StepKind::Shortcut => "Ctrl+R set via system dialog  Enter continue  Esc back",
-            StepKind::Confirm => "Enter/y save  n/q discard  Esc back",
-            StepKind::Downloading if !self.downloads_finished() => "Fetching...  Esc back  q quit",
-            StepKind::Downloading => "Enter continue  Esc back  q quit",
+            StepKind::Shortcut => "Ctrl+R dialog   Enter next   Esc/\u{232b} back",
+            StepKind::Confirm => "Enter/y save   n/q discard   Esc back",
+            StepKind::Downloading if !self.downloads_finished() => {
+                "Fetching...   Esc/\u{232b} back   q quit"
+            }
+            StepKind::Downloading => "Enter next   Esc/\u{232b} back   q quit",
             StepKind::Decoding | StepKind::HistoryRetention | StepKind::TextProcessing => {
-                "↑/↓ field  ←/→ cursor  Enter continue  Esc back"
+                "↑/↓ row   ←/→ edit   Enter next   Esc back"
             }
-            StepKind::TranscriptFolder => "←/→ cursor  Enter continue  Esc back",
-            _ => "↑/↓ choose  Enter continue  Esc back  q quit",
+            StepKind::TranscriptFolder => "←/→ edit   Enter next   Esc back",
+            _ => "↑/↓ row   ←/→ back/next   Enter next   Esc/\u{232b} back   q quit",
         }
     }
 
@@ -1121,43 +1131,83 @@ impl ConsoleState {
                 0,
                 &[],
             ),
-            StepKind::OverlayEnabled => frame.render_widget(
-                list_paragraph(
-                    &OVERLAY_ENABLED_LABELS.map(String::from),
-                    self.overlay_enabled_selection,
-                    self.step_title(),
-                    area.height,
-                ),
+            StepKind::OverlayEnabled => self.render_overlay_step(
+                frame,
                 area,
+                &OVERLAY_ENABLED_LABELS.map(String::from),
+                self.overlay_enabled_selection,
             ),
-            StepKind::OverlayPosition => frame.render_widget(
-                list_paragraph(
-                    &OVERLAY_POSITION_VALUES.map(String::from),
-                    self.overlay_position_selection,
-                    self.step_title(),
-                    area.height,
-                ),
+            StepKind::OverlayPosition => self.render_overlay_step(
+                frame,
                 area,
+                &OVERLAY_POSITION_VALUES.map(String::from),
+                self.overlay_position_selection,
             ),
-            StepKind::OverlayStyle => frame.render_widget(
-                list_paragraph(
-                    &OVERLAY_STYLE_LABELS.map(String::from),
-                    self.overlay_style_selection,
-                    self.step_title(),
-                    area.height,
-                ),
+            StepKind::OverlayStyle => self.render_overlay_step(
+                frame,
                 area,
+                &OVERLAY_STYLE_LABELS.map(String::from),
+                self.overlay_style_selection,
             ),
-            StepKind::OverlayWaveform => frame.render_widget(
-                list_paragraph(
-                    &OVERLAY_WAVEFORM_LABELS.map(String::from),
-                    self.overlay_waveform_selection,
-                    self.step_title(),
-                    area.height,
-                ),
+            StepKind::OverlayWaveform => self.render_overlay_step(
+                frame,
                 area,
+                &OVERLAY_WAVEFORM_LABELS.map(String::from),
+                self.overlay_waveform_selection,
             ),
             StepKind::Confirm => self.render_confirm(frame, area),
+        }
+    }
+
+    /// One of the four Overlay steps: the option list plus a live preview band
+    /// that follows the current enable/position/style/waveform selections, so
+    /// the overlay is visible before the wizard finishes. Falls back to the
+    /// plain list when the terminal is too short for the band.
+    fn render_overlay_step(&self, frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
+        if area.height < PREVIEW_BAND_HEIGHT + 3 {
+            frame.render_widget(
+                list_paragraph(rows, selected, self.step_title(), area.height),
+                area,
+            );
+            return;
+        }
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(PREVIEW_BAND_HEIGHT)])
+            .split(area);
+        frame.render_widget(
+            list_paragraph(rows, selected, self.step_title(), chunks[0].height),
+            chunks[0],
+        );
+
+        let style_index = self
+            .overlay_style_selection
+            .min(OVERLAY_STYLE_VALUES.len() - 1);
+        let position_index = self
+            .overlay_position_selection
+            .min(OVERLAY_POSITION_VALUES.len() - 1);
+        let style = OVERLAY_STYLE_VALUES[style_index];
+        let position = OVERLAY_POSITION_VALUES[position_index];
+        let waveform = self.overlay_waveform_selection == 1;
+        let enabled = self.overlay_enabled_selection == 1;
+
+        let title = format!(
+            "Preview \u{00b7} {} \u{00b7} {position}",
+            OVERLAY_STYLE_LABELS[style_index]
+        );
+        let block = Block::default().borders(Borders::ALL).title(title);
+        let inner = block.inner(chunks[1]);
+        frame.render_widget(block, chunks[1]);
+        if enabled && inner.width > 2 && inner.height > 0 {
+            let stage = inner.inner(ratatui::layout::Margin::new(1, 0));
+            let cells =
+                crate::tui::overlay_preview_cells(style, waveform, stage.width, stage.height);
+            let cols = cells.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
+            let rows = cells.len() as u16;
+            frame.render_widget(
+                Paragraph::new(cells),
+                crate::tui::placed_rect(stage, cols, rows, position),
+            );
         }
     }
 
@@ -2157,5 +2207,64 @@ mod tests {
 
         assert_eq!(state.step, StepKind::Shortcut);
         assert!(state.shortcut_handle.is_some());
+    }
+
+    #[test]
+    fn backspace_retreats_from_a_list_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::InferenceBackend;
+        let expected = state.prev_step().unwrap();
+
+        let flow = state
+            .handle_list_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(flow, ControlFlow::Continue));
+        assert_eq!(state.step, expected);
+    }
+
+    #[test]
+    fn backspace_retreats_from_the_downloading_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Downloading;
+        state.downloading_needed = true;
+        let expected = state.prev_step().unwrap();
+
+        state
+            .handle_downloading_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(state.step, expected);
+    }
+
+    #[test]
+    fn backspace_while_waiting_cancels_the_handle_and_retreats() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
+
+        let flow = state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(flow, ControlFlow::Continue));
+        assert!(
+            state.shortcut_handle.is_none(),
+            "leaving must stop the wait"
+        );
+        assert_eq!(state.step, StepKind::Activation);
+    }
+
+    #[test]
+    fn backspace_retreats_from_the_shortcut_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        let expected = state.prev_step().unwrap();
+
+        state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(state.step, expected);
     }
 }

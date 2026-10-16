@@ -8,22 +8,23 @@
 //! service that must outlive this dashboard session (see that function's
 //! doc comment).
 //!
-//! The home screen is two stacked panels with one selection cursor: a
-//! fixed Settings panel listing the fifteen configuration areas (Model,
-//! Inference backend, Translation, Decoding, Text processing, Microphone,
-//! Activation, Shortcut, Transcript output, Typing backend, Transcript folder,
-//! History retention, Startup, Overlay, Media pause)
-//! with their current values, and a Commands panel derived
+//! The home screen is one Settings panel with one selection cursor, grouped
+//! into four labeled sections (Language & model, Capture & activation, Output,
+//! Behaviour) listing the fifteen configuration areas (Model, Inference
+//! backend, Translation, Decoding, Text processing, Microphone, Activation,
+//! Shortcut, Transcript output, Typing backend, Transcript folder, History
+//! retention, Startup, Overlay, Media pause) with their current values, plus a
+//! Commands row. The Commands row opens a dedicated Commands screen derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
 //! Toggle. `model` and `autostart` are CLI commands but live in the Settings
-//! panel rather than the Commands panel, so each configuration area has
+//! panel rather than the Commands screen, so each configuration area has
 //! exactly one home-screen entry point.
 
 mod logo;
 mod screens;
 
-use screens::selection_style;
+use screens::{pad_selected_row, selection_list, selection_style};
 
 use crate::cli::Cli;
 use crate::commands::{self, OutputLine};
@@ -215,10 +216,56 @@ impl SettingId {
     }
 }
 
-/// Fifteen settings rows plus the panel's two border rows.
-const SETTINGS_PANEL_HEIGHT: u16 = 17;
+/// The Settings panel's four labeled groups, in `SettingId::ALL` order (so the
+/// section headers are purely visual and the home selection index still maps
+/// one-to-one onto `SettingId::ALL`, then the Commands row).
+const SETTING_SECTIONS: [(&str, &[SettingId]); 4] = [
+    (
+        "Language & model",
+        &[
+            SettingId::Model,
+            SettingId::InferenceBackend,
+            SettingId::Translation,
+            SettingId::Decoding,
+            SettingId::TextProcessing,
+        ],
+    ),
+    (
+        "Capture & activation",
+        &[
+            SettingId::Microphone,
+            SettingId::Activation,
+            SettingId::Shortcut,
+        ],
+    ),
+    (
+        "Output",
+        &[
+            SettingId::TranscriptOutput,
+            SettingId::TypingBackend,
+            SettingId::TranscriptFolder,
+            SettingId::HistoryRetention,
+        ],
+    ),
+    (
+        "Behaviour",
+        &[
+            SettingId::Startup,
+            SettingId::Overlay,
+            SettingId::MediaPause,
+        ],
+    ),
+];
 
-/// The dashboard's Commands panel, derived from the exact same clap metadata
+/// Selectable Settings rows (fifteen configuration areas plus the Commands
+/// row that opens the Commands screen).
+const HOME_ROW_COUNT: usize = SettingId::ALL.len() + 1;
+
+/// Fifteen settings rows, the four section headers, and the Commands row, plus
+/// the panel's two border rows.
+const SETTINGS_PANEL_HEIGHT: u16 = 15 + 4 + 1 + 2;
+
+/// The dashboard's Commands screen, derived from the exact same clap metadata
 /// `--help` renders - see this module's doc comment. The implicit `help`
 /// meta-subcommand clap adds is excluded; it has no useful standalone
 /// dashboard action. `start`/`stop` (single-shot recording start/stop) are
@@ -252,6 +299,7 @@ fn home_items() -> Vec<HomeItem> {
 
 enum Screen {
     Home,
+    Commands,
     Info {
         title: String,
         lines: Vec<OutputLine>,
@@ -284,6 +332,8 @@ struct App {
     screen: Screen,
     command_items: Vec<HomeItem>,
     home_selected: usize,
+    /// Cursor on the dedicated Commands screen, separate from the home cursor.
+    command_selected: usize,
     pending: Option<PendingAction>,
     shortcut_test: Option<setup::ShortcutTestHandle>,
     shortcut_dialog: Option<setup::ReconfigureHandle>,
@@ -334,6 +384,7 @@ impl App {
             screen: Screen::Home,
             command_items: home_items(),
             home_selected: 0,
+            command_selected: 0,
             pending: None,
             shortcut_test: None,
             shortcut_dialog: None,
@@ -544,7 +595,8 @@ impl App {
             return Ok(());
         }
         match &self.screen {
-            Screen::Home => self.handle_home_key(key, terminal)?,
+            Screen::Home => self.handle_home_key(key)?,
+            Screen::Commands => self.handle_commands_key(key, terminal)?,
             Screen::Info { .. } => self.handle_info_key(key),
             Screen::Model(_) => self.handle_model_key(key),
             Screen::InferenceBackend(_) => self.handle_inference_backend_key(key),
@@ -565,45 +617,68 @@ impl App {
     }
 
     fn move_home_selection(&mut self, delta: i32) {
-        let len = (SettingId::ALL.len() + self.command_items.len()) as i32;
-        if len == 0 {
-            return;
-        }
+        let len = HOME_ROW_COUNT as i32;
         let next = (self.home_selected as i32 + delta).clamp(0, len - 1) as usize;
         self.home_selected = next;
     }
 
-    fn handle_home_key(
+    /// The dedicated Commands screen: `↑`/`↓` (and `←`/`→`) move the cursor,
+    /// `Enter` runs the highlighted command, and `Esc`/`Backspace` return home.
+    fn handle_commands_key(
         &mut self,
         key: KeyEvent,
         terminal: &mut Terminal<Backend>,
     ) -> anyhow::Result<()> {
+        if Self::is_back_key(key.code) {
+            self.screen = Screen::Home;
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Up | KeyCode::Char('k') => self.move_home_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_home_selection(1),
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
+                let len = self.command_items.len() as i32;
+                if len > 0 {
+                    self.command_selected =
+                        (self.command_selected as i32 + delta).clamp(0, len - 1) as usize;
+                }
+            }
             KeyCode::Enter if self.pending.is_none() => {
-                let selected = self.home_selected;
-                self.open_home_row(selected, terminal)?;
+                let name = self.command_items[self.command_selected].name.clone();
+                self.dispatch_command(&name, terminal)?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn open_home_row(
-        &mut self,
-        index: usize,
-        terminal: &mut Terminal<Backend>,
-    ) -> anyhow::Result<()> {
+    fn handle_home_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Up | KeyCode::Char('k') => self.move_home_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_home_selection(1),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.pending.is_none() => {
+                let selected = self.home_selected;
+                self.open_home_row(selected);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn open_home_row(&mut self, index: usize) {
         if index < SettingId::ALL.len() {
             self.open_setting(SettingId::ALL[index]);
-            return Ok(());
+        } else {
+            self.screen = Screen::Commands;
         }
-        let name = self.command_items[index - SettingId::ALL.len()]
-            .name
-            .clone();
-        self.dispatch_command(&name, terminal)
     }
 
     fn open_setting(&mut self, setting: SettingId) {
@@ -658,9 +733,12 @@ impl App {
 
     /// Saves the current config after a settings screen mutated it in place,
     /// reporting the outcome in whichever screen's result line is current -
-    /// so every settings screen gives the same success/error feedback.
-    fn save_settings_config(&mut self) {
+    /// so every settings screen gives the same success/error feedback. Returns
+    /// whether the write succeeded, so a leave handler can stay on the screen
+    /// (with the error visible) instead of navigating away from a failed save.
+    fn save_settings_config(&mut self) -> bool {
         let result = self.config.save().map_err(|error| error.to_string());
+        let saved = result.is_ok();
         match &mut self.screen {
             Screen::Microphone(screen) => screen.result = Some(result),
             Screen::Activation(screen) => screen.result = Some(result),
@@ -673,20 +751,117 @@ impl App {
             Screen::TextFields(screen) => screen.result = Some(result),
             _ => {}
         }
+        saved
+    }
+
+    /// Leaves the current settings screen, committing it first so backing out
+    /// saves exactly like `Enter` does. A screen whose form is invalid stays put
+    /// with the error showing, and a failed config write also keeps the screen
+    /// open, so backing out never silently discards input or hides a failure.
+    ///
+    /// The screen maps "commit on leave" to its own pending value: the value
+    /// rows of a radio list (Activation, Microphone, ...) commit the highlighted
+    /// option, the Overlay steppers commit their pending style/position/waveform,
+    /// and the text forms run their own validation. Screens whose `apply` is a
+    /// heavy one-shot action (Model, Inference backend, Daemon, Shortcut) and the
+    /// Transcript output screen, whose rows apply individually on `Enter`, commit
+    /// nothing here and only persist what was already applied.
+    fn commit_and_leave_settings(&mut self) {
+        let leave = match &mut self.screen {
+            Screen::Microphone(screen) => {
+                screen.apply(&mut self.config);
+                true
+            }
+            Screen::Activation(screen) => {
+                screen.apply(&mut self.config);
+                true
+            }
+            Screen::Translation(screen) => {
+                screen.apply(&mut self.config);
+                true
+            }
+            Screen::MediaPause(screen) => {
+                screen.apply(&mut self.config);
+                true
+            }
+            Screen::TypingBackend(screen) => {
+                screen.apply(&mut self.config);
+                true
+            }
+            Screen::Overlay(screen) => {
+                screen.commit(&mut self.config);
+                true
+            }
+            Screen::Autostart(screen) => {
+                let target = screen.selected == 1;
+                match crate::autostart::update(target) {
+                    Ok(()) => {
+                        self.config.startup.autostart = target;
+                        true
+                    }
+                    Err(error) => {
+                        screen.result = Some(Err(error.to_string()));
+                        false
+                    }
+                }
+            }
+            Screen::TextFields(screen) => match screen.apply(&mut self.config) {
+                Ok(()) => true,
+                Err(message) => {
+                    screen.result = Some(Err(message));
+                    false
+                }
+            },
+            Screen::TextProcessing(screen) => match screen.apply(&mut self.config) {
+                Ok(()) => true,
+                Err(message) => {
+                    screen.result = Some(Err(message));
+                    false
+                }
+            },
+            _ => true,
+        };
+        if leave && self.save_settings_config() {
+            self.screen = Screen::Home;
+        }
+    }
+
+    /// The `↑`/`←`/`k`/`h` step is `-1`, the `↓`/`→`/`j`/`l` step is `1`, and
+    /// anything else is `None`. Text screens never call this for the letter
+    /// aliases, because `h`/`j`/`k`/`l` are literal characters there.
+    fn step_delta(code: KeyCode) -> Option<i32> {
+        match code {
+            KeyCode::Up | KeyCode::Left | KeyCode::Char('k') | KeyCode::Char('h') => Some(-1),
+            KeyCode::Down | KeyCode::Right | KeyCode::Char('j') | KeyCode::Char('l') => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Whether this key leaves a settings screen: `Esc` everywhere, and
+    /// `Backspace` too on the list screens (the text screens keep `Backspace`
+    /// for deleting a character, and their handler tests `Esc` alone).
+    fn is_back_key(code: KeyCode) -> bool {
+        matches!(code, KeyCode::Esc | KeyCode::Backspace)
     }
 
     fn handle_microphone_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::Microphone(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::Microphone(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter => {
@@ -700,17 +875,23 @@ impl App {
     }
 
     fn handle_activation_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::Activation(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::Activation(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter => {
@@ -724,17 +905,23 @@ impl App {
     }
 
     fn handle_translation_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::Translation(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::Translation(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter => {
@@ -752,8 +939,10 @@ impl App {
     /// just saves a text row) and applies the whole form. `q` types a literal
     /// `q` on a text row since the fields accept free text; Ctrl+C quits.
     fn handle_text_processing_key(&mut self, key: KeyEvent) {
+        // Escape commits and leaves. `Backspace` stays a text edit here,
+        // because the replacement and command rows accept free text.
         if key.code == KeyCode::Esc {
-            self.screen = Screen::Home;
+            self.commit_and_leave_settings();
             return;
         }
         if key.code == KeyCode::Enter {
@@ -816,9 +1005,12 @@ impl App {
     }
 
     fn handle_output_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Screen::TranscriptOutput(screen) = &mut self.screen {
                     screen.move_selection(-1, &self.config);
@@ -827,6 +1019,17 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Screen::TranscriptOutput(screen) = &mut self.screen {
                     screen.move_selection(1, &self.config);
+                }
+            }
+            // On the option rows `←`/`→` steps the value both ways (the paste
+            // keys cycle, "after text" flips); on the method rows it moves the
+            // highlight, like `↑`/`↓`.
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
+                if let Screen::TranscriptOutput(screen) = &mut self.screen {
+                    if !screen.step(delta, &mut self.config) {
+                        screen.move_selection(delta, &self.config);
+                    }
                 }
             }
             KeyCode::Enter => {
@@ -845,17 +1048,23 @@ impl App {
     }
 
     fn handle_typing_backend_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::TypingBackend(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::TypingBackend(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter => {
@@ -869,22 +1078,33 @@ impl App {
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Screen::Overlay(screen) = &mut self.screen {
-                    screen.move_selection(-1, &self.config);
+                    screen.move_selection(-1);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Screen::Overlay(screen) = &mut self.screen {
-                    screen.move_selection(1, &self.config);
+                    screen.move_selection(1);
+                }
+            }
+            // Step the highlighted value both ways; the preview follows the
+            // pending value, so it redraws before anything is committed.
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
+                if let Screen::Overlay(screen) = &mut self.screen {
+                    screen.step(delta);
                 }
             }
             KeyCode::Enter => {
                 if let Screen::Overlay(screen) = &mut self.screen {
-                    screen.apply(&mut self.config);
+                    screen.commit(&mut self.config);
                 }
                 self.save_settings_config();
             }
@@ -893,17 +1113,23 @@ impl App {
     }
 
     fn handle_media_pause_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::MediaPause(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::MediaPause(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter => {
@@ -923,8 +1149,10 @@ impl App {
     /// here instead of quitting, since the fields accept free text; Ctrl+C
     /// still quits from any screen.
     fn handle_text_fields_key(&mut self, key: KeyEvent) {
+        // Escape commits and leaves. `Backspace` stays a text edit on this
+        // screen because the fields accept free text.
         if key.code == KeyCode::Esc {
-            self.screen = Screen::Home;
+            self.commit_and_leave_settings();
             return;
         }
         if key.code == KeyCode::Enter {
@@ -960,10 +1188,11 @@ impl App {
 
     /// The Shortcut screen has no editable text: the binding always comes
     /// from the desktop's own dialog, so the arrow keys, Enter, Ctrl+R,
-    /// Escape and `q` are the only commands. While the system dialog is in
-    /// flight, Escape leaves, Enter keeps the current binding, and Ctrl+R
-    /// reopens the dialog - so a window closed with no change is never a dead
-    /// end. While the portal test runs, only Escape does anything.
+    /// Escape/Backspace and `q` are the only commands. While the system dialog
+    /// is in flight, Escape/Backspace leaves, Enter keeps the current binding,
+    /// and Ctrl+R reopens the dialog - so a window closed with no change is
+    /// never a dead end. While the portal test runs, only Escape/Backspace
+    /// does anything.
     fn handle_shortcut_key(&mut self, key: KeyEvent) {
         if let Screen::Shortcut(screen) = &self.screen {
             match &screen.status {
@@ -972,7 +1201,7 @@ impl App {
                         // Stop waiting and settle on whatever is bound now,
                         // rather than blocking until the reconfigure timeout.
                         KeyCode::Enter => self.keep_current_shortcut(),
-                        KeyCode::Esc => {
+                        KeyCode::Esc | KeyCode::Backspace => {
                             self.cancel_shortcut_dialog();
                             self.screen = Screen::Home;
                         }
@@ -985,7 +1214,7 @@ impl App {
                     return;
                 }
                 screens::ShortcutStatus::Testing => {
-                    if key.code == KeyCode::Esc {
+                    if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
                         self.shortcut_test = None;
                         self.screen = Screen::Home;
                     }
@@ -996,7 +1225,7 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Esc | KeyCode::Backspace => self.screen = Screen::Home,
             KeyCode::Up => {
                 if let Screen::Shortcut(screen) = &mut self.screen {
                     screen.move_selection(-1);
@@ -1054,7 +1283,7 @@ impl App {
     fn handle_info_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc | KeyCode::Enter => self.screen = Screen::Home,
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter => self.screen = Screen::Home,
             KeyCode::Up | KeyCode::Char('k') => self.adjust_info_scroll(-1),
             KeyCode::Down | KeyCode::Char('j') => self.adjust_info_scroll(1),
             KeyCode::PageUp => self.adjust_info_scroll(-5),
@@ -1079,9 +1308,12 @@ impl App {
     }
 
     fn handle_model_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.screen = Screen::Home;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Screen::Model(screen) = &mut self.screen {
                     screen.move_selection(-1);
@@ -1125,17 +1357,23 @@ impl App {
     /// Model screen backend panel's activate-and-confirm flow (save, reload a
     /// running daemon, re-run diagnostics) so the change takes effect at once.
     fn handle_inference_backend_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.screen = Screen::Home;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::InferenceBackend(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::InferenceBackend(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter if self.pending.is_none() => {
@@ -1150,17 +1388,23 @@ impl App {
     }
 
     fn handle_autostart_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.commit_and_leave_settings();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::Autostart(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::Autostart(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter => {
@@ -1183,17 +1427,23 @@ impl App {
     }
 
     fn handle_daemon_key(&mut self, key: KeyEvent) {
+        if Self::is_back_key(key.code) {
+            self.screen = Screen::Home;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                let delta = Self::step_delta(key.code).unwrap_or(0);
                 if let Screen::Daemon(screen) = &mut self.screen {
-                    screen.move_selection(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Screen::Daemon(screen) = &mut self.screen {
-                    screen.move_selection(1);
+                    screen.move_selection(delta);
                 }
             }
             KeyCode::Enter if self.pending.is_none() => {
@@ -1299,6 +1549,7 @@ impl App {
         let area = frame.area();
         match &self.screen {
             Screen::Home => self.render_home(frame, area),
+            Screen::Commands => self.render_commands(frame, area),
             Screen::Info { title, lines } => {
                 render_info(frame, area, title, lines, &self.info_scroll)
             }
@@ -1327,24 +1578,58 @@ impl App {
                 Constraint::Length(logo_height),
                 Constraint::Length(1),
                 Constraint::Length(SETTINGS_PANEL_HEIGHT),
-                Constraint::Min(3),
+                Constraint::Min(0),
                 Constraint::Length(1),
             ])
             .split(area);
 
         frame.render_widget(Paragraph::new(logo_lines), chunks[0]);
         frame.render_widget(Paragraph::new(self.status_strip_line()), chunks[1]);
-        frame.render_widget(self.settings_panel_widget(), chunks[2]);
-        frame.render_widget(self.commands_panel_widget(chunks[3].height), chunks[3]);
+        frame.render_widget(
+            self.settings_panel_widget(chunks[2].width.saturating_sub(2) as usize),
+            chunks[2],
+        );
 
         let footer = match &self.pending {
             Some(pending) => Line::from(Span::styled(
                 format!("Working: {}...", pending.title),
                 Style::default().fg(Color::Yellow),
             )),
-            None => Line::from("↑/↓ navigate  Enter select  q quit"),
+            None => Line::from("↑/↓ move   Enter/→ open   q quit"),
         };
         frame.render_widget(Paragraph::new(footer), chunks[4]);
+    }
+
+    /// The dedicated Commands screen, reached from the Settings panel's
+    /// Commands row. It lists the same clap-derived commands the home screen
+    /// used to stack below the Settings panel, with the standard list grammar.
+    fn render_commands(&self, frame: &mut Frame, area: Rect) {
+        let rows: Vec<String> = self
+            .command_items
+            .iter()
+            .map(|item| format!("{:<14} {}", item.name, item.about))
+            .collect();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+        frame.render_widget(
+            selection_list(
+                "Home \u{203a} Commands",
+                &rows,
+                self.command_selected,
+                chunks[0].width.saturating_sub(2) as usize,
+            ),
+            chunks[0],
+        );
+        let footer = match &self.pending {
+            Some(pending) => Line::from(Span::styled(
+                format!("Working: {}...", pending.title),
+                Style::default().fg(Color::Yellow),
+            )),
+            None => Line::from("↑/↓ row   Enter run   Esc/\u{232b} back   q quit"),
+        };
+        frame.render_widget(Paragraph::new(footer), chunks[1]);
     }
 
     fn daemon_running_cached(&self) -> bool {
@@ -1452,51 +1737,44 @@ impl App {
         }
     }
 
-    /// The Settings panel: every row is `"> "`/`"  "`-prefixed, the selected
-    /// row cyan+bold, the value column aligned after an 18-wide name.
-    fn settings_panel_widget(&self) -> Paragraph<'static> {
-        let lines: Vec<Line> = SettingId::ALL
-            .iter()
-            .enumerate()
-            .map(|(index, setting)| {
-                let selected = index == self.home_selected;
+    /// The Settings panel: four labeled groups whose headers are dim and not
+    /// selectable, then a single `Commands` row that opens the dedicated
+    /// Commands screen. Every selectable row is `"> "`/`"  "`-prefixed, drawn as
+    /// a full-width highlight bar when selected, with the value column aligned
+    /// after an 18-wide name.
+    fn settings_panel_widget(&self, width: usize) -> Paragraph<'static> {
+        let header_style = Style::default().fg(Color::DarkGray);
+        let mut lines: Vec<Line> = Vec::new();
+        let mut selectable = 0usize;
+        for (section, settings) in SETTING_SECTIONS {
+            lines.push(Line::from(Span::styled(
+                format!("  {section}"),
+                header_style,
+            )));
+            for setting in settings {
+                let selected = selectable == self.home_selected;
                 let marker = if selected { "> " } else { "  " };
                 let text = format!(
                     "{marker}{:<18} {}",
                     setting.label(),
                     self.setting_value(*setting)
                 );
-                Line::from(Span::styled(text, selection_style(selected)))
-            })
-            .collect();
+                let mut spans = vec![Span::styled(text, selection_style(selected))];
+                pad_selected_row(&mut spans, selected, width);
+                lines.push(Line::from(spans));
+                selectable += 1;
+            }
+        }
+        let selected = self.home_selected == SettingId::ALL.len();
+        let marker = if selected { "> " } else { "  " };
+        let text = format!(
+            "{marker}{:<18} {}",
+            "Commands", "setup, daemon, doctor, status, ..."
+        );
+        let mut spans = vec![Span::styled(text, selection_style(selected))];
+        pad_selected_row(&mut spans, selected, width);
+        lines.push(Line::from(spans));
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Settings"))
-    }
-
-    /// The Commands panel, sharing one selection cursor with the Settings
-    /// panel above it: command row `i` is home-selected when
-    /// `home_selected == SettingId::ALL.len() + i`.
-    fn commands_panel_widget(&self, height: u16) -> Paragraph<'static> {
-        let lines: Vec<Line> = self
-            .command_items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let selected = self.home_selected == SettingId::ALL.len() + index;
-                let marker = if selected { "> " } else { "  " };
-                let text = format!("{marker}{:<14} {}", item.name, item.about);
-                Line::from(Span::styled(text, selection_style(selected)))
-            })
-            .collect();
-        let visible_rows = usize::from(height.saturating_sub(2)).max(1);
-        let scroll = if self.home_selected >= SettingId::ALL.len() {
-            (self.home_selected - SettingId::ALL.len())
-                .saturating_sub(visible_rows.saturating_sub(1)) as u16
-        } else {
-            0
-        };
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Commands"))
-            .scroll((scroll, 0))
     }
 
     fn render_model(&self, frame: &mut Frame, area: Rect, screen: &screens::ModelScreen) {
@@ -1510,8 +1788,14 @@ impl App {
             ])
             .split(area);
 
-        frame.render_widget(screen.list_widget(chunks[0].height), chunks[0]);
-        frame.render_widget(screen.backend_widget(), chunks[1]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize, chunks[0].height),
+            chunks[0],
+        );
+        frame.render_widget(
+            screen.backend_widget(chunks[1].width.saturating_sub(2) as usize),
+            chunks[1],
+        );
         let chunks = &chunks[1..];
 
         match &self.pending {
@@ -1542,7 +1826,9 @@ impl App {
         }
 
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Tab switch list  Enter activate  Esc back  q quit"),
+            Paragraph::new(
+                "↑/↓ row   Tab switch list   Enter activate   Esc/\u{232b} back   q quit",
+            ),
             chunks[2],
         );
     }
@@ -1557,9 +1843,12 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(4), Constraint::Length(1)])
             .split(area);
-        frame.render_widget(screen.list_widget(&self.config), chunks[0]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            screen.list_widget(&self.config, chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
+        frame.render_widget(
+            Paragraph::new("↑/↓ row   Enter apply   Esc/\u{232b} back   q quit"),
             chunks[1],
         );
     }
@@ -1573,7 +1862,10 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         let status = match &self.pending {
             Some(pending) => Line::from(Span::styled(
                 format!("Working: {}...", pending.title),
@@ -1583,7 +1875,7 @@ impl App {
         };
         frame.render_widget(Paragraph::new(status), chunks[1]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter run  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   Enter run   Esc/\u{232b} back   q quit"),
             chunks[2],
         );
     }
@@ -1597,10 +1889,13 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter save   Esc/\u{232b} back   q quit"),
             chunks[2],
         );
     }
@@ -1615,7 +1910,10 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         match screen.error() {
             Some(error) => frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -1629,7 +1927,7 @@ impl App {
         }
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter save   Esc/\u{232b} back   q quit"),
             chunks[3],
         );
     }
@@ -1643,10 +1941,13 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter save   Esc/\u{232b} back   q quit"),
             chunks[2],
         );
     }
@@ -1666,14 +1967,17 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(
             Paragraph::new("Translation needs a multilingual model; .en models always transcribe."),
             chunks[1],
         );
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter save   Esc/\u{232b} back   q quit"),
             chunks[3],
         );
     }
@@ -1693,7 +1997,10 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(
             Paragraph::new(
                 "Replacements: 'from => to' separated by ';'; escape ';', '>', and '\\' with '\\'. Filler removal is English-only.",
@@ -1702,7 +2009,7 @@ impl App {
         );
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
         frame.render_widget(
-            Paragraph::new("↑/↓ row  ←/→ cursor  Enter apply  Esc back  Ctrl+C quit"),
+            Paragraph::new("↑/↓ row   ←/→ edit   Enter save   Esc back   Ctrl+C quit"),
             chunks[3],
         );
     }
@@ -1721,10 +2028,13 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter save   Esc/\u{232b} back   q quit"),
             chunks[2],
         );
     }
@@ -1735,9 +2045,10 @@ impl App {
             .constraints([Constraint::Min(6), Constraint::Length(1)])
             .split(area);
         frame.render_widget(
-            screen.body(&activation::keybind_display(
-                &self.config.activation.keybind,
-            )),
+            screen.body(
+                &activation::keybind_display(&self.config.activation.keybind),
+                chunks[0].width.saturating_sub(2) as usize,
+            ),
             chunks[0],
         );
         frame.render_widget(Paragraph::new(screen.footer()), chunks[1]);
@@ -1753,11 +2064,14 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(&self.config), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(&self.config, chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(Paragraph::new(screen.warning_line()), chunks[1]);
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[2]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter choose   Esc/\u{232b} back   q quit"),
             chunks[3],
         );
     }
@@ -1778,7 +2092,10 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(
             Paragraph::new("Only used when transcripts are typed into the focused application."),
             chunks[1],
@@ -1786,18 +2103,17 @@ impl App {
         frame.render_widget(Paragraph::new(screen.warning_line()), chunks[2]);
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[3]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter apply  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter save   Esc/\u{232b} back   q quit"),
             chunks[4],
         );
     }
 
     fn render_overlay(&self, frame: &mut Frame, area: Rect, screen: &screens::OverlayScreen) {
-        // With the overlay enabled, a preview of the selected style runs as a
-        // modest band across the bottom, below the list and its hint rows, so
-        // the choice is visible before it is applied without the preview
-        // crowding the list or dominating the screen.
-        let show_preview = self.config.overlay.enabled;
-        let (list_area, preview_area) = if show_preview {
+        // The preview follows the *pending* values the cursor is editing, not
+        // the saved config, so it redraws on every `←`/`→` step before anything
+        // is committed. It runs as a modest band below the list, and draws the
+        // overlay inside a mini screen so the placement is visible too.
+        let (list_area, preview_area) = if screen.enabled {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(PREVIEW_BAND_HEIGHT)])
@@ -1815,30 +2131,38 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(list_area);
-        frame.render_widget(screen.list_widget(&self.config), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(Paragraph::new(screen.result_line()), chunks[1]);
         frame.render_widget(
-            Paragraph::new("↑/↓ choose  Enter change  Esc back  q quit"),
+            Paragraph::new("↑/↓ row   ←/→ change   Enter save   Esc/\u{232b} back   q quit"),
             chunks[2],
         );
 
         if let Some(preview_area) = preview_area {
             let title = format!(
-                "Preview - {}",
-                screens::overlay_style_label(&self.config.overlay.style)
+                "Preview \u{00b7} {} \u{00b7} {}",
+                screens::overlay_style_label(&screen.style),
+                screen.position
             );
             let block = Block::default().borders(Borders::ALL).title(title);
             let inner = block.inner(preview_area);
             frame.render_widget(block, preview_area);
+            // A one-cell horizontal inset so the drawn shape reads as sitting
+            // inside the screen rather than touching its frame.
+            let stage = inner.inner(ratatui::layout::Margin::new(1, 0));
             let lines = self.overlay_preview_lines(
-                &self.config.overlay.style,
-                self.config.overlay.live_waveform,
-                inner.width,
-                inner.height,
+                &screen.style,
+                screen.live_waveform,
+                stage.width,
+                stage.height,
             );
             let cols = lines.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
             let rows = lines.len() as u16;
-            frame.render_widget(Paragraph::new(lines), centered_rect(inner, cols, rows));
+            let placed = placed_rect(stage, cols, rows, &screen.position);
+            frame.render_widget(Paragraph::new(lines), placed);
         }
     }
 
@@ -1896,14 +2220,17 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        frame.render_widget(screen.list_widget(), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(Paragraph::new(screen.hint), chunks[1]);
         frame.render_widget(
             Paragraph::new(screen.result_line(&format!("{} saved.", screen.title))),
             chunks[2],
         );
         frame.render_widget(
-            Paragraph::new("↑/↓ field  ←/→ cursor  Enter save  Esc back  Ctrl+C quit"),
+            Paragraph::new("↑/↓ row   ←/→ edit   Enter save   Esc back   Ctrl+C quit"),
             chunks[3],
         );
     }
@@ -1953,7 +2280,7 @@ fn render_info(
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new("↑/↓ scroll  Esc/Enter back  q quit"),
+        Paragraph::new("↑/↓ scroll   Esc/\u{232b}/Enter back   q quit"),
         chunks[1],
     );
 }
@@ -1997,14 +2324,47 @@ fn preview_cell_size(
     (cols.clamp(1, max_cols), rows)
 }
 
-/// Centers a `width` x `height` region inside `area`, clamping to its bounds so
-/// a region larger than the area stays put instead of underflowing.
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+/// Rasterises an overlay style into terminal preview cells, fitted into a
+/// `max_cols` x `max_rows` box. Shared with the setup wizard's Overlay steps so
+/// both show the same picture. Rasterising per call is fine for the wizard's
+/// event-driven redraw; the dashboard caches this in `OverlayPreview`.
+pub(crate) fn overlay_preview_cells(
+    style: &str,
+    live_waveform: bool,
+    max_cols: u16,
+    max_rows: u16,
+) -> Vec<Line<'static>> {
+    let (width, height, pixels) =
+        crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, live_waveform, &[]);
+    let (cols, rows) = preview_cell_size(width, height, max_cols, max_rows);
+    preview_lines_from_pixels(width, height, &pixels, cols, rows)
+}
+
+/// Places a `width` x `height` box inside `area` at the overlay position named
+/// by `position` (one of `overlay::POSITION_VALUES`), so the preview shows the
+/// overlay landing where the real one will. An unknown name centres the box.
+pub(crate) fn placed_rect(area: Rect, width: u16, height: u16, position: &str) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
+    let left = area.x;
+    let right = area.x + area.width - width;
+    let center_x = area.x + (area.width - width) / 2;
+    let top = area.y;
+    let bottom = area.y + area.height - height;
+    let center_y = area.y + (area.height - height) / 2;
+    let (x, y) = match position {
+        "top-left" => (left, top),
+        "top" => (center_x, top),
+        "top-right" => (right, top),
+        "center" => (center_x, center_y),
+        "bottom-left" => (left, bottom),
+        "bottom" => (center_x, bottom),
+        "bottom-right" => (right, bottom),
+        _ => (center_x, center_y),
+    };
     Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
+        x,
+        y,
         width,
         height,
     }
@@ -2478,6 +2838,65 @@ mod tests {
                 assert!(text.contains("No change was made"), "{text}");
             }
             _ => panic!("expected a settled no-change message"),
+        }
+    }
+
+    #[test]
+    fn backspace_is_back_from_the_shortcut_in_flight_states() {
+        for dialog_open in [true, false] {
+            let mut app = App::new(Config::default());
+            app.open_setting(SettingId::Shortcut);
+            if let Screen::Shortcut(screen) = &mut app.screen {
+                screen.status = if dialog_open {
+                    screens::ShortcutStatus::DialogOpen
+                } else {
+                    screens::ShortcutStatus::Testing
+                };
+            }
+            if dialog_open {
+                app.shortcut_dialog = Some(setup::ReconfigureHandle::for_test(Arc::new(
+                    Mutex::new(None),
+                )));
+            } else {
+                app.shortcut_test = Some(setup::ShortcutTestHandle {
+                    result: Arc::new(Mutex::new(None)),
+                });
+            }
+
+            app.handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+            assert!(
+                matches!(app.screen, Screen::Home),
+                "Backspace must leave the Shortcut screen while its dialog or test is in flight"
+            );
+            assert!(
+                app.shortcut_dialog.is_none() && app.shortcut_test.is_none(),
+                "leaving must stop any in-flight shortcut wait"
+            );
+        }
+    }
+
+    #[test]
+    fn shortcut_testing_footer_names_only_the_back_key_it_handles() {
+        let mut app = App::new(Config::default());
+        app.open_setting(SettingId::Shortcut);
+        if let Screen::Shortcut(screen) = &mut app.screen {
+            screen.status = screens::ShortcutStatus::Testing;
+        }
+
+        let Screen::Shortcut(screen) = &app.screen else {
+            panic!("the Shortcut screen must stay open");
+        };
+        let footer = screen.footer();
+        assert!(
+            footer.contains("Esc") && footer.contains('\u{232b}'),
+            "the testing legend must still name back: {footer}"
+        );
+        for ignored in ["Enter", "Ctrl+R", "\u{2191}/\u{2193}"] {
+            assert!(
+                !footer.contains(ignored),
+                "the testing legend must not advertise {ignored} while it is ignored: {footer}"
+            );
         }
     }
 
