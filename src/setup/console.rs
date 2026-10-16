@@ -411,7 +411,9 @@ impl ConsoleState {
     fn handle_downloading_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
         match key.code {
             KeyCode::Char('q') => return Ok(ControlFlow::Finish(SetupOutcome::Cancelled)),
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => return Ok(self.retreat()),
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                return Ok(self.retreat());
+            }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.downloads_finished() => {
                 return self.advance();
             }
@@ -426,7 +428,9 @@ impl ConsoleState {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => return self.advance(),
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => return Ok(self.retreat()),
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                return Ok(self.retreat());
+            }
             _ => {}
         }
         Ok(ControlFlow::Continue)
@@ -439,7 +443,7 @@ impl ConsoleState {
                 // this the handle stays pending across a retreat/return (and
                 // Ctrl+R stays swallowed) until the 120s timeout, which is the
                 // "stuck in the shortcut menu" dead end.
-                KeyCode::Esc => {
+                KeyCode::Esc | KeyCode::Backspace => {
                     self.cancel_shortcut_reconfigure();
                     Ok(self.retreat())
                 }
@@ -465,7 +469,7 @@ impl ConsoleState {
         }
         match key.code {
             KeyCode::Enter => return self.advance(),
-            KeyCode::Esc => return Ok(self.retreat()),
+            KeyCode::Esc | KeyCode::Backspace => return Ok(self.retreat()),
             _ => {}
         }
         Ok(ControlFlow::Continue)
@@ -1006,7 +1010,7 @@ impl ConsoleState {
                 "↑/↓ row   ←/→ edit   Enter next   Esc back"
             }
             StepKind::TranscriptFolder => "←/→ edit   Enter next   Esc back",
-            _ => "↑/↓ row   ←/→ change   Enter/→ next   Esc/\u{232b} back   q quit",
+            _ => "↑/↓ row   ←/→ back/next   Enter next   Esc/\u{232b} back   q quit",
         }
     }
 
@@ -2203,5 +2207,64 @@ mod tests {
 
         assert_eq!(state.step, StepKind::Shortcut);
         assert!(state.shortcut_handle.is_some());
+    }
+
+    #[test]
+    fn backspace_retreats_from_a_list_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::InferenceBackend;
+        let expected = state.prev_step().unwrap();
+
+        let flow = state
+            .handle_list_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(flow, ControlFlow::Continue));
+        assert_eq!(state.step, expected);
+    }
+
+    #[test]
+    fn backspace_retreats_from_the_downloading_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Downloading;
+        state.downloading_needed = true;
+        let expected = state.prev_step().unwrap();
+
+        state
+            .handle_downloading_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(state.step, expected);
+    }
+
+    #[test]
+    fn backspace_while_waiting_cancels_the_handle_and_retreats() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
+
+        let flow = state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(flow, ControlFlow::Continue));
+        assert!(
+            state.shortcut_handle.is_none(),
+            "leaving must stop the wait"
+        );
+        assert_eq!(state.step, StepKind::Activation);
+    }
+
+    #[test]
+    fn backspace_retreats_from_the_shortcut_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        let expected = state.prev_step().unwrap();
+
+        state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(state.step, expected);
     }
 }
