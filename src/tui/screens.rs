@@ -187,7 +187,7 @@ impl ModelScreen {
             Span::raw(long_form_note(row.info.long_form)),
         ]);
         let streaming = if row.info.supports_streaming() {
-            "live text with a caption style while you speak; English only"
+            "live text with a live-text look while you speak; English only"
         } else {
             "no live text - the transcript appears after transcription"
         };

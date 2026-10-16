@@ -121,7 +121,7 @@ struct ConsoleState {
     step: StepKind,
     model_values: Vec<String>,
     /// Display labels matching `model_values` position for position: the id,
-    /// plus a "live text with a caption style, English only" tag for a
+    /// plus a "live text with a live-text look, English only" tag for a
     /// streaming model so the trade-off is visible at selection time.
     model_labels: Vec<String>,
     model_selection: usize,
@@ -176,7 +176,7 @@ impl ConsoleState {
             .map(|entry| {
                 if entry.info().supports_streaming() {
                     format!(
-                        "{}  (live text with a caption style, English only)",
+                        "{}  (live text with a live-text look, English only)",
                         entry.id
                     )
                 } else {
