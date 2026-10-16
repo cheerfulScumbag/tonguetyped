@@ -56,6 +56,7 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     }
 
     let coordinator = Arc::new(Coordinator::new(config)?);
+    spawn_config_watcher(coordinator.clone());
     let listener = UnixListener::bind(&sock_path)?;
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -141,6 +142,35 @@ async fn prepare_dependencies(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Start watching the resolved config file and reload the running daemon after
+/// each settled change, so a config edit takes effect live without a manual
+/// `tonguetyped reload` or a daemon restart. A rejected change is logged,
+/// reported in `status`, and shown through the overlay, while the daemon keeps
+/// running on its last good config.
+fn spawn_config_watcher(coordinator: Arc<Coordinator>) {
+    let path = match Config::config_path() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!("cannot watch the config file for changes: {error}");
+            return;
+        }
+    };
+    tokio::spawn(crate::config_watch::watch(
+        path,
+        crate::config_watch::POLL_INTERVAL,
+        crate::config_watch::DEBOUNCE,
+        move || {
+            let coordinator = coordinator.clone();
+            async move {
+                if let Err(error) = reload_config_from_disk(&coordinator).await {
+                    tracing::warn!("config reload failed after a config file change: {error}");
+                    coordinator.show_config_error();
+                }
+            }
+        },
+    ));
+}
+
 struct InstanceLock {
     _file: File,
 }
@@ -216,6 +246,33 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Load the configuration from disk and apply it through the coordinator:
+/// `Config::reload` -> `Coordinator::validate_reload` -> `prepare_dependencies`
+/// -> `Coordinator::reload_config`. This is the single reload implementation,
+/// shared by the `ReloadConfig` request (`tonguetyped reload`) and the
+/// config-file watcher, so a hot reload and a manual one behave identically.
+///
+/// The outcome is also recorded as the coordinator's `config_error`, so a
+/// rejected file shows up in `status` regardless of which path tried it, and a
+/// later success clears it. `prepare_dependencies` is boxed because it embeds
+/// the HTTP download client's state machine (tens of KiB); boxing keeps this
+/// function's future - and so every caller's, including `dispatch`'s - small
+/// on a branch most requests never take.
+pub async fn reload_config_from_disk(coordinator: &Arc<Coordinator>) -> anyhow::Result<()> {
+    let result = async {
+        let config = Config::reload()?;
+        coordinator.validate_reload(&config)?;
+        Box::pin(prepare_dependencies(&config)).await?;
+        coordinator.reload_config(config)
+    }
+    .await;
+    match &result {
+        Ok(()) => coordinator.clear_config_error(),
+        Err(error) => coordinator.set_config_error(error.to_string()),
+    }
+    result
+}
+
 pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Response {
     let cmd = match request {
         Request::Start => CoordinatorCommand::Start,
@@ -223,36 +280,14 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
         Request::Toggle => CoordinatorCommand::Toggle,
         Request::Cancel => CoordinatorCommand::Cancel,
         Request::Status => CoordinatorCommand::GetStatus,
-        Request::ReloadConfig => match Config::reload() {
-            Ok(config) => match coordinator.validate_reload(&config).map(|()| config) {
-                // Box the reload-only dependency future: it embeds the HTTP
-                // download client's state machine (tens of KiB), and keeping it
-                // inline made `dispatch`'s own future - and every caller that
-                // awaits `dispatch`, including the daemon's per-connection task -
-                // proportionally larger for a branch most requests never take.
-                Ok(config) => match Box::pin(prepare_dependencies(&config))
-                    .await
-                    .and_then(|()| coordinator.reload_config(config))
-                {
-                    Ok(()) => return Response::Ok,
-                    Err(e) => {
-                        return Response::Error {
-                            message: format!("config reload failed: {}", e),
-                        }
-                    }
-                },
-                Err(e) => {
-                    return Response::Error {
-                        message: format!("config reload failed: {}", e),
-                    }
-                }
-            },
-            Err(e) => {
-                return Response::Error {
+        Request::ReloadConfig => {
+            return match reload_config_from_disk(coordinator).await {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
                     message: format!("config reload failed: {}", e),
-                };
+                },
             }
-        },
+        }
         Request::Shutdown => {
             // Cancel rather than kill: any in-flight recording/processing is
             // torn down the same way a client-issued `cancel` would, instead
@@ -311,6 +346,7 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             state,
             activation_mode,
             operation_error,
+            config_error,
             shortcut_status,
             activation_error,
             model,
@@ -324,6 +360,7 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
                 state,
                 activation_mode,
                 operation_error,
+                config_error,
                 shortcut_status,
                 activation_error,
                 build: Some(crate::build_info::VERSION.to_string()),

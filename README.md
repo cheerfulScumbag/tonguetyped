@@ -532,7 +532,9 @@ logprob_threshold = -1.0           # retry below this; -inf turns it off
 no_speech_threshold = 0.6          # 0-1, treat as silence above this; inf turns it off
 ```
 
-Run `tonguetyped reload` (or restart the daemon) after changing them.
+A running daemon reloads these automatically when the file changes; run
+`tonguetyped reload` to apply an edit immediately instead of waiting for the
+watch.
 
 ### Text processing
 
@@ -726,7 +728,11 @@ text and no audio.
 
 TongueTyped reads `$XDG_CONFIG_HOME/tonguetyped/config.toml`. Almost everything
 is editable from `tonguetyped setup` and the dashboard; the file is there when
-you want to script it. A representative slice:
+you want to script it. The running daemon watches this file and applies a valid
+edit live, so you do not have to run `tonguetyped reload` or restart it; an
+invalid edit is rejected, the overlay cues that the edit was rejected, and
+`tonguetyped status` carries the detail, leaving the last good config in
+effect. A representative slice:
 
 ```toml
 [activation]

@@ -900,6 +900,7 @@ struct CoordinatorStateInner {
     signal_tx: Option<mpsc::Sender<RecordingSignal>>,
     physical_press: Option<PhysicalPress>,
     last_error: Option<String>,
+    config_error: Option<String>,
     runtime_error: Option<String>,
     shortcut_status: crate::ipc::ShortcutStatus,
     worker_active: bool,
@@ -984,6 +985,7 @@ impl Coordinator {
                 signal_tx: None,
                 physical_press: None,
                 last_error: None,
+                config_error: None,
                 runtime_error: None,
                 shortcut_status: crate::ipc::ShortcutStatus::Initializing,
                 worker_active: false,
@@ -1617,6 +1619,27 @@ impl Coordinator {
         inner.runtime_error = None;
     }
 
+    /// Record why the last attempt to load the config file failed, so `status`
+    /// reports it instead of silently keeping the old config.
+    pub fn set_config_error(&self, error: String) {
+        self.state.lock().unwrap().config_error = Some(error);
+    }
+
+    /// A reload succeeded: clear any previously reported config error.
+    pub fn clear_config_error(&self) {
+        self.state.lock().unwrap().config_error = None;
+    }
+
+    /// Surface a config reload that the file watcher rejected through the
+    /// overlay/notification feedback, with a config-specific message (the
+    /// generic dictation-error copy would not tell the user their config edit
+    /// was rejected). The machine-readable message is the status `config_error`
+    /// field, set separately so the daemon log and `status` carry the detail.
+    pub fn show_config_error(&self) {
+        let config = self.state.lock().unwrap().config.clone();
+        self.feedback.send(FeedbackEvent::ConfigError, &config);
+    }
+
     fn worker_finished(&self, generation: u64, transcription_attempted: bool) {
         let mut inner = self.state.lock().unwrap();
         if inner.generation != generation && inner.state == State::Idle {
@@ -1772,6 +1795,7 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         .to_string(),
         activation_mode: inner.config.activation.mode.to_string(),
         operation_error: inner.last_error.clone(),
+        config_error: inner.config_error.clone(),
         shortcut_status: inner.shortcut_status.clone(),
         activation_error: inner.runtime_error.clone(),
         model: inner.config.model.active_model.clone(),
@@ -1793,6 +1817,7 @@ pub enum CoordinatorResponse {
         state: String,
         activation_mode: String,
         operation_error: Option<String>,
+        config_error: Option<String>,
         shortcut_status: crate::ipc::ShortcutStatus,
         activation_error: Option<String>,
         /// The configured `model.active_model`.

@@ -485,6 +485,7 @@ enum Phase {
     SubmitFailed,
     Cancelled,
     Error,
+    ConfigError,
 }
 
 impl Phase {
@@ -500,6 +501,7 @@ impl Phase {
             FeedbackEvent::Truncated => Phase::Error,
             FeedbackEvent::Cancelled => Phase::Cancelled,
             FeedbackEvent::Error => Phase::Error,
+            FeedbackEvent::ConfigError => Phase::ConfigError,
         }
     }
 
@@ -512,7 +514,7 @@ impl Phase {
             Phase::ClipboardFallback => Some(CLIPBOARD_FALLBACK_DWELL),
             Phase::SubmitFailed => Some(SUBMIT_FAILED_DWELL),
             Phase::Cancelled => Some(CANCELLED_DWELL),
-            Phase::Error => Some(ERROR_DWELL),
+            Phase::Error | Phase::ConfigError => Some(ERROR_DWELL),
         }
     }
 
@@ -1669,6 +1671,18 @@ fn single_line_surface_height() -> u32 {
     quantize_size(capsule + LIVE_TEXT_INSET * 2.0)
 }
 
+/// The live-text words a caption style draws from, or `None` when it has none to
+/// draw. Every caption consumer - painting, the single-line sizing, and the box
+/// sizing - must agree on this: a config-error supersedes the held words because
+/// a rejected config edit is not dictation, so all caption styles paint the
+/// config-error status message instead of the last utterance's words.
+fn caption_captured(phase: Option<Phase>, live_text: Option<&LiveText>) -> Option<&LiveText> {
+    if matches!(phase, Some(Phase::ConfigError)) {
+        return None;
+    }
+    live_text.filter(|text| !text.is_empty())
+}
+
 /// The scrolling box's content height: the leading chip row plus one row per
 /// wrapped line and the bottom padding, so the card hugs its text with no dead
 /// band below the last line. The empty (listening) state is just the chip row;
@@ -1677,15 +1691,20 @@ fn single_line_surface_height() -> u32 {
 /// past that cap. Clamped to [`LIVE_TEXT_BOX_MIN_HEIGHT`] and the surface
 /// ceiling.
 fn boxed_surface_height(phase: Option<Phase>, live_text: Option<&LiveText>) -> u32 {
-    let captured = live_text.filter(|text| !text.is_empty());
+    let captured = caption_captured(phase, live_text);
     let lines = match captured {
         Some(text) => {
             text::caption_lines(&text.committed, &text.tentative, boxed_text_max_width()).len()
         }
-        // No words yet: only a terminal phase draws a short status line below
-        // the chip row; every other phase (the listening pad, the transcribing
-        // spinner, idle) shares the chip row and draws nothing more.
-        None => usize::from(phase.and_then(phase_message).is_some()),
+        // No words yet: only a terminal phase draws a status line below the
+        // chip row; every other phase (the listening pad, the transcribing
+        // spinner, idle) shares the chip row and draws nothing more. The status
+        // line wraps like captured words, so it can reserve more than one row
+        // (the config-error pointer wraps at the box width).
+        None => phase
+            .and_then(phase_message)
+            .map(|message| text::caption_lines(message, "", boxed_text_max_width()).len())
+            .unwrap_or(0),
     };
     let content = if lines == 0 {
         LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_PADDING
@@ -1714,7 +1733,7 @@ fn caption_surface_size(
         );
     }
     let minimal = style == Style::LiveTextMinimal;
-    let captured = live_text.filter(|text| !text.is_empty());
+    let captured = caption_captured(phase, live_text);
     let recording = phase == Some(Phase::Recording);
     // The text/pad origin, matching paint_live_text's single-line layout.
     let origin = if minimal {
@@ -1932,7 +1951,7 @@ fn phase_color(phase: Phase) -> (u8, u8, u8) {
         Phase::ClipboardFallback => CLIPBOARD_FALLBACK_COLOR,
         Phase::SubmitFailed => SUBMIT_FAILED_COLOR,
         Phase::Cancelled => CANCELLED_COLOR,
-        Phase::Error => ERROR_COLOR,
+        Phase::Error | Phase::ConfigError => ERROR_COLOR,
     }
 }
 
@@ -2076,7 +2095,7 @@ fn paint_badge(
             fill_circle(canvas, cx, cy, disc_radius, color);
             fill_square(canvas, cx, cy, disc_radius * 0.38, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             glyph_cross(
                 canvas,
@@ -2183,7 +2202,7 @@ fn paint_minimal(
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, ring_radius * 0.3, color);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(
                 canvas,
                 cx,
@@ -2280,7 +2299,7 @@ fn paint_pill(
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, half_height * 0.4, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(
                 canvas,
                 cx,
@@ -2379,7 +2398,7 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
         Phase::Cancelled => {
             fill_square(canvas, button_cx, cy, button_radius * 0.34, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(
                 canvas,
                 button_cx,
@@ -2471,7 +2490,7 @@ fn paint_live_text(
     let y_top = line_center - text::CAPTION_FONT_SIZE * 0.62;
 
     let right = width - LIVE_TEXT_PADDING;
-    let captured = live_text.filter(|text| !text.is_empty());
+    let captured = caption_captured(Some(phase), live_text);
 
     // The phase cue: a round chip (glass/box) or a bare dot (minimal). The chip
     // is always painted so the card reads its phase even before the first word;
@@ -2573,9 +2592,27 @@ fn paint_live_text(
                     tentative: LIVE_TEXT_COMMITTED,
                     alpha: 0.9,
                 };
-                let line = text::caption_line(message, "");
-                let message_y = if boxed { boxed_text_top() } else { y_top };
-                text::draw_line(canvas, text_x, message_y, &line, &colors, None);
+                if boxed {
+                    // The box wraps the status message exactly as it wraps
+                    // captured words, so a longer line (the config-rejected
+                    // pointer) stays fully visible instead of clipping at the
+                    // card's fixed width.
+                    let status = LiveText {
+                        committed: message.to_string(),
+                        tentative: String::new(),
+                    };
+                    text::draw_caption(
+                        canvas,
+                        LIVE_TEXT_PADDING,
+                        boxed_text_top(),
+                        boxed_text_max_width(),
+                        &status,
+                        colors,
+                    );
+                } else {
+                    let line = text::caption_line(message, "");
+                    text::draw_line(canvas, text_x, y_top, &line, &colors, None);
+                }
             }
         }
     }
@@ -2610,7 +2647,9 @@ fn draw_caption_chip(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, phase: 
             glyph_clipboard(canvas, cx, cy, radius * 0.48, radius * 0.16, glyph)
         }
         Phase::Cancelled => fill_square(canvas, cx, cy, radius * 0.3, glyph),
-        Phase::Error => glyph_cross(canvas, cx, cy, radius * 0.5, radius * 0.2, glyph),
+        Phase::Error | Phase::ConfigError => {
+            glyph_cross(canvas, cx, cy, radius * 0.5, radius * 0.2, glyph)
+        }
     }
 }
 
@@ -2637,6 +2676,7 @@ fn phase_message(phase: Phase) -> Option<&'static str> {
         Phase::SubmitFailed => Some("Text entered, but Enter failed"),
         Phase::Cancelled => Some("Cancelled"),
         Phase::Error => Some("Transcription failed"),
+        Phase::ConfigError => Some("Config edit rejected - run tonguetyped status"),
         _ => None,
     }
 }
@@ -2830,7 +2870,7 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, radius * 0.3, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(canvas, cx, cy, radius * 0.42, radius * 0.16, GLYPH_COLOR);
         }
     }
@@ -3552,6 +3592,17 @@ mod tests {
     }
 
     #[test]
+    fn rejected_config_event_captions_as_a_config_error_not_a_transcription_failure() {
+        let phase = Phase::from_event(FeedbackEvent::ConfigError);
+        assert_eq!(phase, Phase::ConfigError);
+        assert_eq!(phase.dwell(), Some(ERROR_DWELL));
+        assert!(!phase.is_animated());
+        let message = phase_message(phase).expect("config error must caption a message");
+        assert!(message.contains("tonguetyped status"));
+        assert_ne!(message, phase_message(Phase::Error).unwrap());
+    }
+
+    #[test]
     fn every_phase_paints_distinguishable_pixels_in_every_style() {
         for style in ALL_STYLES {
             let mut seen = Vec::new();
@@ -3850,6 +3901,105 @@ mod tests {
             chip_region(&words),
             "the box's no-words status message must not paint over the phase chip"
         );
+    }
+
+    #[test]
+    fn boxed_config_error_status_wraps_so_the_whole_message_renders() {
+        // The box card is narrower than the config-error pointer, so the status
+        // message must wrap like captured words; drawn as one clipped line, no
+        // text would appear below the first row.
+        let message = phase_message(Phase::ConfigError).expect("config error has a status");
+        let max_width = LIVE_TEXT_BOX_SURFACE.0 as f32 - 2.0 * LIVE_TEXT_PADDING;
+        assert!(
+            text::caption_lines(message, "", max_width).len() > 1,
+            "the config-error pointer must wrap inside the box: {message:?}"
+        );
+
+        let (width, _) = surface_size_for(Style::LiveTextBox);
+        let first_row_top = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 12.0;
+        let row_height = text::CAPTION_LINE_HEIGHT;
+        let text_ink = |pixels: &[u8], top: f32, bottom: f32| -> usize {
+            (top as u32..bottom as u32)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let index = ((y * width + x) * 4) as usize;
+                    pixels[index] > 150 && pixels[index + 1] > 150 && pixels[index + 2] > 150
+                })
+                .count()
+        };
+        let pixels = paint_to_pixels_with_live_text(
+            Some(Phase::ConfigError),
+            0.0,
+            0.0,
+            true,
+            Style::LiveTextBox,
+            &quiet_history(),
+            None,
+        );
+        assert!(
+            text_ink(&pixels, first_row_top, first_row_top + row_height) > 0,
+            "the config-error status message must paint its first line"
+        );
+        assert!(
+            text_ink(
+                &pixels,
+                first_row_top + row_height,
+                first_row_top + 2.0 * row_height,
+            ) > 0,
+            "the wrapped tail of the config-error message must render below the first line"
+        );
+    }
+
+    #[test]
+    fn config_error_supersedes_held_live_text_in_every_caption_style() {
+        // A config-error is a rejected config edit, not dictation: after a
+        // dictation has left the caption holding its last words, a config-error
+        // must paint its own status message in every caption style instead of
+        // those stale words on the red chip.
+        let held = LiveText {
+            committed: "today I am testing local speech".to_string(),
+            tentative: " one two three".to_string(),
+        };
+        for style in ALL_STYLES.into_iter().filter(|s| is_caption_style(*s)) {
+            let with_held = paint_to_pixels_with_live_text(
+                Some(Phase::ConfigError),
+                0.0,
+                0.0,
+                false,
+                style,
+                &quiet_history(),
+                Some(&held),
+            );
+            let without_words = paint_to_pixels_with_live_text(
+                Some(Phase::ConfigError),
+                0.0,
+                0.0,
+                false,
+                style,
+                &quiet_history(),
+                None,
+            );
+            assert_eq!(
+                with_held, without_words,
+                "{style:?}: held dictation words must not paint over the config-error status"
+            );
+            // The held words are not simply hidden: the config-error status
+            // replaces them, so this frame differs from the same held words
+            // shown by a normal terminal dictation phase.
+            let held_elsewhere = paint_to_pixels_with_live_text(
+                Some(Phase::Success),
+                0.0,
+                0.0,
+                false,
+                style,
+                &quiet_history(),
+                Some(&held),
+            );
+            assert_ne!(
+                with_held, held_elsewhere,
+                "{style:?}: the config-error status must replace the held words, not match them"
+            );
+        }
     }
 
     #[test]
