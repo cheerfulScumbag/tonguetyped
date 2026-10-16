@@ -1671,6 +1671,21 @@ fn single_line_surface_height() -> u32 {
     quantize_size(capsule + LIVE_TEXT_INSET * 2.0)
 }
 
+/// The live-text words a caption style draws from, or `None` when it has none to
+/// draw. Every caption consumer - painting, the single-line sizing, and the box
+/// sizing - must agree on this: a config-error supersedes the held words because
+/// a rejected config edit is not dictation, so all caption styles paint the
+/// config-error status message instead of the last utterance's words.
+fn caption_captured<'a>(
+    phase: Option<Phase>,
+    live_text: Option<&'a LiveText>,
+) -> Option<&'a LiveText> {
+    if matches!(phase, Some(Phase::ConfigError)) {
+        return None;
+    }
+    live_text.filter(|text| !text.is_empty())
+}
+
 /// The scrolling box's content height: the leading chip row plus one row per
 /// wrapped line and the bottom padding, so the card hugs its text with no dead
 /// band below the last line. The empty (listening) state is just the chip row;
@@ -1679,7 +1694,7 @@ fn single_line_surface_height() -> u32 {
 /// past that cap. Clamped to [`LIVE_TEXT_BOX_MIN_HEIGHT`] and the surface
 /// ceiling.
 fn boxed_surface_height(phase: Option<Phase>, live_text: Option<&LiveText>) -> u32 {
-    let captured = live_text.filter(|text| !text.is_empty());
+    let captured = caption_captured(phase, live_text);
     let lines = match captured {
         Some(text) => {
             text::caption_lines(&text.committed, &text.tentative, boxed_text_max_width()).len()
@@ -1721,7 +1736,7 @@ fn caption_surface_size(
         );
     }
     let minimal = style == Style::LiveTextMinimal;
-    let captured = live_text.filter(|text| !text.is_empty());
+    let captured = caption_captured(phase, live_text);
     let recording = phase == Some(Phase::Recording);
     // The text/pad origin, matching paint_live_text's single-line layout.
     let origin = if minimal {
@@ -2478,7 +2493,7 @@ fn paint_live_text(
     let y_top = line_center - text::CAPTION_FONT_SIZE * 0.62;
 
     let right = width - LIVE_TEXT_PADDING;
-    let captured = live_text.filter(|text| !text.is_empty());
+    let captured = caption_captured(Some(phase), live_text);
 
     // The phase cue: a round chip (glass/box) or a bare dot (minimal). The chip
     // is always painted so the card reads its phase even before the first word;
@@ -3936,6 +3951,58 @@ mod tests {
             ) > 0,
             "the wrapped tail of the config-error message must render below the first line"
         );
+    }
+
+    #[test]
+    fn config_error_supersedes_held_live_text_in_every_caption_style() {
+        // A config-error is a rejected config edit, not dictation: after a
+        // dictation has left the caption holding its last words, a config-error
+        // must paint its own status message in every caption style instead of
+        // those stale words on the red chip.
+        let held = LiveText {
+            committed: "today I am testing local speech".to_string(),
+            tentative: " one two three".to_string(),
+        };
+        for style in ALL_STYLES.into_iter().filter(|s| is_caption_style(*s)) {
+            let with_held = paint_to_pixels_with_live_text(
+                Some(Phase::ConfigError),
+                0.0,
+                0.0,
+                false,
+                style,
+                &quiet_history(),
+                Some(&held),
+            );
+            let without_words = paint_to_pixels_with_live_text(
+                Some(Phase::ConfigError),
+                0.0,
+                0.0,
+                false,
+                style,
+                &quiet_history(),
+                None,
+            );
+            assert_eq!(
+                with_held, without_words,
+                "{style:?}: held dictation words must not paint over the config-error status"
+            );
+            // The held words are not simply hidden: the config-error status
+            // replaces them, so this frame differs from the same held words
+            // shown by a normal terminal dictation phase.
+            let held_elsewhere = paint_to_pixels_with_live_text(
+                Some(Phase::Success),
+                0.0,
+                0.0,
+                false,
+                style,
+                &quiet_history(),
+                Some(&held),
+            );
+            assert_ne!(
+                with_held, held_elsewhere,
+                "{style:?}: the config-error status must replace the held words, not match them"
+            );
+        }
     }
 
     #[test]
