@@ -1630,13 +1630,14 @@ impl Coordinator {
         self.state.lock().unwrap().config_error = None;
     }
 
-    /// Surface a config reload that the file watcher rejected through the same
-    /// transient error feedback (overlay/notification) a failed dictation
-    /// uses. The machine-readable message is the status `config_error` field,
-    /// set separately so the daemon log and `status` carry the detail.
+    /// Surface a config reload that the file watcher rejected through the
+    /// overlay/notification feedback, with a config-specific message (the
+    /// generic dictation-error copy would not tell the user their config edit
+    /// was rejected). The machine-readable message is the status `config_error`
+    /// field, set separately so the daemon log and `status` carry the detail.
     pub fn show_config_error(&self) {
         let config = self.state.lock().unwrap().config.clone();
-        self.feedback.send(FeedbackEvent::Error, &config);
+        self.feedback.send(FeedbackEvent::ConfigError, &config);
     }
 
     fn worker_finished(&self, generation: u64, transcription_attempted: bool) {

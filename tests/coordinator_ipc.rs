@@ -733,6 +733,20 @@ async fn feedback_tracks_successful_state_transitions_once() {
 }
 
 #[tokio::test]
+async fn a_rejected_config_edit_reports_a_config_specific_cue() {
+    let runtime = Arc::new(TestRuntime::default());
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime, feedback.clone());
+
+    coordinator.show_config_error();
+
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![FeedbackEvent::ConfigError]
+    );
+}
+
+#[tokio::test]
 async fn empty_transcript_reports_a_no_speech_cue_instead_of_success() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.empty_transcript.store(true, Ordering::SeqCst);

@@ -485,6 +485,7 @@ enum Phase {
     SubmitFailed,
     Cancelled,
     Error,
+    ConfigError,
 }
 
 impl Phase {
@@ -500,6 +501,7 @@ impl Phase {
             FeedbackEvent::Truncated => Phase::Error,
             FeedbackEvent::Cancelled => Phase::Cancelled,
             FeedbackEvent::Error => Phase::Error,
+            FeedbackEvent::ConfigError => Phase::ConfigError,
         }
     }
 
@@ -512,7 +514,7 @@ impl Phase {
             Phase::ClipboardFallback => Some(CLIPBOARD_FALLBACK_DWELL),
             Phase::SubmitFailed => Some(SUBMIT_FAILED_DWELL),
             Phase::Cancelled => Some(CANCELLED_DWELL),
-            Phase::Error => Some(ERROR_DWELL),
+            Phase::Error | Phase::ConfigError => Some(ERROR_DWELL),
         }
     }
 
@@ -1932,7 +1934,7 @@ fn phase_color(phase: Phase) -> (u8, u8, u8) {
         Phase::ClipboardFallback => CLIPBOARD_FALLBACK_COLOR,
         Phase::SubmitFailed => SUBMIT_FAILED_COLOR,
         Phase::Cancelled => CANCELLED_COLOR,
-        Phase::Error => ERROR_COLOR,
+        Phase::Error | Phase::ConfigError => ERROR_COLOR,
     }
 }
 
@@ -2076,7 +2078,7 @@ fn paint_badge(
             fill_circle(canvas, cx, cy, disc_radius, color);
             fill_square(canvas, cx, cy, disc_radius * 0.38, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             glyph_cross(
                 canvas,
@@ -2183,7 +2185,7 @@ fn paint_minimal(
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, ring_radius * 0.3, color);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(
                 canvas,
                 cx,
@@ -2280,7 +2282,7 @@ fn paint_pill(
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, half_height * 0.4, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(
                 canvas,
                 cx,
@@ -2379,7 +2381,7 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
         Phase::Cancelled => {
             fill_square(canvas, button_cx, cy, button_radius * 0.34, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(
                 canvas,
                 button_cx,
@@ -2610,7 +2612,9 @@ fn draw_caption_chip(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, phase: 
             glyph_clipboard(canvas, cx, cy, radius * 0.48, radius * 0.16, glyph)
         }
         Phase::Cancelled => fill_square(canvas, cx, cy, radius * 0.3, glyph),
-        Phase::Error => glyph_cross(canvas, cx, cy, radius * 0.5, radius * 0.2, glyph),
+        Phase::Error | Phase::ConfigError => {
+            glyph_cross(canvas, cx, cy, radius * 0.5, radius * 0.2, glyph)
+        }
     }
 }
 
@@ -2637,6 +2641,7 @@ fn phase_message(phase: Phase) -> Option<&'static str> {
         Phase::SubmitFailed => Some("Text entered, but Enter failed"),
         Phase::Cancelled => Some("Cancelled"),
         Phase::Error => Some("Transcription failed"),
+        Phase::ConfigError => Some("Config edit rejected - run tonguetyped status"),
         _ => None,
     }
 }
@@ -2830,7 +2835,7 @@ fn paint_blob(canvas: &mut Canvas, phase: Phase, t: f32, breath: f32, levels: &L
         Phase::Cancelled => {
             fill_square(canvas, cx, cy, radius * 0.3, GLYPH_COLOR);
         }
-        Phase::Error => {
+        Phase::Error | Phase::ConfigError => {
             glyph_cross(canvas, cx, cy, radius * 0.42, radius * 0.16, GLYPH_COLOR);
         }
     }
@@ -3549,6 +3554,17 @@ mod tests {
         assert_ne!(phase, Phase::Success);
         assert_eq!(phase.dwell(), Some(ERROR_DWELL));
         assert!(!phase.is_animated());
+    }
+
+    #[test]
+    fn rejected_config_event_captions_as_a_config_error_not_a_transcription_failure() {
+        let phase = Phase::from_event(FeedbackEvent::ConfigError);
+        assert_eq!(phase, Phase::ConfigError);
+        assert_eq!(phase.dwell(), Some(ERROR_DWELL));
+        assert!(!phase.is_animated());
+        let message = phase_message(phase).expect("config error must caption a message");
+        assert!(message.contains("tonguetyped status"));
+        assert_ne!(message, phase_message(Phase::Error).unwrap());
     }
 
     #[test]

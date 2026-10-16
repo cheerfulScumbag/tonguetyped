@@ -31,6 +31,11 @@ pub enum FeedbackEvent {
     Truncated,
     Cancelled,
     Error,
+    /// A config-file edit was rejected, so the daemon kept its last good
+    /// config. Distinct from `Error` so the user is told the edit was rejected
+    /// and pointed at `tonguetyped status` for the detail instead of a generic
+    /// failure.
+    ConfigError,
 }
 
 pub trait Feedback: Send + Sync {
@@ -281,6 +286,12 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
             "Operation failed",
             "critical",
         ),
+        FeedbackEvent::ConfigError => (
+            "dialog-warning-symbolic",
+            "suspend-error",
+            "Config edit rejected - run tonguetyped status",
+            "normal",
+        ),
     }
 }
 
@@ -310,6 +321,7 @@ mod tests {
             FeedbackEvent::Truncated,
             FeedbackEvent::Cancelled,
             FeedbackEvent::Error,
+            FeedbackEvent::ConfigError,
         ];
         let styles: Vec<_> = events.into_iter().map(event_style).collect();
 
@@ -320,5 +332,9 @@ mod tests {
         }
         assert_eq!(event_style(FeedbackEvent::Error).2, "Operation failed");
         assert_eq!(event_style(FeedbackEvent::Error).3, "critical");
+
+        let config_error = event_style(FeedbackEvent::ConfigError).2;
+        assert_ne!(config_error, "Operation failed");
+        assert!(config_error.contains("tonguetyped status"));
     }
 }
