@@ -1601,8 +1601,9 @@ pub(crate) enum Style {
     /// The streaming caption, minimal variant: the same single-line card with a
     /// single leading phase dot instead of the full chip.
     LiveTextMinimal,
-    /// The streaming caption, box variant: a taller wrapped card that scrolls
-    /// internally, for long passages.
+    /// The streaming caption, box variant: the same content sizing but a
+    /// wrapping card that grows a line per wrapped row and scrolls internally
+    /// past its cap, for long passages.
     LiveTextBox,
 }
 
