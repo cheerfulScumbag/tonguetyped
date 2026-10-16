@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod config_watch;
 pub mod coordinator;
 pub mod daemon;
 pub mod doctor;

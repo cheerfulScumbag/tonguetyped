@@ -68,6 +68,7 @@ pub fn bar_status(response: Option<&Response>, extended: bool) -> BarStatus {
     let Some(Response::Status {
         state,
         operation_error,
+        config_error,
         build,
         model,
         backend,
@@ -100,6 +101,9 @@ pub fn bar_status(response: Option<&Response>, extended: bool) -> BarStatus {
     }
     if let Some(error) = operation_error {
         tooltip.push_str(&format!("\nLast error: {error}"));
+    }
+    if let Some(error) = config_error {
+        tooltip.push_str(&format!("\nConfig error: {error}"));
     }
     BarStatus {
         text: state.clone(),
@@ -204,6 +208,7 @@ mod tests {
             state: state.to_string(),
             activation_mode: "hold".to_string(),
             operation_error: operation_error.map(str::to_string),
+            config_error: None,
             shortcut_status: ipc::ShortcutStatus::Available,
             activation_error: None,
             build: Some("0.2.2 (a1b2c3d)".to_string()),
@@ -254,6 +259,18 @@ mod tests {
                 "device": "AMD Radeon RX 7900",
                 "build": "0.2.2 (a1b2c3d)",
             })
+        );
+    }
+
+    #[test]
+    fn config_error_is_reported_in_the_tooltip() {
+        let mut response = status("idle", None);
+        if let Response::Status { config_error, .. } = &mut response {
+            *config_error = Some("unknown field `bogus`".to_string());
+        }
+        assert_eq!(
+            json(Some(&response), false)["tooltip"],
+            "TongueTyped: idle\nConfig error: unknown field `bogus`"
         );
     }
 
