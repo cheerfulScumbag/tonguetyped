@@ -1212,7 +1212,7 @@ impl ConsoleState {
                 &["Folder"],
                 std::slice::from_ref(&self.folder_field),
                 0,
-                &[],
+                &["Empty disables it; only written while keeping transcripts is on".to_string()],
             ),
             StepKind::OverlayEnabled => self.render_overlay_step(
                 frame,

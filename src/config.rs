@@ -790,12 +790,12 @@ pub struct HistoryConfig {
     /// neither depends on the output method.
     #[serde(default = "default_max_age_days")]
     pub max_age_days: u64,
-    /// A folder to also write each finished transcript into as a plain-text
-    /// file stamped with the date and time (one file per dictation). Empty
-    /// (the default) disables the export. The files are write-once:
-    /// TongueTyped never reads, monitors, or prunes them again, so they
-    /// persist regardless of the database retention above. No audio is ever
-    /// written.
+    /// A folder to write each finished transcript into as a plain-text file
+    /// stamped with the date and time (one file per dictation). Empty (the
+    /// default) disables the export, and so does `enabled = false`: a folder
+    /// set on its own writes nothing. The files are write-once: TongueTyped
+    /// never reads, monitors, or prunes them again, so they persist
+    /// regardless of the database retention above. No audio is ever written.
     #[serde(default = "default_transcript_folder")]
     pub transcript_folder: String,
     #[serde(default = "default_false")]

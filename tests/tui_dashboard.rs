@@ -942,8 +942,9 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
 
     let opened = session.wait_for("Folder", Duration::from_secs(3));
     assert!(
-        opened.contains("Leave empty to disable"),
-        "the folder screen should explain that empty disables it:\n{opened}"
+        opened.contains("Leave empty to disable")
+            && opened.contains("keeping transcripts is on"),
+        "the folder screen should explain that empty disables it and that it needs keeping on:\n{opened}"
     );
 
     // A short absolute path, so the home row it later renders is never clipped.

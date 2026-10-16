@@ -522,11 +522,12 @@ max_age_days = 30          # 0 = no age limit
 transcript_folder = ""     # e.g. "/home/you/Documents/tonguetyped"
 ```
 
-Setting `transcript_folder` also writes each finished transcript to that folder
-as a plain-text file stamped with the date and time (one file per dictation,
-written `0600`, `~/` expanded). Those files are write-once - TongueTyped never
-reads, monitors, or prunes them, so they outlive the database retention.
-TongueTyped never stores audio.
+Setting `transcript_folder` writes each finished transcript to that folder as a
+plain-text file stamped with the date and time (one file per dictation, written
+`0600`, `~/` expanded), but only while history is enabled - a folder on its own
+writes nothing. Those files are write-once: TongueTyped never reads, monitors,
+or prunes them, so they outlive the database retention. TongueTyped never
+stores audio.
 
 ### Vocabulary and translation
 
