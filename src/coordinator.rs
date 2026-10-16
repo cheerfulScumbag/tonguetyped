@@ -40,6 +40,28 @@ pub trait CoordinatorRuntime: Send + Sync {
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
         clock: Arc<dyn Clock>,
     ) -> RecordingAttempt;
+    /// Record one dictation, using the active model's native streaming path when
+    /// it has one. A streaming model publishes live text to `feedback` while
+    /// the user speaks and returns the finalized text in
+    /// [`RecordingAttempt::streamed`], so the worker skips the batch decode. The
+    /// recording cap is read from `config.transcription.max_recording_seconds`,
+    /// which is why this takes the whole config rather than a duration. The
+    /// default ignores `config`/`feedback` and delegates to
+    /// [`record`](Self::record), so a runtime without streaming support (every
+    /// test fake, and `ProductionRuntime` on a non-streaming model) behaves
+    /// exactly as before and reports `streamed: None`.
+    fn record_streaming(
+        &self,
+        microphone: &str,
+        signal_rx: mpsc::Receiver<RecordingSignal>,
+        started: tokio::sync::oneshot::Sender<Result<(), String>>,
+        clock: Arc<dyn Clock>,
+        config: &Config,
+        _feedback: Arc<dyn Feedback>,
+    ) -> RecordingAttempt {
+        let max_duration = Duration::from_secs(config.transcription.max_recording_seconds);
+        self.record(microphone, max_duration, signal_rx, started, clock)
+    }
     fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt;
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<crate::output::Delivery>;
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
@@ -78,6 +100,25 @@ pub trait CoordinatorRuntime: Send + Sync {
 pub struct RecordingAttempt {
     pub result: anyhow::Result<Vec<f32>>,
     pub automatic_stop_at: Option<Duration>,
+    /// Set only when the active model streams and finalized during recording.
+    /// Its text is then the whole transcript, so no batch decode follows; it is
+    /// `None` for every non-streaming model (the default), which keeps the
+    /// existing VAD-then-batch path byte-for-byte unchanged.
+    pub streamed: Option<StreamedTranscript>,
+}
+
+/// A transcript a streaming model produced during the recording itself. Unlike
+/// [`RecordingAttempt::result`]'s buffer, this text already exists when
+/// recording stops, so the worker delivers it instead of running a batch
+/// decode - which is required for a streaming-only model, whose `Session::run`
+/// path is not implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamedTranscript {
+    pub text: String,
+    pub truncated: bool,
+    /// Wall time the stream spent feeding and finalizing, reported as the
+    /// inference phase so the latency record still covers the decode.
+    pub inference: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -398,14 +439,20 @@ impl<E> EngineLifecycle<E> {
     }
 }
 
-impl CoordinatorRuntime for ProductionRuntime {
-    fn record(
+impl ProductionRuntime {
+    /// One capture with an optional live frame sink. The default `record` path
+    /// passes `None`; the streaming path passes a callback so the same 16 kHz
+    /// blocks reach the model's stream while the recorder still buffers them
+    /// for the batch path. Returns as soon as recording stops (the frame sender
+    /// the callback owns is dropped with the recorder at that point).
+    fn capture(
         &self,
         microphone: &str,
         max_duration: Duration,
         signal_rx: mpsc::Receiver<RecordingSignal>,
         started: tokio::sync::oneshot::Sender<Result<(), String>>,
         clock: Arc<dyn Clock>,
+        frame_callback: Option<crate::audio::FrameCallback>,
     ) -> RecordingAttempt {
         let (error_tx, error_rx) = mpsc::channel();
         let error_callback = Arc::new(move |message: String| {
@@ -427,15 +474,20 @@ impl CoordinatorRuntime for ProductionRuntime {
                 return RecordingAttempt {
                     result: Err(anyhow::anyhow!(message)),
                     automatic_stop_at: None,
+                    streamed: None,
                 };
             }
         };
+        if let Some(frame_callback) = frame_callback {
+            recorder.set_frame_callback(frame_callback);
+        }
         if let Err(error) = recorder.start() {
             let message = error.to_string();
             let _ = started.send(Err(message.clone()));
             return RecordingAttempt {
                 result: Err(anyhow::anyhow!(message)),
                 automatic_stop_at: None,
+                streamed: None,
             };
         }
         let deadline = match Instant::now().checked_add(max_duration) {
@@ -446,6 +498,7 @@ impl CoordinatorRuntime for ProductionRuntime {
                 return RecordingAttempt {
                     result: Err(anyhow::anyhow!(message)),
                     automatic_stop_at: None,
+                    streamed: None,
                 };
             }
         };
@@ -457,7 +510,94 @@ impl CoordinatorRuntime for ProductionRuntime {
         RecordingAttempt {
             result: recording_result.and_then(|()| recorder.take_buffer()),
             automatic_stop_at,
+            streamed: None,
         }
+    }
+}
+
+/// Whether the active model streams, read from the catalog capability so no
+/// engine is loaded on the recording-start path: a cold load here (for
+/// example after the idle unload) would delay audio capture and the
+/// recording indicator for every dictation, including non-streaming models.
+/// The streaming thread re-checks the capability on the actually-loaded
+/// file before feeding it and falls back to the batch path, so this is a
+/// fast pre-filter, not the runtime source of truth. It selects the runtime's
+/// batch/stream path only; the overlay style is the user's choice and never
+/// switches on the model.
+fn streaming_ready(config: &Config) -> bool {
+    crate::catalog::find(&config.model.active_model)
+        .is_some_and(|entry| entry.info().supports_streaming())
+}
+
+impl CoordinatorRuntime for ProductionRuntime {
+    fn record(
+        &self,
+        microphone: &str,
+        max_duration: Duration,
+        signal_rx: mpsc::Receiver<RecordingSignal>,
+        started: tokio::sync::oneshot::Sender<Result<(), String>>,
+        clock: Arc<dyn Clock>,
+    ) -> RecordingAttempt {
+        self.capture(microphone, max_duration, signal_rx, started, clock, None)
+    }
+
+    fn record_streaming(
+        &self,
+        microphone: &str,
+        signal_rx: mpsc::Receiver<RecordingSignal>,
+        started: tokio::sync::oneshot::Sender<Result<(), String>>,
+        clock: Arc<dyn Clock>,
+        config: &Config,
+        feedback: Arc<dyn Feedback>,
+    ) -> RecordingAttempt {
+        let max_duration = Duration::from_secs(config.transcription.max_recording_seconds);
+        if !streaming_ready(config) {
+            return self.capture(microphone, max_duration, signal_rx, started, clock, None);
+        }
+        let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>();
+        let frame_callback: crate::audio::FrameCallback = {
+            let frame_tx = frame_tx.clone();
+            Arc::new(move |samples: &[f32]| {
+                // The consumer decodes on its own thread, so the realtime audio
+                // callback only ever appends and never blocks on a decode.
+                // Frames queue in capture order and reach the model in order -
+                // none are dropped, so the stream sees every sample; a model
+                // slower than realtime lags rather than corrupting the audio.
+                // The queue is bounded by the recording length (already capped
+                // by `max_recording_seconds`), the same buffer the batch path
+                // holds whole.
+                let _ = frame_tx.send(samples.to_vec());
+            })
+        };
+        // Only the recorder's callback holds a sender now, so the channel closes
+        // the moment recording stops and the stream thread finalizes.
+        drop(frame_tx);
+        let inference = Arc::clone(&self.inference);
+        let live_config = Arc::new(config.clone());
+        // Publish a fresh cancellable run before the stream starts (and before
+        // any cold model load on its thread) so a cancel from another thread
+        // aborts an in-flight stream instead of blocking shutdown on the
+        // inference lock, mirroring `transcribe`.
+        let cancel_token = crate::inference::CancelToken::new();
+        *self.cancel_token.lock().unwrap() = Some(cancel_token.clone());
+        // The stream owns the inference lock for the whole recording, so hold it
+        // on a dedicated thread and join it once capture has ended.
+        let stream_thread = std::thread::Builder::new()
+            .name("tonguetyped-live-text".to_string())
+            .spawn(move || stream_capture(inference, live_config, frame_rx, feedback, cancel_token))
+            .ok();
+        let mut attempt = self.capture(
+            microphone,
+            max_duration,
+            signal_rx,
+            started,
+            clock,
+            Some(frame_callback),
+        );
+        attempt.streamed = stream_thread
+            .and_then(|handle| handle.join().ok())
+            .flatten();
+        attempt
     }
 
     fn transcribe(&self, samples: &[f32], config: &Config) -> TranscriptionAttempt {
@@ -635,6 +775,84 @@ impl Drop for ProductionRuntime {
     }
 }
 
+/// The live-text capture thread: owns the inference lock for the whole
+/// recording, feeds the model's native stream every 16 kHz block the recorder
+/// publishes, reports each text change to `feedback`, and returns the finalized
+/// transcript. Returns `None` (so the worker falls back to a batch decode) when
+/// capture never produced a frame (a microphone error closed the channel), the
+/// model turns out not to stream, or the stream itself fails; the fallback
+/// keeps the dictation working even if streaming is momentarily unavailable.
+fn stream_capture(
+    inference: Arc<Mutex<EngineLifecycle<crate::inference::InferenceEngine>>>,
+    config: Arc<Config>,
+    frame_rx: mpsc::Receiver<Vec<f32>>,
+    feedback: Arc<dyn Feedback>,
+    cancel_token: crate::inference::CancelToken,
+) -> Option<StreamedTranscript> {
+    let model_id = config.model.active_model.clone();
+    let backend = config.model.preferred_backend.clone();
+    let engine_key = format!("{model_id}@{backend}");
+    // Wait for the first frame before touching the model: when capture failed
+    // to start (a microphone error) the recorder is gone and the channel is
+    // already closed, so this returns without a cold load and lets the worker
+    // report the error promptly instead of after a model load.
+    let first_frame = frame_rx.recv().ok()?;
+    let mut lifecycle = inference.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = match lifecycle.ensure(&engine_key, || {
+        let mut engine = crate::inference::InferenceEngine::new_with_token(
+            crate::catalog::model_path(&model_id)?,
+            crate::inference::BackendPreference::parse(&backend)?,
+            cancel_token.clone(),
+        );
+        engine.load()?;
+        Ok(engine)
+    }) {
+        Ok(engine) => engine,
+        Err(error) => {
+            tracing::warn!("live streaming could not load the model: {error:#}");
+            return None;
+        }
+    };
+    // Cover a reused (already-loaded) engine too, so a cancel reaches an
+    // in-flight stream the same way it reaches a batch decode.
+    engine.set_cancel_token(&cancel_token);
+    if !engine.supports_streaming() {
+        return None;
+    }
+    let started = Instant::now();
+    let partial_feedback = Arc::clone(&feedback);
+    let partial_config = Arc::clone(&config);
+    let mut on_partial = move |committed: &str, tentative: &str| {
+        partial_feedback.send_live_text(
+            crate::overlay::LiveText {
+                committed: committed.to_string(),
+                tentative: tentative.to_string(),
+            },
+            &partial_config,
+        );
+    };
+    // Hand the already-received first frame to the stream first, then drain the
+    // rest of the channel; `None` (channel closed) finalizes the stream.
+    let mut pending = Some(first_frame);
+    let result = engine.transcribe_streaming(
+        &config.transcription,
+        || pending.take().or_else(|| frame_rx.recv().ok()),
+        &mut on_partial,
+    );
+    let inference = started.elapsed();
+    match result {
+        Ok(transcription) => Some(StreamedTranscript {
+            text: transcription.text,
+            truncated: transcription.truncated,
+            inference,
+        }),
+        Err(error) => {
+            tracing::warn!("live streaming failed; using the batch path instead: {error:#}");
+            None
+        }
+    }
+}
+
 fn wait_for_recording_end(
     signal_rx: &mpsc::Receiver<RecordingSignal>,
     error_rx: &mpsc::Receiver<String>,
@@ -682,6 +900,7 @@ struct CoordinatorStateInner {
     signal_tx: Option<mpsc::Sender<RecordingSignal>>,
     physical_press: Option<PhysicalPress>,
     last_error: Option<String>,
+    config_error: Option<String>,
     runtime_error: Option<String>,
     shortcut_status: crate::ipc::ShortcutStatus,
     worker_active: bool,
@@ -766,6 +985,7 @@ impl Coordinator {
                 signal_tx: None,
                 physical_press: None,
                 last_error: None,
+                config_error: None,
                 runtime_error: None,
                 shortcut_status: crate::ipc::ShortcutStatus::Initializing,
                 worker_active: false,
@@ -894,6 +1114,11 @@ impl Coordinator {
                     "recording cancelled during startup".into(),
                 ));
             }
+            // Show the recording start. The overlay paints the configured
+            // style, whatever the model is: a streaming model's partials are
+            // forwarded separately through `send_live_text` and painted only
+            // when a live-text style is selected, so nothing here has to switch
+            // the overlay into caption mode.
             self.feedback.send(FeedbackEvent::Recording, &inner.config);
         }
         Ok(response)
@@ -1111,17 +1336,17 @@ impl Coordinator {
                 generation,
                 transcription_attempted: false,
             };
-            let duration = Duration::from_secs(config.transcription.max_recording_seconds);
             let media_pause = config
                 .audio
                 .pause_media
                 .then(|| coordinator.runtime.pause_media());
-            let recording = coordinator.runtime.record(
+            let recording = coordinator.runtime.record_streaming(
                 &config.audio.microphone,
-                duration,
                 signal_rx,
                 started_tx,
                 Arc::clone(&coordinator.clock),
+                &config,
+                Arc::clone(&coordinator.feedback),
             );
             drop(media_pause);
             {
@@ -1135,6 +1360,7 @@ impl Coordinator {
                 let duration = timing.elapsed_audio_finalization();
                 timing.set_phase(Phase::AudioFinalization, duration);
             }
+            let streamed = recording.streamed;
             let samples = match recording.result {
                 Ok(samples) => samples,
                 Err(error) => {
@@ -1164,29 +1390,40 @@ impl Coordinator {
             }
 
             completion.transcription_attempted = true;
-            let attempt = coordinator.runtime.transcribe(&samples, &config);
-            let truncated = attempt.truncated;
-            {
-                let mut timing = timing.lock().unwrap();
-                timing.set_phase(Phase::Vad, attempt.timings.vad);
-                timing.set_phase(Phase::ModelLoad, attempt.timings.model_load);
-                timing.set_phase(Phase::Inference, attempt.timings.inference);
-                timing.set_cold_model_load(attempt.timings.cold_model_load);
-                if let Some(backend) = attempt.timings.backend {
-                    timing.set_backend_info(backend);
+            // A streaming model already produced its transcript while the user
+            // spoke, so there is no batch decode to run (and a streaming-only
+            // model has no offline `run` at all); its finalized text is the
+            // transcript. Every other model takes the unchanged batch path.
+            let (transcript, truncated) = if let Some(streamed) = streamed {
+                {
+                    let mut timing = timing.lock().unwrap();
+                    timing.set_phase(Phase::Inference, streamed.inference);
                 }
-            }
-            let transcript = match attempt.result {
-                Ok(text) => text,
-                Err(error) => {
-                    tracing::error!("transcription failed: {}", error);
-                    coordinator.settle_error(
-                        generation,
-                        format!("transcription failed: {error}"),
-                        &timing,
-                        "transcription_error",
-                    );
-                    return;
+                (streamed.text, streamed.truncated)
+            } else {
+                let attempt = coordinator.runtime.transcribe(&samples, &config);
+                {
+                    let mut timing = timing.lock().unwrap();
+                    timing.set_phase(Phase::Vad, attempt.timings.vad);
+                    timing.set_phase(Phase::ModelLoad, attempt.timings.model_load);
+                    timing.set_phase(Phase::Inference, attempt.timings.inference);
+                    timing.set_cold_model_load(attempt.timings.cold_model_load);
+                    if let Some(backend) = attempt.timings.backend {
+                        timing.set_backend_info(backend);
+                    }
+                }
+                match attempt.result {
+                    Ok(text) => (text, attempt.truncated),
+                    Err(error) => {
+                        tracing::error!("transcription failed: {}", error);
+                        coordinator.settle_error(
+                            generation,
+                            format!("transcription failed: {error}"),
+                            &timing,
+                            "transcription_error",
+                        );
+                        return;
+                    }
                 }
             };
             let trimmed = transcript.trim();
@@ -1382,6 +1619,27 @@ impl Coordinator {
         inner.runtime_error = None;
     }
 
+    /// Record why the last attempt to load the config file failed, so `status`
+    /// reports it instead of silently keeping the old config.
+    pub fn set_config_error(&self, error: String) {
+        self.state.lock().unwrap().config_error = Some(error);
+    }
+
+    /// A reload succeeded: clear any previously reported config error.
+    pub fn clear_config_error(&self) {
+        self.state.lock().unwrap().config_error = None;
+    }
+
+    /// Surface a config reload that the file watcher rejected through the
+    /// overlay/notification feedback, with a config-specific message (the
+    /// generic dictation-error copy would not tell the user their config edit
+    /// was rejected). The machine-readable message is the status `config_error`
+    /// field, set separately so the daemon log and `status` carry the detail.
+    pub fn show_config_error(&self) {
+        let config = self.state.lock().unwrap().config.clone();
+        self.feedback.send(FeedbackEvent::ConfigError, &config);
+    }
+
     fn worker_finished(&self, generation: u64, transcription_attempted: bool) {
         let mut inner = self.state.lock().unwrap();
         if inner.generation != generation && inner.state == State::Idle {
@@ -1537,6 +1795,7 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         .to_string(),
         activation_mode: inner.config.activation.mode.to_string(),
         operation_error: inner.last_error.clone(),
+        config_error: inner.config_error.clone(),
         shortcut_status: inner.shortcut_status.clone(),
         activation_error: inner.runtime_error.clone(),
         model: inner.config.model.active_model.clone(),
@@ -1558,6 +1817,7 @@ pub enum CoordinatorResponse {
         state: String,
         activation_mode: String,
         operation_error: Option<String>,
+        config_error: Option<String>,
         shortcut_status: crate::ipc::ShortcutStatus,
         activation_error: Option<String>,
         /// The configured `model.active_model`.

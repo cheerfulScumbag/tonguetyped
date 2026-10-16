@@ -377,6 +377,7 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
             state,
             activation_mode,
             operation_error,
+            config_error,
             shortcut_status,
             activation_error,
             build,
@@ -400,6 +401,9 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
                     }
                 )),
             ];
+            if let Some(error) = config_error {
+                lines.push(error_line(format!("config error:     {error}")));
+            }
             if let Some(error) = operation_error {
                 lines.push(error_line(format!("last error:       {error}")));
             }

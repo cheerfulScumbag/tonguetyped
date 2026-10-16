@@ -8,9 +8,10 @@
 //! Run with `cargo run --example overlay_style_png -- <output-dir>` (defaults
 //! to `overlay-preview` in the current directory). Every style is written once
 //! per phase; the `blob`, `border`, and `half-circle` styles additionally get
-//! frames across one animation cycle, and every style gets recording frames
-//! over two representative live-microphone level histories (quiet and
-//! speaking), for both the default and live-waveform treatments. The
+//! frames across one animation cycle in both the `plain` and `waveform` looks,
+//! and every style gets recording frames over two representative
+//! live-microphone level histories (quiet and speaking) with the `waveform`
+//! look. The
 //! full-screen `border` frames are written at their representative preview size
 //! rather than a compositor-provided output size.
 
@@ -18,8 +19,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tonguetyped::overlay::render_frame_pixels;
+use tonguetyped::overlay::render_live_text_pixels;
 
-const STYLES: [&str; 7] = [
+const STYLES: [&str; 9] = [
     "badge",
     "minimal",
     "pill",
@@ -27,6 +29,8 @@ const STYLES: [&str; 7] = [
     "border",
     "half-circle",
     "long-pill",
+    "live-text",
+    "live-text-box",
 ];
 const PHASES: [&str; 8] = [
     "recording",
@@ -48,7 +52,8 @@ fn main() -> std::io::Result<()> {
 
     for style in STYLES {
         for phase in PHASES {
-            let (width, height, pixels) = render_frame_pixels(style, Some(phase), 0.0, false, &[]);
+            let (width, height, pixels) =
+                render_frame_pixels(style, Some(phase), 0.0, "waveform", "bars", &[]);
             write_png(
                 &out.join(format!("{style}-{phase}.png")),
                 width,
@@ -63,7 +68,7 @@ fn main() -> std::io::Result<()> {
     // styles follow its envelope, and the blob's body and halo swell with it.
     // Render both a quiet room and a speaking voice so the difference is
     // inspectable offline; the animation-cycle frames above use the speaking
-    // history too, except the blob which ignores `live_waveform` (its reaction
+    // history too, except the blob which has no look options (its reaction
     // lives in its body) and so needs only one variant.
     let quiet = quiet_levels();
     let speaking = speaking_levels();
@@ -71,7 +76,7 @@ fn main() -> std::io::Result<()> {
         for (label, levels) in [("quiet", &quiet), ("speaking", &speaking)] {
             for (index, t) in [0.0_f32, 0.5].iter().enumerate() {
                 let (width, height, pixels) =
-                    render_frame_pixels(style, Some("recording"), *t, true, levels);
+                    render_frame_pixels(style, Some("recording"), *t, "waveform", "bars", levels);
                 write_png(
                     &out.join(format!("{style}-recording-live-{label}-{index}.png")),
                     width,
@@ -84,12 +89,12 @@ fn main() -> std::io::Result<()> {
 
     for (index, t) in [0.0_f32, 0.25, 0.5, 0.75].iter().enumerate() {
         for style in ["blob", "border", "half-circle"] {
-            for (label, live_waveform) in [("pulse", false), ("waveform", true)] {
-                if style == "blob" && live_waveform {
+            for (label, look) in [("plain", "plain"), ("waveform", "waveform")] {
+                if style == "blob" && look == "waveform" {
                     continue;
                 }
                 let (width, height, pixels) =
-                    render_frame_pixels(style, Some("recording"), *t, live_waveform, &speaking);
+                    render_frame_pixels(style, Some("recording"), *t, look, "bars", &speaking);
                 write_png(
                     &out.join(format!("{style}-recording-{label}-{index}.png")),
                     width,
@@ -106,10 +111,51 @@ fn main() -> std::io::Result<()> {
     // swapping (red dot, spinner, green check, muted mic, stop, cross) is
     // reviewable.
     for phase in PHASES {
-        let (width, height, pixels) =
-            render_frame_pixels("long-pill", Some(phase), 0.0, true, &speaking);
+        let (width, height, pixels) = render_frame_pixels(
+            "long-pill",
+            Some(phase),
+            0.0,
+            "waveform",
+            "squiggle",
+            &speaking,
+        );
         write_png(
             &out.join(format!("long-pill-{phase}-speaking-review.png")),
+            width,
+            height,
+            &pixels,
+        )?;
+    }
+
+    // The live-text caption family: the glass single-line caption and the
+    // scrolling box, each with the committed prefix in near-white and the
+    // tentative tail dimmed, plus the empty (listening pad) state. The rest of
+    // the states come from the style x phase loop above.
+    for (variant, label, committed, tentative) in [
+        (
+            "live-text",
+            "words",
+            "today I am testing local speech",
+            " recognition",
+        ),
+        (
+            "live-text",
+            "overrun",
+            "the quick brown fox jumps over the lazy dog and keeps running past the edge",
+            "",
+        ),
+        ("live-text", "empty", "", ""),
+        (
+            "live-text-box",
+            "words",
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen",
+            " fifteen sixteen",
+        ),
+    ] {
+        let (width, height, pixels) =
+            render_live_text_pixels(variant, committed, tentative, &speaking);
+        write_png(
+            &out.join(format!("{variant}-{label}.png")),
             width,
             height,
             &pixels,

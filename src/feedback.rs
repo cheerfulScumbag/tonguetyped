@@ -31,10 +31,24 @@ pub enum FeedbackEvent {
     Truncated,
     Cancelled,
     Error,
+    /// A config-file edit was rejected, so the daemon kept its last good
+    /// config. Distinct from `Error` so the user is told the edit was rejected
+    /// and pointed at `tonguetyped status` for the detail instead of a generic
+    /// failure.
+    ConfigError,
 }
 
 pub trait Feedback: Send + Sync {
     fn send(&self, event: FeedbackEvent, config: &Config);
+
+    /// Show a live-text snapshot (a streaming model's partial transcript) in
+    /// the overlay. This is preview-only and never a state transition: it is
+    /// painted by the `live-text` overlay presentation, never typed, persisted,
+    /// or mirrored to the notification fallback chain (partial words rewriting
+    /// in a desktop OSD would be worse than showing nothing). The default is a
+    /// no-op, so runtimes and test fakes that do not show live text compile
+    /// unchanged.
+    fn send_live_text(&self, _text: crate::overlay::LiveText, _config: &Config) {}
 }
 
 #[derive(Default)]
@@ -48,10 +62,10 @@ impl DesktopFeedback {
             overlay: Arc::new(OverlayHandle::new()),
         }
     }
-}
 
-impl Feedback for DesktopFeedback {
-    fn send(&self, event: FeedbackEvent, config: &Config) {
+    /// Shows `event` off-thread, falling back to the desktop notification path
+    /// when the overlay is unavailable.
+    fn send_command(&self, event: FeedbackEvent, config: &Config) {
         let overlay_config = config.overlay.clone();
         let audio = config.audio.clone();
         if !overlay_config.enabled && !audio.feedback_sounds {
@@ -71,6 +85,33 @@ impl Feedback for DesktopFeedback {
                 play_sound(event, audio.feedback_volume, &audio.feedback_device);
             }
         });
+    }
+}
+
+impl Feedback for DesktopFeedback {
+    fn send(&self, event: FeedbackEvent, config: &Config) {
+        self.send_command(event, config);
+    }
+
+    fn send_live_text(&self, text: crate::overlay::LiveText, config: &Config) {
+        let overlay_config = config.overlay.clone();
+        if !overlay_config.enabled {
+            return;
+        }
+        let overlay = self.overlay.clone();
+        // Once the actor is up the send is a non-blocking channel write, so
+        // send inline: partials arrive at the rate the model's text changes,
+        // and a fresh OS thread per snapshot buys nothing on this path. Only
+        // the first call, before the one-time probe has resolved, stays
+        // off-thread like `send`. A partial the compositor cannot show is
+        // dropped, never routed to the desktop notification fallback.
+        if overlay.is_started() {
+            overlay.try_send_live_text(text, &overlay_config);
+        } else {
+            std::thread::spawn(move || {
+                overlay.try_send_live_text(text, &overlay_config);
+            });
+        }
     }
 }
 
@@ -245,6 +286,12 @@ fn event_style(event: FeedbackEvent) -> (&'static str, &'static str, &'static st
             "Operation failed",
             "critical",
         ),
+        FeedbackEvent::ConfigError => (
+            "dialog-warning-symbolic",
+            "suspend-error",
+            "Config edit rejected - run tonguetyped status",
+            "normal",
+        ),
     }
 }
 
@@ -274,6 +321,7 @@ mod tests {
             FeedbackEvent::Truncated,
             FeedbackEvent::Cancelled,
             FeedbackEvent::Error,
+            FeedbackEvent::ConfigError,
         ];
         let styles: Vec<_> = events.into_iter().map(event_style).collect();
 
@@ -284,5 +332,9 @@ mod tests {
         }
         assert_eq!(event_style(FeedbackEvent::Error).2, "Operation failed");
         assert_eq!(event_style(FeedbackEvent::Error).3, "critical");
+
+        let config_error = event_style(FeedbackEvent::ConfigError).2;
+        assert_ne!(config_error, "Operation failed");
+        assert!(config_error.contains("tonguetyped status"));
     }
 }

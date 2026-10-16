@@ -28,8 +28,15 @@
 //!   [`crate::config::Config::validate`] additionally refuses a config whose
 //!   live recording limit would exceed a hard cap.
 //!
-//! Diarization (`sortformer`) and streaming-only families stay out: neither
-//! produces a single offline transcript through `Session::run`.
+//! Diarization (`sortformer`) stays out: it produces speaker segments, not a
+//! transcript. Streaming-only families (`moonshine_streaming`) are admitted
+//! separately from the offline families: they do not go through
+//! `Session::run`, so a transcription never feeds one of them a single offline
+//! buffer. While a streaming model is active the coordinator records through
+//! the model's native `Stream`, rolling it over to a fresh stream when the
+//! model's window fills and taking the joined finalized text as the transcript
+//! (see `src/inference.rs`), which is also what draws the live overlay text;
+//! the offline families keep the VAD-then-single-buffer path unchanged.
 //!
 //! Entries were derived by reading the transcribe.cpp `catalog/*.json` records
 //! (family, languages, downloads) and resolving each published HuggingFace
@@ -89,10 +96,24 @@ impl VariantInfo {
             "whisper" => "Whisper",
             "parakeet" => "Parakeet",
             "moonshine" => "Moonshine",
+            "moonshine_streaming" => "Moonshine Streaming",
             "canary" => "Canary",
             "cohere_asr" => "Cohere",
             other => other,
         }
+    }
+
+    /// Whether this family transcribes live while the user speaks - the
+    /// transcribe.cpp `Capabilities::supports_streaming` capability. It is a
+    /// property of the model, not a library switch: the offline families this
+    /// catalog otherwise ships (whisper, the non-streaming moonshine/parakeet
+    /// ports, canary, cohere) report `false`, and only the streaming ports
+    /// (their GGUF `general.architecture` is `moonshine_streaming`) can feed
+    /// partial text. The model list flags those entries before download; the
+    /// engine still re-checks the capability on the loaded file, which is the
+    /// runtime source of truth.
+    pub fn supports_streaming(&self) -> bool {
+        self.family == "moonshine_streaming"
     }
 }
 
@@ -411,6 +432,32 @@ pub const ENTRIES: &[CatalogModel] = &[
         filename: "moonshine-base-Q8_0.gguf",
         size_bytes: 77476480,
         sha256: "7f0027dfd857d310b63a85ef57cadf183da712cc374f85a648f8bc18aaa2efc8",
+    },
+    CatalogModel {
+        id: "moonshine-streaming-tiny-q8_0",
+        variant: "moonshine-streaming-tiny",
+        display_name: "moonshine-streaming-tiny",
+        quant: "Q8_0",
+        upstream_repo: "UsefulSensors/moonshine-streaming-tiny",
+        license_spdx: "mit",
+        hf_repo: "handy-computer/moonshine-streaming-tiny-gguf",
+        revision: "f33fef628bc4d7ddb419384b1cf28ee83b662b06",
+        filename: "moonshine-streaming-tiny-Q8_0.gguf",
+        size_bytes: 50462816,
+        sha256: "930e4622ad3a24158b91406c30c977fa6a26b34cb32d6ac3e57cfb23383a869e",
+    },
+    CatalogModel {
+        id: "moonshine-streaming-small-q8_0",
+        variant: "moonshine-streaming-small",
+        display_name: "moonshine-streaming-small",
+        quant: "Q8_0",
+        upstream_repo: "UsefulSensors/moonshine-streaming-small",
+        license_spdx: "mit",
+        hf_repo: "handy-computer/moonshine-streaming-small-gguf",
+        revision: "7e32b1b3dfce5d3a38dad59630ffce608f15c4aa",
+        filename: "moonshine-streaming-small-Q8_0.gguf",
+        size_bytes: 198506848,
+        sha256: "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
     },
     CatalogModel {
         id: "parakeet-tdt-0.6b-v2-f16",
@@ -1465,9 +1512,11 @@ const COHERE_LANGUAGES: &[&str] = &[
 
 /// Capability data for every transcribe.cpp variant the catalog draws from,
 /// so the UI can label each entry with its family and language coverage and
-/// config validation can read each family's single-buffer limit. The four
-/// non-whisper families were admitted after checking their offline output and
-/// long-form behavior against this project's pipeline (see the module docs).
+/// config validation can read each family's single-buffer limit. The
+/// non-whisper offline families were admitted after checking their output and
+/// long-form behavior against this project's pipeline (see the module docs);
+/// the `moonshine_streaming` ports are admitted for the native streaming path
+/// instead, marked by [`VariantInfo::supports_streaming`].
 pub const VARIANTS: &[VariantInfo] = &[
     VariantInfo {
         variant: "breeze-asr-25",
@@ -1492,6 +1541,18 @@ pub const VARIANTS: &[VariantInfo] = &[
         family: "moonshine",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::SoftWindow { window_seconds: 48 },
+    },
+    VariantInfo {
+        variant: "moonshine-streaming-small",
+        family: "moonshine_streaming",
+        languages: ENGLISH_LANGUAGES,
+        long_form: LongForm::Unbounded,
+    },
+    VariantInfo {
+        variant: "moonshine-streaming-tiny",
+        family: "moonshine_streaming",
+        languages: ENGLISH_LANGUAGES,
+        long_form: LongForm::Unbounded,
     },
     VariantInfo {
         variant: "parakeet-tdt-0.6b-v2",
@@ -1720,6 +1781,58 @@ mod tests {
                 ENTRIES.iter().any(|entry| entry.variant == variant),
                 "{variant} should have catalog entries"
             );
+        }
+    }
+
+    #[test]
+    fn streaming_models_are_marked_and_english_only() {
+        for id in [
+            "moonshine-streaming-tiny-q8_0",
+            "moonshine-streaming-small-q8_0",
+        ] {
+            let info = find(id).expect(id).info();
+            assert!(info.supports_streaming(), "{id} must be marked streaming");
+            assert_eq!(
+                info.languages,
+                ["en"],
+                "{id}: every streaming model in the catalog is English-only"
+            );
+            assert_eq!(info.family_label(), "Moonshine Streaming");
+        }
+    }
+
+    #[test]
+    fn offline_families_are_not_marked_streaming() {
+        // The catalog's offline families go through `Session::run`, not the
+        // streaming path, so the model list must not tag them `live`.
+        for id in [
+            "whisper-small-q5_k_m",
+            "moonshine-base-q8_0",
+            "parakeet-tdt-0.6b-v2-q4_k_m",
+            "canary-1b-v2-q4_k_m",
+            "cohere-transcribe-03-2026-q4_k_m",
+        ] {
+            assert!(
+                !find(id).expect(id).info().supports_streaming(),
+                "{id} is an offline model and must not be tagged streaming"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_entries_pin_a_commit_and_a_checksum() {
+        // The two streaming entries were derived from their HuggingFace repos
+        // like every other entry, so they must carry the same pinned-commit and
+        // SHA-256 guarantees (guarded globally too, but called out here so a
+        // bad streaming repin fails with a clear name).
+        for id in [
+            "moonshine-streaming-tiny-q8_0",
+            "moonshine-streaming-small-q8_0",
+        ] {
+            let entry = find(id).expect(id);
+            assert_eq!(entry.revision.len(), 40, "{id} must pin a full commit");
+            assert_eq!(entry.sha256.len(), 64, "{id} must pin a SHA-256");
+            assert!(entry.size_bytes > 0, "{id} must pin a size");
         }
     }
 

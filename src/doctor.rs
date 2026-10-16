@@ -247,6 +247,7 @@ mod tests {
                 state: "idle".to_string(),
                 activation_mode: "hold".to_string(),
                 operation_error: Some("output failed".to_string()),
+                config_error: None,
                 shortcut_status: crate::ipc::ShortcutStatus::Failed,
                 activation_error: Some("activation listener failed".to_string()),
                 build: Some("0.1.0 (a1b2c3d)".to_string()),

@@ -65,8 +65,18 @@ impl Sandbox {
         Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
             .args(["doctor", "--test-type"])
             .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env("XDG_DATA_HOME", self.root.join("data"))
             .env("XDG_SESSION_TYPE", "wayland")
+            // A sandboxed PATH plus a D-Bus address that points nowhere: no
+            // test may reach the operator's real session bus or compositor, so
+            // the libei backend can only fail here, never pop a portal dialog.
             .env("PATH", self.root.join("bin"))
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent-tonguetyped-test",
+            )
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
             .output()
             .unwrap()
     }
@@ -124,6 +134,41 @@ fn a_typing_failure_falls_back_to_the_clipboard() {
     assert_eq!(
         sandbox.read("clipboard").as_deref(),
         Some("TongueTyped typing test\n")
+    );
+}
+
+#[test]
+fn native_libei_typing_without_a_portal_falls_back_to_the_clipboard() {
+    // The KDE/GNOME Wayland case with no working portal session: the native
+    // libei backend cannot connect, so the transcript must land on the
+    // clipboard and the failure must be reported, not crash the process. The
+    // sandbox's D-Bus address points nowhere, so this exercises the graceful
+    // degradation without ever touching a real portal.
+    let sandbox = Sandbox::new(
+        "libei-fallback",
+        "method = \"type\"\ntyping_backend = \"libei\"\nauto_submit = true\n",
+        0,
+    );
+    let output = sandbox.run();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "a fallback is a success: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Typing failed")
+            && stdout.contains("copied the test text to the clipboard"),
+        "{stdout}"
+    );
+    assert_eq!(
+        sandbox.read("clipboard").as_deref(),
+        Some("TongueTyped typing test\n")
+    );
+    assert_eq!(
+        sandbox.read("dotool.log"),
+        None,
+        "the libei backend must not fall back to dotool"
     );
 }
 

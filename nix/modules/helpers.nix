@@ -13,7 +13,15 @@ let
         lib.filterAttrs (_: value: value != null) attrs
       )
     );
-  rendered = prune cfg.settings;
+  # The deprecated `overlay.live_waveform` alias is folded into `overlay.look`
+  # in common.nix; it must not reach `config.toml`.
+  stripDeprecated =
+    settings:
+    settings
+    // lib.optionalAttrs (settings ? overlay) {
+      overlay = builtins.removeAttrs settings.overlay [ "live_waveform" ];
+    };
+  rendered = prune (stripDeprecated cfg.settings);
   settingsJson = pkgs.writeText "tonguetyped-settings.json" (builtins.toJSON rendered);
 in
 rec {

@@ -3,8 +3,8 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use tonguetyped::config::Config;
 use tonguetyped::coordinator::{
-    Coordinator, CoordinatorRuntime, RecordingAttempt, RecordingSignal, TranscriptionAttempt,
-    TranscriptionTimings,
+    Coordinator, CoordinatorRuntime, RecordingAttempt, RecordingSignal, StreamedTranscript,
+    TranscriptionAttempt, TranscriptionTimings,
 };
 use tonguetyped::daemon::dispatch;
 use tonguetyped::feedback::{Feedback, FeedbackEvent};
@@ -40,6 +40,9 @@ struct TestRuntime {
     startup_gate: (Mutex<bool>, Condvar),
     microphone_error_gate: (Mutex<bool>, Condvar),
     outputs: Mutex<Vec<String>>,
+    /// When set, `record` reports a finalized streaming transcript, so the
+    /// worker's streaming branch is exercised without a real streaming model.
+    streamed_transcript: Mutex<Option<StreamedTranscript>>,
     inference_lock: Mutex<()>,
     idle_unload_suspensions: AtomicUsize,
     idle_policy_applications: Mutex<Vec<(String, bool)>>,
@@ -186,6 +189,7 @@ impl CoordinatorRuntime for TestRuntime {
             return RecordingAttempt {
                 result: Err(anyhow::anyhow!("simulated microphone disconnect")),
                 automatic_stop_at: None,
+                streamed: None,
             };
         }
         let automatic_stop_at = match signal_rx.recv_timeout(max_duration) {
@@ -194,6 +198,7 @@ impl CoordinatorRuntime for TestRuntime {
                 return RecordingAttempt {
                     result: Err(anyhow::anyhow!("cancelled")),
                     automatic_stop_at: None,
+                    streamed: None,
                 };
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -224,6 +229,7 @@ impl CoordinatorRuntime for TestRuntime {
         RecordingAttempt {
             result,
             automatic_stop_at,
+            streamed: self.streamed_transcript.lock().unwrap().clone(),
         }
     }
 
@@ -727,6 +733,20 @@ async fn feedback_tracks_successful_state_transitions_once() {
 }
 
 #[tokio::test]
+async fn a_rejected_config_edit_reports_a_config_specific_cue() {
+    let runtime = Arc::new(TestRuntime::default());
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime, feedback.clone());
+
+    coordinator.show_config_error();
+
+    assert_eq!(
+        *feedback.events.lock().unwrap(),
+        vec![FeedbackEvent::ConfigError]
+    );
+}
+
+#[tokio::test]
 async fn empty_transcript_reports_a_no_speech_cue_instead_of_success() {
     let runtime = Arc::new(TestRuntime::default());
     runtime.empty_transcript.store(true, Ordering::SeqCst);
@@ -772,6 +792,56 @@ async fn truncated_transcript_still_delivers_but_reports_a_cut_short_cue() {
         feedback.events.lock().unwrap().last(),
         Some(&FeedbackEvent::Truncated)
     );
+}
+
+#[tokio::test]
+async fn a_streaming_model_delivers_its_finalized_stream_without_a_batch_decode() {
+    let runtime = Arc::new(TestRuntime::default());
+    *runtime.streamed_transcript.lock().unwrap() = Some(StreamedTranscript {
+        text: "live words".to_string(),
+        truncated: false,
+        inference: Duration::from_millis(5),
+    });
+    let feedback = Arc::new(RecordingFeedback::default());
+    let coordinator = coordinator_with_feedback(runtime.clone(), feedback.clone());
+
+    stop_and_wait(&coordinator).await;
+
+    // A streaming model already produced the transcript while recording, so the
+    // finalized stream is typed and no batch decode runs (a streaming-only
+    // model has no offline `run` at all).
+    assert_eq!(*runtime.outputs.lock().unwrap(), vec!["live words "]);
+    assert!(
+        !runtime.transcription_started.load(Ordering::SeqCst),
+        "a streaming model must not also run a batch decode"
+    );
+    assert_eq!(
+        feedback.events.lock().unwrap().last(),
+        Some(&FeedbackEvent::Success)
+    );
+}
+
+#[tokio::test]
+async fn a_streaming_transcript_still_passes_through_post_processing() {
+    let runtime = Arc::new(TestRuntime::default());
+    *runtime.streamed_transcript.lock().unwrap() = Some(StreamedTranscript {
+        text: "test words".to_string(),
+        truncated: false,
+        inference: Duration::from_millis(5),
+    });
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config
+        .text
+        .replacements
+        .insert("test".to_string(), "Voxtype".to_string());
+    let coordinator = Arc::new(Coordinator::with_runtime(config, runtime.clone()).unwrap());
+
+    stop_and_wait(&coordinator).await;
+
+    // The streamed text is not a special path: it is delivered like any other
+    // transcript, so replacements (and the rest of post-processing) still run.
+    assert_eq!(*runtime.outputs.lock().unwrap(), vec!["Voxtype words "]);
 }
 
 #[tokio::test]

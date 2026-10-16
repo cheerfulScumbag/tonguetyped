@@ -76,6 +76,10 @@
                   xdotool
                   openssl
                   wayland
+                  # libxkbcommon: the native libei typing backend (src/libei.rs)
+                  # compiles the compositor's keymap and maps characters to
+                  # keycodes through the `xkbcommon` Rust crate.
+                  libxkbcommon
                 ]
                 ++ extraBuildInputs;
 
@@ -214,6 +218,8 @@
               # libwayland-client.so: the layer-shell overlay's Wayland connection
               # (src/overlay.rs). Unused, without erroring, on non-Wayland sessions.
               wayland
+              # libxkbcommon: the native libei typing backend (src/libei.rs).
+              libxkbcommon
               # Vulkan: builds transcribe.cpp's `-DTRANSCRIBE_VULKAN=ON` backend
               # (`cargo build --features gpu-vulkan`).
               vulkan-headers
@@ -272,6 +278,7 @@
                       model.idle_unload.timeout_minutes = 5;
                       audio.feedback_volume = 0.5;
                       overlay.style = "pill";
+                      overlay.live_waveform = true;
                       text = {
                         spoken_punctuation = true;
                         remove_fillers = true;
@@ -312,7 +319,7 @@
                 .activation == {mode: "toggle", keybind: "Super+O"}
                 and .model == {idle_unload: {timeout_minutes: 5}}
                 and .audio == {feedback_volume: 0.5}
-                and .overlay == {style: "pill", position: "top-left"}
+                and .overlay == {style: "pill", look: "waveform", position: "top-left"}
                 and .text == {
                   spoken_punctuation: true,
                   remove_fillers: true,

@@ -44,7 +44,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev pkg-config
+          sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev libxkbcommon-dev pkg-config
       - name: Install Vulkan build dependencies
         if: matrix.feature == 'gpu-vulkan'
         run: sudo apt-get install -y glslc libvulkan-dev spirv-headers
@@ -122,7 +122,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev pkg-config
+          sudo apt-get install -y build-essential cmake libasound2-dev libclang-dev libssl-dev libwayland-dev libxdo-dev libxkbcommon-dev pkg-config
       - name: Install packaging tools
         run: cargo install cargo-deb cargo-generate-rpm --locked
       - name: Build release binary

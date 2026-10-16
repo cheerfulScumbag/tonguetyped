@@ -4,6 +4,7 @@ use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut, ShortcutsCh
 use ashpd::desktop::Session;
 use futures_util::{Stream, StreamExt};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,14 +112,71 @@ fn install_development_desktop_entry(data_dir: &Path) -> anyhow::Result<()> {
     })
 }
 
-async fn register_host_app() -> anyhow::Result<()> {
-    ashpd::register_host_app(application_id()?.try_into()?)
-        .await
-        .context(
+/// Registers TongueTyped's desktop application identity so a portal request
+/// (the activation shortcut, or the libei RemoteDesktop session in
+/// [`crate::libei`]) is attributed to this app rather than a bare connection.
+/// Shared by both portal users so they resolve the same application id.
+///
+/// [`ashpd`] caches one process-global D-Bus connection, and the portal accepts
+/// only one application id per connection: once any caller has registered, a
+/// second `Register` is rejected with "Connection already associated with an
+/// application ID". That is not a failure - the connection already carries
+/// exactly the identity we want - so it must never fail the caller. The libei
+/// path ([`crate::libei`]) opens the RemoteDesktop portal after the shortcut
+/// listener has already registered on the same connection, and letting the
+/// rejection escape there dropped every dictation into the clipboard fallback.
+///
+/// Registration is therefore idempotent: the first success is recorded and
+/// later calls short-circuit, and the portal's "already associated" reply is
+/// treated as success too, so a connection associated by some other path (or a
+/// race between two first callers) still resolves.
+pub(crate) async fn register_host_app() -> anyhow::Result<()> {
+    if REGISTERED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    match ashpd::register_host_app(application_id()?.try_into()?).await {
+        Ok(()) => {
+            REGISTERED.store(true, Ordering::Release);
+            Ok(())
+        }
+        Err(error) if is_already_associated(&error) => {
+            REGISTERED.store(true, Ordering::Release);
+            Ok(())
+        }
+        Err(error) => Err(error).context(
             "desktop application identity is unavailable; sign out and back in after installing TongueTyped",
-        )?;
-    Ok(())
+        ),
+    }
 }
+
+/// Whether a `Register` call was rejected because the shared portal connection
+/// already carries an application id.
+///
+/// The portal answers with `org.freedesktop.portal.Error.Failed` and the detail
+/// "Could not register app ID: Connection already associated with an
+/// application ID". Any other failure (a missing registry interface, a bus
+/// error) is a real problem and stays an error, so this matches the error name
+/// *and* the specific detail text.
+fn is_already_associated(error: &ashpd::Error) -> bool {
+    match error {
+        ashpd::Error::Zbus(ashpd::zbus::Error::MethodError(name, detail, _)) => {
+            already_associated_reply(name.as_str(), detail.as_deref())
+        }
+        _ => false,
+    }
+}
+
+/// The pure predicate behind [`is_already_associated`], split out so the exact
+/// error name and detail text are testable without a live portal.
+fn already_associated_reply(name: &str, detail: Option<&str>) -> bool {
+    name == "org.freedesktop.portal.Error.Failed"
+        && detail.is_some_and(|detail| detail.contains("already associated with an application ID"))
+}
+
+/// Whether this process has already registered its application identity on the
+/// shared portal connection. Only a successful registration (or the portal's
+/// "already associated" reply) sets it, so a transient failure is retried.
+static REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The legacy shortcut ids the desktop currently knows about. Only ids the
 /// desktop actually lists are returned, so a fresh install purges nothing and
@@ -630,6 +688,78 @@ mod tests {
             result.is_err(),
             "a closed stream is a real failure, not a no-change settle"
         );
+    }
+
+    /// Live check against the running desktop portal: registering twice must
+    /// succeed. The portal rejects a second `Register` on the same connection
+    /// with "already associated with an application ID" - the exact error that
+    /// dropped the libei typing path into the clipboard fallback, because the
+    /// shortcut listener registers first and the RemoteDesktop portal then
+    /// registers again on the same shared connection. Ignored by default: it
+    /// needs a live `xdg-desktop-portal` exposing the host registry interface
+    /// (run with `cargo test -- --ignored a_second_registration`).
+    #[tokio::test]
+    #[ignore = "needs a live xdg-desktop-portal with the host registry interface"]
+    async fn a_second_registration_on_the_shared_connection_is_tolerated() {
+        // The shortcut listener and the libei RemoteDesktop session share one
+        // process-global portal connection, which accepts only one application
+        // id. Register the identity, then force a second registration onto the
+        // portal (rather than letting the memo short-circuit it) and prove the
+        // wrapper turns the portal's rejection into success.
+        REGISTERED.store(false, Ordering::Release);
+        register_host_app().await.expect("first registration");
+
+        // The shared connection now carries the identity, so the portal rejects
+        // a second raw `Register` with the exact reply the daemon log reported.
+        // Asserting this proves the test is exercising the already-associated
+        // branch rather than passing trivially on an idempotent portal.
+        REGISTERED.store(false, Ordering::Release);
+        let app_id: ashpd::AppID = application_id()
+            .expect("application id")
+            .try_into()
+            .expect("valid application id");
+        let raw = ashpd::register_host_app(app_id).await;
+        assert!(
+            matches!(&raw, Err(error) if is_already_associated(error)),
+            "a second registration on the shared connection must be rejected as \
+             already associated: {raw:?}"
+        );
+
+        // The wrapper must treat that rejection as success.
+        REGISTERED.store(false, Ordering::Release);
+        register_host_app()
+            .await
+            .expect("a second registration on the shared connection must be tolerated");
+    }
+
+    #[test]
+    fn only_the_already_associated_reply_is_tolerated() {
+        // The exact reply KDE sends on the second registration over the shared
+        // portal connection (the daemon log's anchor). It means the connection
+        // already has the identity we want, so it must be treated as success.
+        assert!(already_associated_reply(
+            "org.freedesktop.portal.Error.Failed",
+            Some("Could not register app ID: Connection already associated with an application ID"),
+        ));
+    }
+
+    #[test]
+    fn other_registration_failures_stay_errors() {
+        // A different detail under the same portal error name is a real failure.
+        assert!(!already_associated_reply(
+            "org.freedesktop.portal.Error.Failed",
+            Some("Could not register app ID: Invalid application ID"),
+        ));
+        // The right detail under a different error name is not the reply we mean.
+        assert!(!already_associated_reply(
+            "org.freedesktop.DBus.Error.Failed",
+            Some("Connection already associated with an application ID"),
+        ));
+        // A failure with no detail cannot be recognized as the tolerated reply.
+        assert!(!already_associated_reply(
+            "org.freedesktop.portal.Error.Failed",
+            None,
+        ));
     }
 
     #[test]

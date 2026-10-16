@@ -451,7 +451,16 @@ fn configure(
     ui.section(output, 1, "Speech model")?;
     let model_labels: Vec<String> = crate::catalog::ENTRIES
         .iter()
-        .map(|entry| entry.id.to_string())
+        .map(|entry| {
+            if entry.info().supports_streaming() {
+                format!(
+                    "{}  (live text with a live-text look, English only)",
+                    entry.id
+                )
+            } else {
+                entry.id.to_string()
+            }
+        })
         .collect();
     let model_default = crate::catalog::ENTRIES
         .iter()

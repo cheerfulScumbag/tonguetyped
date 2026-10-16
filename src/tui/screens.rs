@@ -98,12 +98,13 @@ impl ModelScreen {
         self.backends.len() as u16 + 2
     }
 
-    pub(super) fn backend_widget(&self) -> Paragraph<'static> {
+    pub(super) fn backend_widget(&self, width: usize) -> Paragraph<'static> {
         let focused = self.focus == ModelFocus::Backend;
         let lines = backend_panel_lines(
             &self.backends,
             &self.configured_backend,
             focused.then_some(self.backend_selected),
+            width,
         );
         Paragraph::new(lines).block(
             Block::default()
@@ -113,7 +114,7 @@ impl ModelScreen {
         )
     }
 
-    pub(super) fn list_widget(&self, height: u16) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize, height: u16) -> Paragraph<'static> {
         let lines: Vec<Line> = self
             .rows
             .iter()
@@ -130,17 +131,25 @@ impl ModelScreen {
                 };
                 // Family and license live in the detail panel below; the list
                 // stays within an 80-column terminal and marks the language
-                // coverage a user needs to choose between families.
+                // coverage and whether the model can stream live partial text
+                // (the "LIVE" tag), which a user needs to choose between
+                // families.
+                let live = if row.info.supports_streaming() {
+                    "live"
+                } else {
+                    "-"
+                };
                 let text = format!(
-                    "{marker}{:<32} {:<8} {:>8}  {:<9}  {:<13}",
+                    "{marker}{live:<5}{:<31} {:<8} {:>8} {:<9} {:<13}",
                     row.id,
                     row.quant,
                     commands::human_size(row.size_bytes),
                     status,
                     row.info.language_summary(),
                 );
-                let style = selection_style(highlighted);
-                Line::from(Span::styled(text, style))
+                let mut spans = vec![Span::styled(text, selection_style(highlighted))];
+                pad_selected_row(&mut spans, highlighted, width);
+                Line::from(spans)
             })
             .collect();
         let visible_rows = usize::from(height.saturating_sub(2)).max(1);
@@ -150,7 +159,9 @@ impl ModelScreen {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(focus_border(self.focus == ModelFocus::Catalog))
-                    .title("Model catalog (MODEL ID / QUANT / SIZE / STATUS / LANGUAGES)"),
+                    .title(
+                        "Home \u{203a} Model (MODEL ID / QUANT / SIZE / STATUS / LIVE / LANGUAGES)",
+                    ),
             )
             .scroll((scroll, 0))
     }
@@ -175,7 +186,16 @@ impl ModelScreen {
             Span::styled("Input limit ", label),
             Span::raw(long_form_note(row.info.long_form)),
         ]);
-        Paragraph::new(vec![heading, note]).block(
+        let streaming = if row.info.supports_streaming() {
+            "live text with a live-text look while you speak; English only"
+        } else {
+            "no live text - the transcript appears after transcription"
+        };
+        let streaming_note = Line::from(vec![
+            Span::styled("Streaming ", label),
+            Span::raw(streaming),
+        ]);
+        Paragraph::new(vec![heading, note, streaming_note]).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Selected model"),
@@ -214,11 +234,13 @@ fn focus_border(focused: bool) -> Style {
 /// disagree about which backends exist, which are usable, or which is active.
 /// Only usable backends are selectable; every unavailable one stays listed
 /// with its reason. `cursor` is the index *among usable backends* to
-/// highlight, or `None` when the panel is not focused.
+/// highlight, or `None` when the panel is not focused; the selected row is a
+/// full-width highlight bar within `width` (the panel's inner width).
 fn backend_panel_lines(
     backends: &[BackendChoice],
     configured: &str,
     cursor: Option<usize>,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = backends
         .iter()
@@ -236,14 +258,9 @@ fn backend_panel_lines(
                 "{marker}{:<53} {status}",
                 crate::inference::backend_preference_label(choice.name)
             );
-            let style = if highlighted {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(text, style))
+            let mut spans = vec![Span::styled(text, selection_style(highlighted))];
+            pad_selected_row(&mut spans, highlighted, width);
+            Line::from(spans)
         })
         .collect();
     lines.extend(backends.iter().filter_map(|choice| {
@@ -299,16 +316,17 @@ impl BackendScreen {
         self.usable_backends().nth(self.selected)
     }
 
-    pub(super) fn list_widget(&self, config: &Config) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
         let lines = backend_panel_lines(
             &self.backends,
             &config.model.preferred_backend,
             Some(self.selected),
+            width,
         );
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Inference backend"),
+                .title("Home \u{203a} Inference backend"),
         )
     }
 }
@@ -334,9 +352,9 @@ impl DaemonScreen {
         DAEMON_ACTIONS[self.selected]
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let rows = DAEMON_ACTIONS.map(String::from);
-        selection_list("Daemon", &rows, self.selected)
+        selection_list("Home \u{203a} Daemon", &rows, self.selected, width)
     }
 }
 
@@ -360,9 +378,9 @@ impl AutostartScreen {
         self.selected = next;
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let rows = AUTOSTART_LABELS.map(String::from);
-        selection_list("Startup", &rows, self.selected)
+        selection_list("Home \u{203a} Startup", &rows, self.selected, width)
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -426,13 +444,13 @@ impl MicrophoneScreen {
         }
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let rows: Vec<String> = self
             .options
             .iter()
             .map(|(_, label)| label.clone())
             .collect();
-        selection_list("Microphone", &rows, self.selected)
+        selection_list("Home \u{203a} Microphone", &rows, self.selected, width)
     }
 
     pub(super) fn error(&self) -> Option<&str> {
@@ -486,9 +504,9 @@ impl ActivationScreen {
         };
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let rows = crate::config::ACTIVATION_MODE_LABELS.map(String::from);
-        selection_list("Activation", &rows, self.selected)
+        selection_list("Home \u{203a} Activation", &rows, self.selected, width)
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -519,9 +537,9 @@ impl TranslationScreen {
         config.transcription.translate = self.selected == 1;
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let rows = crate::config::TRANSLATE_LABELS.map(String::from);
-        selection_list("Translation", &rows, self.selected)
+        selection_list("Home \u{203a} Translation", &rows, self.selected, width)
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -557,9 +575,9 @@ impl MediaPauseScreen {
         config.audio.pause_media = self.selected == 1;
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let rows = MEDIA_PAUSE_LABELS.map(String::from);
-        selection_list("Media pause", &rows, self.selected)
+        selection_list("Home \u{203a} Media pause", &rows, self.selected, width)
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -603,7 +621,7 @@ impl ShortcutScreen {
         self.selected_action = next;
     }
 
-    pub(super) fn body(&self, bound: &str) -> Paragraph<'static> {
+    pub(super) fn body(&self, bound: &str, width: usize) -> Paragraph<'static> {
         let mut lines = vec![
             Line::from(format!("Currently bound: {bound}")),
             Line::from(
@@ -615,14 +633,20 @@ impl ShortcutScreen {
         for (index, action) in SHORTCUT_ACTIONS.iter().enumerate() {
             let selected = index == self.selected_action;
             let marker = if selected { "> " } else { "  " };
-            lines.push(Line::from(Span::styled(
+            let mut spans = vec![Span::styled(
                 format!("{marker}{action}"),
                 selection_style(selected),
-            )));
+            )];
+            pad_selected_row(&mut spans, selected, width);
+            lines.push(Line::from(spans));
         }
         lines.push(Line::from(""));
         lines.push(self.status_line());
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Shortcut"))
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Home \u{203a} Shortcut"),
+        )
     }
 
     pub(super) fn status_line(&self) -> Line<'static> {
@@ -647,19 +671,20 @@ impl ShortcutScreen {
     /// The key legend, aware of the in-flight state: while the desktop's
     /// settings window is open, Enter keeps the current binding and Ctrl+R
     /// reopens the dialog, so a window closed with no change is never a dead
-    /// end.
+    /// end. While the portal test runs only back is honored, so the legend
+    /// names only that.
     pub(super) fn footer(&self) -> &'static str {
         match self.status {
-            ShortcutStatus::DialogOpen => "Enter keep current  Ctrl+R reopen  Esc back",
-            _ => "↑/↓ choose action  Enter run  Ctrl+R system dialog  Esc back",
+            ShortcutStatus::DialogOpen => "Enter keep current   Ctrl+R reopen   Esc/\u{232b} back",
+            ShortcutStatus::Testing => "Esc/\u{232b} back",
+            _ => "↑/↓ row   Enter run   Ctrl+R dialog   Esc/\u{232b} back",
         }
     }
 }
 
 /// Transcript output: the four methods, then - for the methods that insert
 /// text - Enter-after and, for `paste`, the paste keys. Like the Overlay
-/// screen, the option rows follow the saved method, and Enter on one toggles
-/// or cycles its value.
+/// screen, the option rows change only on `←`/`→`; `Enter` only saves.
 pub(super) struct OutputScreen {
     pub labels: Vec<String>,
     pub selected: usize,
@@ -694,12 +719,39 @@ impl OutputScreen {
         self.selected = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
     }
 
+    /// Steps the highlighted option row: "after text" flips and the paste keys
+    /// step both ways, clamped at the ends (the `←`/`→` step the captain asked
+    /// for, replacing `Enter`'s forward-only cycle). Method rows have no inline
+    /// value, so this returns `false` and the caller moves the highlight
+    /// instead.
+    pub(super) fn step(&mut self, delta: i32, config: &mut Config) -> bool {
+        match self.selected {
+            Self::SUBMIT_ROW => {
+                config.output.auto_submit = !config.output.auto_submit;
+                true
+            }
+            Self::PASTE_KEYS_ROW => {
+                let index = PasteKeys::ALL
+                    .iter()
+                    .position(|keys| *keys == config.output.paste_keys)
+                    .unwrap_or(0);
+                let len = PasteKeys::ALL.len() as i32;
+                let next = (index as i32 + delta).clamp(0, len - 1) as usize;
+                config.output.paste_keys = PasteKeys::ALL[next];
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Applies the highlighted row. A method can only be applied while it
     /// works here; choosing one that cannot leaves the configuration
     /// untouched and returns the refusal for the result line, so the screen
     /// explains what to install instead of silently saving a method that can
     /// never deliver a transcript. Leaving `type`/`paste` also clears
-    /// Enter-after, which only those methods accept.
+    /// Enter-after, which only those methods accept. The option rows have no
+    /// `Enter` action: their value is stepped with `←`/`→`, so `Enter` only
+    /// saves, matching the Overlay screen where `Enter` only commits.
     pub(super) fn apply(&mut self, config: &mut Config) -> Result<(), String> {
         if let Some(method) = OUTPUT_METHODS.get(self.selected).copied() {
             if self.problems[self.selected].is_some() {
@@ -712,18 +764,6 @@ impl OutputScreen {
                 config.output.typing_backend = "auto".to_string();
                 config.output.auto_submit = false;
             }
-            return Ok(());
-        }
-        match self.selected {
-            Self::SUBMIT_ROW => config.output.auto_submit = !config.output.auto_submit,
-            Self::PASTE_KEYS_ROW => {
-                let index = PasteKeys::ALL
-                    .iter()
-                    .position(|keys| *keys == config.output.paste_keys)
-                    .unwrap_or(0);
-                config.output.paste_keys = PasteKeys::ALL[(index + 1) % PasteKeys::ALL.len()];
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -748,27 +788,55 @@ impl OutputScreen {
                 "  {:<14}{}",
                 "After text",
                 if config.output.auto_submit {
-                    "press Enter"
+                    "[x] press Enter"
                 } else {
-                    "nothing"
+                    "[ ] nothing"
                 }
             ));
         }
         if config.output.method == OutputMethod::Paste {
-            rows.push(format!(
-                "  {:<14}{}",
-                "Paste keys",
-                paste_keys_labels()[PasteKeys::ALL
-                    .iter()
-                    .position(|keys| *keys == config.output.paste_keys)
-                    .unwrap_or(0)]
-            ));
+            let keys = &paste_keys_labels()[PasteKeys::ALL
+                .iter()
+                .position(|keys| *keys == config.output.paste_keys)
+                .unwrap_or(0)];
+            rows.push(format!("  {:<14}{keys}", "Paste keys"));
         }
         rows
     }
 
-    pub(super) fn list_widget(&self, config: &Config) -> Paragraph<'static> {
-        selection_list("Transcript output", &self.rows(config), self.selected)
+    pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
+        let rows = self.rows(config);
+        let keys = paste_keys_labels();
+        let key_options: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let key_index = PasteKeys::ALL
+            .iter()
+            .position(|keys| *keys == config.output.paste_keys)
+            .unwrap_or(0);
+        let key_value = key_options.get(key_index).copied().unwrap_or("");
+        let lines: Vec<Line> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let is_selected = index == self.selected;
+                let marker = if is_selected { "> " } else { "  " };
+                let mut spans = Vec::new();
+                if index == Self::PASTE_KEYS_ROW {
+                    spans.push(Span::styled(
+                        format!("{marker}  {:<14}", "Paste keys"),
+                        selection_style(is_selected),
+                    ));
+                    spans.extend(stepper_spans(&key_options, key_value, is_selected));
+                } else {
+                    spans.push(Span::styled(
+                        format!("{marker}{row}"),
+                        selection_style(is_selected),
+                    ));
+                }
+                pad_selected_row(&mut spans, is_selected, width);
+                Line::from(spans)
+            })
+            .collect();
+        list_panel("Home \u{203a} Transcript output", lines)
     }
 
     /// The install warning for the highlighted method when it cannot work
@@ -821,8 +889,13 @@ impl TypingBackendScreen {
         }
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
-        selection_list("Typing backend", &self.values, self.selected)
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
+        selection_list(
+            "Home \u{203a} Typing backend",
+            &self.values,
+            self.selected,
+            width,
+        )
     }
 
     /// The install warning shown under the list when the helper list is
@@ -836,79 +909,191 @@ impl TypingBackendScreen {
     }
 }
 
-/// The Overlay screen keeps the wizard's enabled/position/style/waveform
-/// choices on one screen: Disabled/Enabled always shown, the three
-/// configuration rows shown only while the overlay is enabled. Enter toggles
-/// an enable row and cycles position/style/waveform through their real
-/// config values.
+/// One selectable row of the Overlay screen. The row list is derived from the
+/// pending values, so the look and shape rows appear only where they apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayRow {
+    Enabled,
+    Position,
+    Style,
+    Look,
+    Shape,
+}
+
+/// The Overlay screen keeps the enabled/position/style/look choices on one
+/// screen. Every row is a stepper: `←`/`→` moves the highlighted value in
+/// either direction (clamped at the ends), the preview follows the pending
+/// values before anything is saved, and `Enter` - or backing out - commits
+/// them. The configuration rows appear only while the pending enable value is
+/// on: the look row follows the chosen style when it offers a real choice of
+/// two or more (round styles: plain or waveform; wide styles: waveform or live
+/// text; the box and the blob have at most one look, so they show no look row),
+/// and the waveform-shape row appears only for a wide style whose look is the
+/// waveform, so the screen never offers a nonsensical combination.
 pub(super) struct OverlayScreen {
+    /// Row cursor into the current row list (see `row_kinds`).
     pub selected: usize,
+    /// The pending values the cursor edits, committed into `config` by
+    /// `commit`. The preview reads these, so it updates on every step.
+    pub enabled: bool,
+    pub position: String,
+    pub style: String,
+    pub look: String,
+    pub waveform_shape: String,
     pub result: Option<Result<(), String>>,
 }
 
 impl OverlayScreen {
-    const ENABLED_ROWS: usize = 5;
-
     pub(super) fn new(config: &Config) -> Self {
         Self {
-            selected: usize::from(config.overlay.enabled),
+            selected: 0,
+            enabled: config.overlay.enabled,
+            position: config.overlay.position.clone(),
+            style: config.overlay.style.clone(),
+            look: config.overlay.look.clone(),
+            waveform_shape: config.overlay.waveform_shape.clone(),
             result: None,
         }
     }
 
-    fn row_count(config: &Config) -> usize {
-        if config.overlay.enabled {
-            Self::ENABLED_ROWS
-        } else {
-            2
+    /// The rows this screen shows, in order, given the pending values. The
+    /// look row follows the pending style (skipped for a style with no options,
+    /// the blob) and the shape row follows the pending style and look.
+    fn row_kinds(&self) -> Vec<OverlayRow> {
+        let mut rows = vec![OverlayRow::Enabled];
+        if !self.enabled {
+            return rows;
         }
-    }
-
-    pub(super) fn move_selection(&mut self, delta: i32, config: &Config) {
-        let len = Self::row_count(config) as i32;
-        let next = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
-        self.selected = next;
-    }
-
-    pub(super) fn apply(&mut self, config: &mut Config) {
-        match self.selected {
-            0 => config.overlay.enabled = false,
-            1 => config.overlay.enabled = true,
-            2 => {
-                config.overlay.position =
-                    next_value(&overlay::POSITION_VALUES, &config.overlay.position)
-            }
-            3 => config.overlay.style = next_value(&overlay::STYLE_VALUES, &config.overlay.style),
-            4 => config.overlay.live_waveform = !config.overlay.live_waveform,
-            _ => {}
+        rows.push(OverlayRow::Position);
+        rows.push(OverlayRow::Style);
+        if overlay::has_look_choice(&self.style) {
+            rows.push(OverlayRow::Look);
         }
-    }
-
-    pub(super) fn rows(&self, config: &Config) -> Vec<String> {
-        let mut rows = vec!["Disabled".to_string(), "Enabled".to_string()];
-        if config.overlay.enabled {
-            rows.push(format!("{:<12}{}", "Position", config.overlay.position));
-            rows.push(format!(
-                "{:<12}{}",
-                "Style",
-                overlay_style_label(&config.overlay.style)
-            ));
-            rows.push(format!(
-                "{:<12}{}",
-                "Waveform",
-                if config.overlay.live_waveform {
-                    overlay::WAVEFORM_LABELS[1]
-                } else {
-                    overlay::WAVEFORM_LABELS[0]
-                }
-            ));
+        if overlay::shows_shape_choice(&self.style, &self.look) {
+            rows.push(OverlayRow::Shape);
         }
         rows
     }
 
-    pub(super) fn list_widget(&self, config: &Config) -> Paragraph<'static> {
-        let rows = self.rows(config);
-        selection_list("Overlay", &rows, self.selected)
+    pub(super) fn move_selection(&mut self, delta: i32) {
+        let len = self.row_kinds().len() as i32;
+        self.selected = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
+    }
+
+    /// Keeps the pending look valid for the pending style: a value the style
+    /// does not offer snaps to the style's first option. A style with no
+    /// options (the blob) is left alone.
+    fn clamp_pending_look(&mut self) {
+        self.look = overlay::clamp_look_value(&self.style, &self.look);
+    }
+
+    /// Steps the highlighted row's pending value. The enable row clamps between
+    /// Disabled and Enabled; the position, look and shape rows clamp at the ends
+    /// of their lists; the style row also keeps the look valid for the new
+    /// style.
+    pub(super) fn step(&mut self, delta: i32) {
+        let row = self
+            .row_kinds()
+            .get(self.selected)
+            .copied()
+            .unwrap_or(OverlayRow::Enabled);
+        match row {
+            OverlayRow::Enabled => {
+                self.enabled = (usize::from(self.enabled) as i32 + delta).clamp(0, 1) == 1;
+            }
+            OverlayRow::Position => {
+                self.position = step_value(&overlay::POSITION_VALUES, &self.position, delta)
+            }
+            OverlayRow::Style => {
+                self.style = step_value(&overlay::STYLE_VALUES, &self.style, delta);
+                self.clamp_pending_look();
+                // A new style has its own waveform shape; the long pill's
+                // squiggle is its default, the rest take bars.
+                self.waveform_shape = overlay::default_shape(&self.style).to_string();
+            }
+            OverlayRow::Look => {
+                let options: Vec<&str> = overlay::style_look_options(&self.style)
+                    .iter()
+                    .map(|(value, _)| *value)
+                    .collect();
+                self.look = step_value(&options, &self.look, delta);
+                self.clamp_pending_look();
+            }
+            OverlayRow::Shape => {
+                self.waveform_shape =
+                    step_value(&overlay::SHAPE_VALUES, &self.waveform_shape, delta);
+            }
+        }
+    }
+
+    /// Writes the pending values into the config, clamping the look to the
+    /// style so the stored value stays sane.
+    pub(super) fn commit(&mut self, config: &mut Config) {
+        config.overlay.enabled = self.enabled;
+        config.overlay.position = self.position.clone();
+        config.overlay.style = self.style.clone();
+        self.clamp_pending_look();
+        config.overlay.look = self.look.clone();
+        config.overlay.waveform_shape = self.waveform_shape.clone();
+    }
+
+    /// The row labels in display order: the enable stepper, then the
+    /// configuration steppers that apply to the pending values.
+    fn row_labels(&self) -> Vec<&'static str> {
+        self.row_kinds()
+            .iter()
+            .map(|row| match row {
+                OverlayRow::Enabled => "Overlay",
+                OverlayRow::Position => "Position",
+                OverlayRow::Style => "Style",
+                OverlayRow::Look => "Look",
+                OverlayRow::Shape => "Waveform shape",
+            })
+            .collect()
+    }
+
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
+        let rows = self.row_kinds();
+        // The look labels for the pending style, so the stepper's value and its
+        // option count line up with what the overlay actually offers.
+        let look_labels: Vec<&'static str> = overlay::style_look_options(&self.style)
+            .iter()
+            .map(|(_, label)| *label)
+            .collect();
+        let lines: Vec<Line> = self
+            .row_labels()
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let selected = index == self.selected;
+                let marker = if selected { "> " } else { "  " };
+                let mut spans = vec![Span::styled(
+                    format!("{marker}{label:<16}"),
+                    selection_style(selected),
+                )];
+                let (options, value): (&[&str], &str) = match rows[index] {
+                    OverlayRow::Enabled => (
+                        &["Disabled", "Enabled"],
+                        if self.enabled { "Enabled" } else { "Disabled" },
+                    ),
+                    OverlayRow::Position => (&overlay::POSITION_VALUES, self.position.as_str()),
+                    OverlayRow::Style => (&overlay::STYLE_LABELS, overlay_style_label(&self.style)),
+                    OverlayRow::Look => (&look_labels, overlay::look_label(&self.look)),
+                    OverlayRow::Shape => (
+                        &overlay::SHAPE_LABELS,
+                        overlay::shape_label(&self.waveform_shape),
+                    ),
+                };
+                spans.extend(stepper_spans(options, value, selected));
+                pad_selected_row(&mut spans, selected, width);
+                Line::from(spans)
+            })
+            .collect();
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Home \u{203a} Overlay"),
+        )
     }
 
     pub(super) fn result_line(&self) -> Line<'static> {
@@ -1016,7 +1201,7 @@ impl TextFieldsScreen {
         (self.apply)(self, config)
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let label_width = self
             .fields
             .iter()
@@ -1042,12 +1227,15 @@ impl TextFieldsScreen {
                     Some(placeholder) => spans.extend(placeholder_spans(placeholder, selected)),
                     None => spans.extend(field_value_spans(field, selected)),
                 }
-                Line::from(spans)
+                pad_selected_row(&mut spans, selected, width);
+                Line::from(spans).style(selection_style(selected))
             })
             .collect();
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(self.title))
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Home \u{203a} {}", self.title)),
+        )
     }
 
     pub(super) fn result_line(&self, success: &str) -> Line<'static> {
@@ -1133,7 +1321,7 @@ impl TextProcessingScreen {
         Ok(())
     }
 
-    pub(super) fn list_widget(&self) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
         let rows: [(&str, bool, Vec<Span<'static>>); Self::ROWS] = [
             (
                 "Replacements",
@@ -1147,12 +1335,12 @@ impl TextProcessingScreen {
             (
                 "Spoken punctuation",
                 self.selected == Self::ROW_SPOKEN,
-                toggle_row_value(self.spoken_punctuation),
+                toggle_row_value(self.spoken_punctuation, self.selected == Self::ROW_SPOKEN),
             ),
             (
                 "Remove filler words",
                 self.selected == Self::ROW_FILLERS,
-                toggle_row_value(self.remove_fillers),
+                toggle_row_value(self.remove_fillers, self.selected == Self::ROW_FILLERS),
             ),
             (
                 "Cleanup command",
@@ -1178,13 +1366,14 @@ impl TextProcessingScreen {
                     selection_style(*selected),
                 )];
                 spans.extend(value.iter().cloned());
-                Line::from(spans)
+                pad_selected_row(&mut spans, *selected, width);
+                Line::from(spans).style(selection_style(*selected))
             })
             .collect();
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Text processing"),
+                .title("Home \u{203a} Text processing"),
         )
     }
 
@@ -1206,47 +1395,59 @@ fn text_row_value(field: &TextField, selected: bool, placeholder: &str) -> Vec<S
     }
 }
 
-/// The value half of a `TextProcessingScreen` toggle row.
-fn toggle_row_value(enabled: bool) -> Vec<Span<'static>> {
-    let (text, color) = if enabled {
-        ("on", Color::Green)
+/// The value half of a `TextProcessingScreen` toggle row. On the selected row
+/// the value uses the highlight-bar style so the bar stays uniform.
+fn toggle_row_value(enabled: bool, selected: bool) -> Vec<Span<'static>> {
+    let text = if enabled { "[x] on" } else { "[ ] off" };
+    let style = if selected {
+        selection_style(true)
     } else {
-        ("off", Color::DarkGray)
+        Style::default().fg(if enabled {
+            Color::Green
+        } else {
+            Color::DarkGray
+        })
     };
-    vec![Span::styled(text.to_string(), Style::default().fg(color))]
+    vec![Span::styled(text.to_string(), style)]
 }
 
 /// The value half of one `TextFieldsScreen` row. The selected field draws a
-/// reversed cell at the cursor so the editing position is visible; an
+/// reversed cell at the cursor so the editing position is visible, and the
+/// value rides on the highlight bar so the bar is not punched through; an
 /// unselected field is plain text.
 fn field_value_spans(field: &TextField, selected: bool) -> Vec<Span<'static>> {
     if !selected {
         return vec![Span::raw(field.value().to_string())];
     }
     let (before, cursor_char, after) = field.split_at_cursor();
-    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+    let bar = selection_style(true);
     vec![
-        Span::raw(before),
+        Span::styled(before, bar),
         Span::styled(
             cursor_char.map(String::from).unwrap_or_else(|| " ".into()),
-            reversed,
+            bar.add_modifier(Modifier::REVERSED),
         ),
-        Span::raw(after),
+        Span::styled(after, bar),
     ]
 }
 
 /// The dim hint drawn in place of an empty text field. When the field is
 /// selected its first character carries the cursor, so the hint starts in
-/// the same column on every row.
+/// the same column on every row, and the hint rides on the highlight bar.
 fn placeholder_spans(text: &str, selected: bool) -> Vec<Span<'static>> {
-    let dim = Style::default().fg(Color::DarkGray);
     let mut chars = text.chars();
     match chars.next().filter(|_| selected) {
         Some(first) => vec![
-            Span::styled(first.to_string(), dim.add_modifier(Modifier::REVERSED)),
-            Span::styled(chars.as_str().to_string(), dim),
+            Span::styled(
+                first.to_string(),
+                selection_style(true).add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled(chars.as_str().to_string(), selection_style(true)),
         ],
-        None => vec![Span::styled(text.to_string(), dim)],
+        None => vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )],
     }
 }
 
@@ -1297,7 +1498,26 @@ fn apply_decoding(screen: &TextFieldsScreen, config: &mut Config) -> Result<(), 
         .apply_decoding_form(prompt.1.value(), &knobs)
 }
 
-fn overlay_style_label(style: &str) -> &'static str {
+/// A one-line summary of the overlay's look for the home-screen Settings row
+/// (for example "waveform, bars" or "live text"), derived from the same
+/// per-style options the Overlay screen shows.
+pub(super) fn overlay_look_summary(config: &Config) -> String {
+    let style = &config.overlay.style;
+    if overlay::style_look_options(style).is_empty() {
+        return "no options".to_string();
+    }
+    let look = overlay::look_label(&config.overlay.look).to_lowercase();
+    if overlay::shows_shape_choice(style, &config.overlay.look) {
+        format!(
+            "{look}, {}",
+            overlay::shape_label(&config.overlay.waveform_shape).to_lowercase()
+        )
+    } else {
+        look
+    }
+}
+
+pub(super) fn overlay_style_label(style: &str) -> &'static str {
     overlay::STYLE_VALUES
         .iter()
         .position(|value| *value == style)
@@ -1305,38 +1525,106 @@ fn overlay_style_label(style: &str) -> &'static str {
         .unwrap_or(overlay::STYLE_LABELS[0])
 }
 
-fn next_value(values: &[&str], current: &str) -> String {
-    let index = values
-        .iter()
-        .position(|value| *value == current)
-        .unwrap_or(0);
-    values[(index + 1) % values.len()].to_string()
+/// Steps `current` within `values` by `delta`, clamping at the ends so a stray
+/// key can never jump across the list. Returns `current` unchanged when it is
+/// not in `values`.
+fn step_value(values: &[&str], current: &str, delta: i32) -> String {
+    let Some(index) = values.iter().position(|value| *value == current) else {
+        return current.to_string();
+    };
+    let next = (index as i32 + delta).clamp(0, values.len() as i32 - 1) as usize;
+    values[next].to_string()
 }
 
 pub(super) fn selection_style(selected: bool) -> Style {
     if selected {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(Color::Black)
+            .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     }
 }
 
+/// Pads a selected row so its highlight bar fills the panel's inner width; a
+/// no-op on an unselected row.
+pub(super) fn pad_selected_row(spans: &mut Vec<Span<'static>>, selected: bool, width: usize) {
+    if !selected {
+        return;
+    }
+    let used: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if width > used {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            selection_style(true),
+        ));
+    }
+}
+
+/// The value half of a stepper row: `‹ value ›` with the arrow at each end
+/// dimmed when there is nothing further that way, plus an `n / N` counter so
+/// both directions are discoverable. On the selected row the pieces use the
+/// highlight-bar style so the bar stays uniform.
+fn stepper_spans(options: &[&str], value: &str, selected: bool) -> Vec<Span<'static>> {
+    let index = options
+        .iter()
+        .position(|option| *option == value)
+        .unwrap_or(0);
+    let last = options.len().saturating_sub(1);
+    let (left, right) = if index == 0 {
+        ("   ", "\u{203a} ")
+    } else if index == last {
+        ("\u{2039} ", "   ")
+    } else {
+        ("\u{2039} ", "\u{203a} ")
+    };
+    let (arrow, value_style) = if selected {
+        (
+            selection_style(true),
+            selection_style(true).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Cyan),
+        )
+    };
+    vec![
+        Span::styled(left.to_string(), arrow),
+        Span::styled(value.to_string(), value_style),
+        Span::styled(format!(" {right} {}/{}", index + 1, options.len()), arrow),
+    ]
+}
+
 /// The dashboard's standard selectable list panel: every row is
-/// `"> "`/`"  "`-prefixed, the selected row cyan+bold.
-fn selection_list(title: &str, rows: &[String], selected: usize) -> Paragraph<'static> {
+/// `"> "`/`"  "`-prefixed and the selected row is a full-width highlight bar.
+/// `width` is the panel's inner width (its area minus the two border columns).
+pub(super) fn selection_list(
+    title: &str,
+    rows: &[String],
+    selected: usize,
+    width: usize,
+) -> Paragraph<'static> {
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let marker = if index == selected { "> " } else { "  " };
-            Line::from(Span::styled(
+            let is_selected = index == selected;
+            let marker = if is_selected { "> " } else { "  " };
+            let mut spans = vec![Span::styled(
                 format!("{marker}{row}"),
-                selection_style(index == selected),
-            ))
+                selection_style(is_selected),
+            )];
+            pad_selected_row(&mut spans, is_selected, width);
+            Line::from(spans)
         })
         .collect();
+    list_panel(title, lines)
+}
+
+/// Wraps ready-made rows in the dashboard's standard bordered list panel.
+fn list_panel(title: &str, lines: Vec<Line<'static>>) -> Paragraph<'static> {
     Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
@@ -1374,85 +1662,167 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overlay_cycles_every_position_value_then_wraps() {
-        let mut config = Config::default();
+    fn overlay_position_steps_both_ways_and_clamps_at_the_ends() {
+        let config = Config::default();
         let mut screen = OverlayScreen::new(&config);
-        screen.selected = 2;
+        screen.selected = 1; // Position row
         let start = config.overlay.position.clone();
-        let mut seen = vec![start.clone()];
+
+        // Step right one value, then step back left to the start: the reverse
+        // step `Enter` never offered.
+        screen.step(1);
+        let forward = screen.position.clone();
+        assert_ne!(forward, start, "stepping right must change the value");
+        screen.step(-1);
+        assert_eq!(screen.position, start, "stepping left must walk back");
+
+        // Clamp at the last value: a further right step stays put.
+        screen.position = overlay::POSITION_VALUES.last().unwrap().to_string();
+        screen.step(1);
+        assert_eq!(
+            screen.position.as_str(),
+            *overlay::POSITION_VALUES.last().unwrap(),
+            "the last value clamps instead of wrapping"
+        );
+
+        // Clamp at the first value: a further left step stays put.
+        screen.position = overlay::POSITION_VALUES[0].to_string();
+        screen.step(-1);
+        assert_eq!(screen.position, overlay::POSITION_VALUES[0]);
+    }
+
+    #[test]
+    fn overlay_step_visits_every_position_value_in_both_directions() {
+        let config = Config::default();
+        let mut screen = OverlayScreen::new(&config);
+        screen.selected = 1;
+        screen.position = overlay::POSITION_VALUES[0].to_string();
+        let mut seen = vec![screen.position.clone()];
         for _ in 1..overlay::POSITION_VALUES.len() {
-            screen.apply(&mut config);
-            seen.push(config.overlay.position.clone());
+            screen.step(1);
+            seen.push(screen.position.clone());
         }
-        assert_eq!(
-            seen.len(),
-            overlay::POSITION_VALUES.len(),
-            "cycling once must visit every position value"
-        );
-        screen.apply(&mut config);
-        assert_eq!(
-            config.overlay.position, start,
-            "one more cycle wraps back to the starting position"
-        );
-        let mut seen_sorted = seen;
-        let mut expected: Vec<String> = overlay::POSITION_VALUES
+        let expected: Vec<String> = overlay::POSITION_VALUES
             .iter()
             .map(|value| value.to_string())
             .collect();
-        expected.sort();
-        seen_sorted.sort();
-        assert_eq!(seen_sorted, expected);
-    }
-
-    #[test]
-    fn overlay_cycles_every_style_value_then_wraps() {
-        let mut config = Config::default();
-        let mut screen = OverlayScreen::new(&config);
-        screen.selected = 3;
-        let start = config.overlay.style.clone();
-        let mut seen = vec![start.clone()];
-        for _ in 1..overlay::STYLE_VALUES.len() {
-            screen.apply(&mut config);
-            seen.push(config.overlay.style.clone());
+        assert_eq!(seen, expected, "stepping right visits every value in order");
+        for _ in 1..overlay::POSITION_VALUES.len() {
+            screen.step(-1);
         }
-        screen.apply(&mut config);
-        assert_eq!(config.overlay.style, start);
-        let mut seen_sorted = seen;
-        let mut expected: Vec<String> = overlay::STYLE_VALUES
-            .iter()
-            .map(|value| value.to_string())
-            .collect();
-        expected.sort();
-        seen_sorted.sort();
-        assert_eq!(seen_sorted, expected);
+        assert_eq!(
+            screen.position,
+            overlay::POSITION_VALUES[0],
+            "stepping left walks all the way back to the first value"
+        );
     }
 
     #[test]
-    fn overlay_disabling_hides_the_three_configuration_rows() {
-        let mut config = Config::default();
-        let screen = OverlayScreen::new(&config);
-        assert_eq!(screen.rows(&config).len(), OverlayScreen::ENABLED_ROWS);
-
-        config.overlay.enabled = false;
-        let rows = screen.rows(&config);
-        assert_eq!(rows, vec!["Disabled".to_string(), "Enabled".to_string()]);
-    }
-
-    #[test]
-    fn overlay_waveform_row_uses_the_shared_labels() {
+    fn overlay_commit_writes_the_pending_value_only_on_commit() {
         let mut config = Config::default();
         let mut screen = OverlayScreen::new(&config);
-        screen.selected = 4;
-        let labels = [overlay::WAVEFORM_LABELS[0], overlay::WAVEFORM_LABELS[1]];
-        let before = screen.rows(&config)[4].clone();
-        assert!(labels.iter().any(|label| before.contains(label)));
-        screen.apply(&mut config);
-        let after = screen.rows(&config)[4].clone();
-        assert!(labels.iter().any(|label| after.contains(label)));
+        screen.selected = 2; // Style row
+        screen.step(1);
+        let stepped = screen.style.clone();
         assert_ne!(
-            before, after,
-            "applying the row should toggle the waveform choice"
+            stepped, config.overlay.style,
+            "stepping changes the pending value, not the config"
         );
+        assert_eq!(
+            config.overlay.style, "badge",
+            "the config is untouched until commit, so the preview and the save stay honest"
+        );
+        screen.commit(&mut config);
+        assert_eq!(
+            config.overlay.style, stepped,
+            "commit writes the pending value"
+        );
+    }
+
+    #[test]
+    fn overlay_disabling_hides_the_configuration_rows() {
+        let config = Config::default();
+        let mut screen = OverlayScreen::new(&config);
+        // Default is an enabled badge: Overlay, Position, Style, Look.
+        assert!(screen.enabled);
+        assert_eq!(
+            screen.row_labels(),
+            vec!["Overlay", "Position", "Style", "Look"]
+        );
+
+        screen.selected = 0;
+        screen.step(-1); // step the enable row to Disabled
+        assert!(!screen.enabled);
+        assert_eq!(screen.row_labels(), vec!["Overlay"]);
+        // The row cursor clamps to the single remaining row.
+        screen.move_selection(1);
+        assert_eq!(screen.selected, 0);
+    }
+
+    #[test]
+    fn overlay_look_row_is_hidden_for_the_single_option_box() {
+        let mut config = Config::default();
+        config.overlay.style = "live-text-box".to_string();
+        config.overlay.look = "live-text".to_string();
+        let screen = OverlayScreen::new(&config);
+        assert!(
+            !screen.row_labels().contains(&"Look"),
+            "the box offers a single look, so no Look row should appear"
+        );
+    }
+
+    #[test]
+    fn overlay_look_row_cycles_the_two_badge_looks() {
+        let config = Config::default();
+        let mut screen = OverlayScreen::new(&config);
+        // The default badge style offers waveform or plain at row index 3.
+        screen.selected = 3;
+        assert_eq!(screen.look, "waveform");
+        screen.step(-1);
+        assert_eq!(screen.look, "plain", "stepping left selects the plain look");
+        screen.step(1);
+        assert_eq!(
+            screen.look, "waveform",
+            "stepping right selects the waveform"
+        );
+        assert_eq!(
+            screen.row_labels(),
+            vec!["Overlay", "Position", "Style", "Look"]
+        );
+    }
+
+    #[test]
+    fn overlay_shape_row_appears_only_for_a_wide_waveform_look() {
+        let mut config = Config::default();
+        config.overlay.style = "long-pill".to_string();
+        config.overlay.look = "waveform".to_string();
+        let screen = OverlayScreen::new(&config);
+        assert!(screen.row_labels().contains(&"Waveform shape"));
+
+        // Switching the pending look to live text hides the shape row.
+        let mut screen = OverlayScreen::new(&config);
+        screen.selected = 3; // Look row for a long pill
+        screen.step(1); // waveform -> live text
+        assert_eq!(screen.look, "live-text");
+        assert!(!screen.row_labels().contains(&"Waveform shape"));
+
+        // A round style never shows it.
+        config.overlay.style = "badge".to_string();
+        config.overlay.look = "waveform".to_string();
+        let screen = OverlayScreen::new(&config);
+        assert!(!screen.row_labels().contains(&"Waveform shape"));
+    }
+
+    #[test]
+    fn cycling_the_style_to_the_long_pill_restores_its_squiggle_default() {
+        let mut config = Config::default();
+        config.overlay.style = "half-circle".to_string();
+        config.overlay.look = "waveform".to_string();
+        let mut screen = OverlayScreen::new(&config);
+        screen.selected = 2; // Style row
+        screen.step(1);
+        assert_eq!(screen.style, "long-pill");
+        assert_eq!(screen.waveform_shape, "squiggle");
     }
 
     #[test]
@@ -1579,13 +1949,24 @@ mod tests {
         assert!(rows[4].contains("nothing"), "{rows:?}");
         assert!(rows[5].contains("Ctrl+V"), "{rows:?}");
 
-        // Enter on the option rows toggles paste-and-enter and cycles the
-        // paste keys.
+        // Enter on the option rows only saves; `←`/`→` (the stepper) is the
+        // only thing that changes their value, matching the Overlay screen.
         screen.selected = 4;
         screen.apply(&mut config).unwrap();
+        assert!(
+            !config.output.auto_submit,
+            "Enter must not toggle the After-text row"
+        );
+        screen.step(1, &mut config);
         assert!(config.output.auto_submit);
         screen.selected = 5;
         screen.apply(&mut config).unwrap();
+        assert_eq!(
+            config.output.paste_keys,
+            PasteKeys::CtrlV,
+            "Enter must not cycle the paste keys"
+        );
+        screen.step(1, &mut config);
         assert_eq!(config.output.paste_keys, PasteKeys::ShiftInsert);
         let rows = screen.rows(&config);
         assert!(rows[4].contains("press Enter"), "{rows:?}");
@@ -1607,12 +1988,82 @@ mod tests {
     }
 
     #[test]
+    fn output_screen_paste_keys_stepper_clamps_at_the_ends() {
+        let capabilities = test_capabilities();
+        let mut config = Config::default();
+        config.output.method = OutputMethod::Paste;
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        screen.selected = OutputScreen::PASTE_KEYS_ROW;
+
+        assert_eq!(config.output.paste_keys, PasteKeys::CtrlV);
+        screen.step(-1, &mut config);
+        assert_eq!(
+            config.output.paste_keys,
+            PasteKeys::CtrlV,
+            "stepping left at the first value must clamp, not wrap"
+        );
+        screen.step(1, &mut config);
+        assert_eq!(config.output.paste_keys, PasteKeys::ShiftInsert);
+        screen.step(1, &mut config);
+        assert_eq!(
+            config.output.paste_keys,
+            PasteKeys::ShiftInsert,
+            "stepping right at the last value must clamp, not wrap"
+        );
+        screen.step(-1, &mut config);
+        assert_eq!(config.output.paste_keys, PasteKeys::CtrlV);
+    }
+
+    #[test]
+    fn output_screen_paste_keys_stepper_dims_the_end_arrows_it_cannot_use() {
+        let capabilities = test_capabilities();
+        let mut config = Config::default();
+        config.output.method = OutputMethod::Paste;
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        screen.selected = OutputScreen::PASTE_KEYS_ROW;
+
+        let first = rendered_widget(screen.list_widget(&config, 68), 70, 12);
+        let first_keys = first
+            .lines()
+            .find(|line| line.contains("Paste keys"))
+            .expect("the paste-keys row must render");
+        assert!(
+            !first_keys.contains('\u{2039}')
+                && first_keys.contains("Ctrl+V")
+                && first_keys.contains('\u{203a}')
+                && first_keys.contains("1/2"),
+            "the first value must hide its left arrow:\n{first}"
+        );
+
+        screen.step(1, &mut config);
+        let last = rendered_widget(screen.list_widget(&config, 68), 70, 12);
+        let last_keys = last
+            .lines()
+            .find(|line| line.contains("Paste keys"))
+            .expect("the paste-keys row must render");
+        assert!(
+            last_keys.contains('\u{2039}')
+                && last_keys.contains("Shift+Insert")
+                && !last_keys.contains('\u{203a}')
+                && last_keys.contains("2/2"),
+            "the last value must hide its right arrow:\n{last}"
+        );
+    }
+
+    #[test]
     fn typing_backend_screen_warns_when_the_helper_list_is_empty() {
         let capabilities = capabilities_without_backends();
         let screen = TypingBackendScreen::new(&capabilities, &Config::default());
         assert_eq!(screen.values, vec!["auto".to_string()]);
         let warning = screen.warning.expect("no helpers should warn");
-        assert!(warning.contains("install"));
+        // The remedy the warning names depends on the host session: install a
+        // helper where one is needed, or switch to the native libei backend
+        // where it works (KDE/GNOME Wayland). Either way the warning must name
+        // a concrete remedy, so this stays independent of the test machine.
+        assert!(
+            warning.contains("install") || warning.contains("typing_backend"),
+            "the warning must name a concrete remedy: {warning}"
+        );
     }
 
     #[test]
@@ -1768,7 +2219,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| frame.render_widget(screen.backend_widget(), frame.area()))
+            .draw(|frame| frame.render_widget(screen.backend_widget(78), frame.area()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let area = *buffer.area();
@@ -1811,7 +2262,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| frame.render_widget(screen.list_widget(config), frame.area()))
+            .draw(|frame| frame.render_widget(screen.list_widget(config, 78), frame.area()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let area = *buffer.area();
@@ -1851,6 +2302,105 @@ mod tests {
             text.contains("cuda unavailable"),
             "the unavailable backend should still be listed:\n{text}"
         );
+    }
+
+    fn rendered_buffer(
+        widget: impl ratatui::widgets::Widget,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(widget, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Renders a widget and asserts the row it draws as a highlight bar fills
+    /// the whole inner width, not just the width of its text.
+    fn assert_full_width_highlight_bar(
+        buffer: &ratatui::buffer::Buffer,
+        inner_left: u16,
+        inner_width: u16,
+    ) {
+        let area = *buffer.area();
+        let row = (area.y..area.y + area.height)
+            .find(|&y| (area.x..area.x + area.width).any(|x| buffer[(x, y)].bg == Color::Cyan))
+            .expect("expected exactly one row drawn as a highlight bar");
+        for x in inner_left..inner_left + inner_width {
+            assert_eq!(
+                buffer[(x, row)].bg,
+                Color::Cyan,
+                "cell ({x},{row}) should be part of the full-width highlight bar"
+            );
+        }
+    }
+
+    #[test]
+    fn shortcut_selected_action_row_is_a_full_width_highlight_bar() {
+        let screen = ShortcutScreen::new(&Config::default());
+        let buffer = rendered_buffer(screen.body("Super+T", 40), 42, 10);
+        assert_full_width_highlight_bar(&buffer, 1, 40);
+    }
+
+    #[test]
+    fn model_catalog_selected_row_is_a_full_width_highlight_bar() {
+        let screen = ModelScreen::new(&Config::default(), choices());
+        let buffer = rendered_buffer(screen.list_widget(100, 12), 102, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 100);
+    }
+
+    #[test]
+    fn text_fields_selected_value_row_is_a_full_width_highlight_bar() {
+        let screen = TextFieldsScreen::history_retention(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(40), 42, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 40);
+    }
+
+    #[test]
+    fn text_fields_selected_empty_row_is_a_full_width_highlight_bar() {
+        let screen = TextFieldsScreen::transcript_folder(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(40), 42, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 40);
+    }
+
+    #[test]
+    fn text_fields_selected_placeholder_row_is_a_full_width_highlight_bar() {
+        let screen = TextFieldsScreen::decoding(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(100), 102, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 100);
+    }
+
+    #[test]
+    fn text_processing_selected_text_row_is_a_full_width_highlight_bar() {
+        let screen = TextProcessingScreen::new(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(60), 62, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 60);
+    }
+
+    #[test]
+    fn text_processing_selected_toggle_row_is_a_full_width_highlight_bar() {
+        let mut screen = TextProcessingScreen::new(&Config::default());
+        screen.selected = TextProcessingScreen::ROW_SPOKEN;
+        let buffer = rendered_buffer(screen.list_widget(60), 62, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 60);
+    }
+
+    #[test]
+    fn model_backend_panel_selected_row_is_a_full_width_highlight_bar() {
+        let mut screen = ModelScreen::new(&Config::default(), choices());
+        screen.toggle_focus();
+        let buffer = rendered_buffer(screen.backend_widget(78), 80, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 78);
+    }
+
+    #[test]
+    fn dedicated_backend_selected_row_is_a_full_width_highlight_bar() {
+        let config = Config::default();
+        let screen = BackendScreen::new(&config, choices());
+        let buffer = rendered_buffer(screen.list_widget(&config, 78), 80, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 78);
     }
 
     fn rendered_widget(widget: impl ratatui::widgets::Widget, width: u16, height: u16) -> String {

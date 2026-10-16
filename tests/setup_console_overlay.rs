@@ -248,21 +248,30 @@ fn pty_enabling_overlay_walks_through_position_style_and_waveform_and_persists_c
     session.send(KEY_DOWN);
     session.send(KEY_DOWN);
     session.send(KEY_ENTER);
-    let waveform_screen = session.wait_for("Overlay waveform", Duration::from_secs(5));
+    let look_screen = session.wait_for("Overlay look", Duration::from_secs(5));
     assert!(
-        waveform_screen.contains("Simple pulse")
-            && waveform_screen.contains("Live microphone waveform"),
-        "waveform step should list both indicator modes:\n{waveform_screen}"
+        look_screen.contains("Plain") && look_screen.contains("Waveform"),
+        "look step should list Plain/Waveform:\n{look_screen}"
     );
 
-    // Select "Live microphone waveform" (index 1) and confirm into Review.
+    // Select "Waveform" (index 1) and confirm into the shape step.
+    session.send(KEY_DOWN);
+    session.send(KEY_ENTER);
+    let shape_screen = session.wait_for("Overlay waveform shape", Duration::from_secs(5));
+    assert!(
+        shape_screen.contains("Bars") && shape_screen.contains("Squiggly line"),
+        "shape step should list Bars/Squiggly line:\n{shape_screen}"
+    );
+
+    // Select "Squiggly line" (index 1) and confirm into Review.
     session.send(KEY_DOWN);
     session.send(KEY_ENTER);
     let confirm_screen = session.wait_for("Write this configuration?", Duration::from_secs(5));
     assert!(
         confirm_screen.contains("bottom-left")
             && confirm_screen.contains("pill")
-            && confirm_screen.contains("live waveform"),
+            && confirm_screen.contains("waveform look")
+            && confirm_screen.contains("squiggly line"),
         "confirm screen should summarize the chosen overlay settings:\n{confirm_screen}"
     );
 
@@ -273,7 +282,8 @@ fn pty_enabling_overlay_walks_through_position_style_and_waveform_and_persists_c
     assert!(config.contains("enabled = true"), "{config}");
     assert!(config.contains("position = \"bottom-left\""), "{config}");
     assert!(config.contains("style = \"pill\""), "{config}");
-    assert!(config.contains("live_waveform = true"), "{config}");
+    assert!(config.contains("look = \"waveform\""), "{config}");
+    assert!(config.contains("waveform_shape = \"squiggle\""), "{config}");
 }
 
 #[test]
@@ -527,4 +537,27 @@ fn pty_inference_backend_step_lists_usable_backends_and_persists_the_choice() {
 
     let config = sandbox.config_contents();
     assert!(config.contains("preferred_backend = \"cpu\""), "{config}");
+}
+
+#[test]
+fn pty_confirm_step_backs_out_with_backspace() {
+    let sandbox = Sandbox::new("confirm-backspace");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+
+    advance_to_overlay_enabled(&mut session);
+    session.wait_for("Overlay", Duration::from_secs(5));
+    session.send(KEY_UP); // Enabled -> Disabled skips the overlay sub-steps
+    session.send(KEY_ENTER);
+    session.wait_for("Write this configuration?", Duration::from_secs(5));
+
+    // Backspace is the second back key everywhere else in the wizard, so the
+    // final Review step must honor it too. If it retreats, the next Enter lands
+    // back on Review; if it is ignored, that Enter saves and exits and this
+    // wait times out.
+    session.send(KEY_BACKSPACE);
+    session.send(KEY_ENTER);
+    session.wait_for("Write this configuration?", Duration::from_secs(5));
+
+    session.send(KEY_ENTER); // save
+    session.wait_for_exit(Duration::from_secs(5));
 }

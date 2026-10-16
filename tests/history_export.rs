@@ -59,14 +59,17 @@ impl CoordinatorRuntime for StubRuntime {
             Ok(RecordingSignal::Stop) => RecordingAttempt {
                 result: Ok(vec![0.1; 512]),
                 automatic_stop_at: None,
+                streamed: None,
             },
             Ok(RecordingSignal::Cancel) => RecordingAttempt {
                 result: Err(anyhow::anyhow!("cancelled")),
                 automatic_stop_at: None,
+                streamed: None,
             },
             Err(_) => RecordingAttempt {
                 result: Ok(vec![0.1; 512]),
                 automatic_stop_at: None,
+                streamed: None,
             },
         }
     }

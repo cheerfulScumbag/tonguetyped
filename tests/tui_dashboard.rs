@@ -42,10 +42,18 @@ struct Sandbox {
     data_home: std::path::PathBuf,
     runtime_dir: std::path::PathBuf,
     bin: std::path::PathBuf,
+    /// The compositor the spawned binary sees. KDE by default, so a helper-less
+    /// sandbox exercises the "install dotool" warning; a test that needs the
+    /// native libei backend *unavailable* pins a non-KDE/GNOME desktop instead.
+    desktop: &'static str,
 }
 
 impl Sandbox {
     fn new(tag: &str) -> Self {
+        Self::on(tag, "KDE")
+    }
+
+    fn on(tag: &str, desktop: &'static str) -> Self {
         let root = sandbox_root(tag);
         let config_home = root.join("config");
         let data_home = root.join("data");
@@ -67,6 +75,7 @@ impl Sandbox {
             data_home,
             runtime_dir,
             bin,
+            desktop,
         }
     }
 
@@ -83,9 +92,9 @@ impl Sandbox {
         // `install_typing_helper`.
         cmd.env("PATH", &self.bin);
         cmd.env("XDG_SESSION_TYPE", "wayland");
-        cmd.env("XDG_CURRENT_DESKTOP", "KDE");
-        cmd.env("XDG_SESSION_DESKTOP", "KDE");
-        cmd.env("DESKTOP_SESSION", "KDE");
+        cmd.env("XDG_CURRENT_DESKTOP", self.desktop);
+        cmd.env("XDG_SESSION_DESKTOP", self.desktop);
+        cmd.env("DESKTOP_SESSION", self.desktop);
         cmd.env("NO_COLOR", "1");
         cmd.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
     }
@@ -277,6 +286,8 @@ impl Session {
 
 const KEY_UP: &[u8] = b"\x1b[A";
 const KEY_DOWN: &[u8] = b"\x1b[B";
+const KEY_LEFT: &[u8] = b"\x1b[D";
+const KEY_RIGHT: &[u8] = b"\x1b[C";
 const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 const KEY_TAB: &[u8] = b"\t";
@@ -321,9 +332,40 @@ fn setting_row(label: &str) -> usize {
         .unwrap()
 }
 
-/// Home index of the first command row (after the fifteen Settings rows), for
-/// tests that need to arrow down to a specific command.
+/// The home Settings panel now ends with a single "Commands" row that opens the
+/// dedicated Commands screen; this is its selection index (after the fifteen
+/// configuration rows).
 const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
+
+/// Opens the dedicated Commands screen from Home (the Settings panel's last
+/// row) and waits for its title.
+fn open_commands(session: &mut Session) {
+    for _ in 0..SETTING_LABELS.len() {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("> Commands", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Home \u{203a} Commands", Duration::from_secs(3));
+}
+
+/// Opens the Commands screen and moves the cursor onto command `name`. It
+/// clamps to the first row before stepping down, so it does not depend on the
+/// cursor's starting position.
+fn select_command(session: &mut Session, name: &str) {
+    open_commands(session);
+    let index = COMMAND_NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .unwrap_or_else(|| panic!("{name:?} is not a command"));
+    for _ in 0..COMMAND_NAMES.len() {
+        session.send(KEY_UP);
+    }
+    session.wait_for("> setup", Duration::from_secs(3));
+    for _ in 0..index {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for(&format!("> {name}"), Duration::from_secs(3));
+}
 
 /// Moves the home selection from the first Settings row ("Model") down to
 /// the row labeled `label`, and waits until it is drawn selected.
@@ -359,16 +401,14 @@ fn wait_for_config(sandbox: &Sandbox, needle: &str, timeout: Duration) {
 #[test]
 fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_normal_terminal() {
     let sandbox = Sandbox::new("home");
-    // Tall enough for the fifteen Settings rows plus every Commands row with
-    // no scrolling of either panel.
-    let session = Session::spawn(&sandbox, 100, 38);
+    // Tall enough for the grouped Settings panel (fifteen rows, four section
+    // headers, the Commands row) with no scrolling.
+    let mut session = Session::spawn(&sandbox, 100, 38);
 
-    // The pre-change baseline (see .superdesign/replica_html_template and the
-    // dashboard task's report) listed 11 CLI commands with model/autostart
-    // among them. The signed-off settings-menu redesign turns the home screen
-    // into two stacked panels with one selection cursor: the Settings rows
-    // with current values (model and autostart included) above the remaining
-    // Commands. All of it must fit one normal terminal, no pagination.
+    // The signed-off redesign groups the Settings rows into four labeled
+    // sections and moves the CLI commands onto their own screen, reached from
+    // the Settings panel's "Commands" row. The grouped panel must still fit one
+    // normal terminal with no pagination.
     let screen = session.wait_for("Settings", Duration::from_secs(5));
     assert!(
         screen.contains("████████╗"),
@@ -380,15 +420,20 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
             "home screen is missing settings row {label:?}; got:\n{screen}"
         );
     }
-    for name in COMMAND_NAMES {
+    for section in [
+        "Language & model",
+        "Capture & activation",
+        "Output",
+        "Behaviour",
+    ] {
         assert!(
-            screen.contains(name),
-            "home screen is missing command {name:?}; got:\n{screen}"
+            screen.contains(section),
+            "home screen is missing section header {section:?}:\n{screen}"
         );
     }
     assert!(
-        !screen.contains("start          Start a new recording"),
-        "start/stop stay hidden from the Commands panel:\n{screen}"
+        screen.contains("Commands") && screen.contains("setup, daemon, doctor"),
+        "the Settings panel should end with a Commands row:\n{screen}"
     );
     // The Settings panel shows real current values, not placeholders.
     assert!(
@@ -400,7 +445,7 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
         "the Inference backend row should show the configured preference:\n{screen}"
     );
     assert!(
-        screen.contains("Overlay            enabled, top-right, badge, live waveform"),
+        screen.contains("Overlay            enabled, top-right, badge, waveform"),
         "the Overlay row should summarize the real config:\n{screen}"
     );
     assert!(
@@ -408,11 +453,25 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
         "missing status strip:\n{screen}"
     );
 
+    // The commands live on their own screen now; every one must still be there.
+    open_commands(&mut session);
+    let commands = session.visible_text();
+    for name in COMMAND_NAMES {
+        assert!(
+            commands.contains(name),
+            "Commands screen is missing command {name:?}; got:\n{commands}"
+        );
+    }
+    assert!(
+        !commands.contains("start          Start a new recording"),
+        "start/stop stay hidden from the Commands screen:\n{commands}"
+    );
+
     session.quit_and_wait();
 }
 
 #[test]
-fn pty_home_selection_crosses_from_the_settings_panel_into_the_commands_panel() {
+fn pty_home_selection_walks_the_settings_then_opens_the_commands_screen() {
     let sandbox = Sandbox::new("cross-panel-nav");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
@@ -424,15 +483,22 @@ fn pty_home_selection_crosses_from_the_settings_panel_into_the_commands_panel() 
         "expected Model selected:\n{initial}"
     );
 
-    // Walking down past every settings row lands on "setup", the first
-    // command row - one cursor spans both panels.
+    // Walking down past every settings row lands on the single "Commands" row.
     for _ in 0..FIRST_COMMAND_ROW {
         session.send(KEY_DOWN);
     }
-    let commands_selected = session.wait_for("> setup", Duration::from_secs(3));
+    let commands_selected = session.wait_for("> Commands", Duration::from_secs(3));
     assert!(
         !commands_selected.contains("> Model"),
         "only one row should carry the selection marker:\n{commands_selected}"
+    );
+
+    // Enter opens the dedicated Commands screen, starting on the first command.
+    session.send(KEY_ENTER);
+    let screen = session.wait_for("> setup", Duration::from_secs(3));
+    assert!(
+        screen.contains("Commands"),
+        "the Commands screen should render:\n{screen}"
     );
 
     session.quit_and_wait();
@@ -533,13 +599,10 @@ fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_erro
     let mut session = Session::spawn(&sandbox, 100, 32);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // Navigate to "status" (the fifth Commands row, after the Settings rows:
-    // setup, daemon, toggle, cancel, status) and select it. No daemon
-    // is running in this sandbox, so the dashboard must show a visible,
-    // actionable error - not hang, not crash, not silently do nothing.
-    for _ in 0..FIRST_COMMAND_ROW + 4 {
-        session.send(KEY_DOWN);
-    }
+    // Run "status" from the dedicated Commands screen. No daemon is running in
+    // this sandbox, so the dashboard must show a visible, actionable error -
+    // not hang, not crash, not silently do nothing.
+    select_command(&mut session, "status");
     session.send(KEY_ENTER);
 
     let result = session.wait_for("daemon is not running", Duration::from_secs(5));
@@ -548,13 +611,57 @@ fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_erro
         "expected the Status action's title:\n{result}"
     );
 
-    // Esc/Enter return to Home from the result screen (the selection stays
-    // on "status", the item that was just activated).
+    // Esc/Enter return to Home from the result screen.
     session.send(KEY_ESC);
-    let back_home = session.wait_for("> status", Duration::from_secs(3));
+    let back_home = session.wait_for("> Commands", Duration::from_secs(3));
     assert!(
         !back_home.contains("daemon is not running"),
         "returning to Home should clear the prior result screen:\n{back_home}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_commands_screen_shows_in_flight_feedback_while_a_command_runs() {
+    // The tag must stay short: the daemon stand-in binds a Unix-domain socket
+    // under the sandbox, and the path must fit under SUN_LEN (~108 bytes) even
+    // with Nix's already-long TMPDIR.
+    let sandbox = Sandbox::new("ci");
+
+    // A daemon stand-in that accepts the connection and never answers keeps a
+    // dispatched IPC command pending indefinitely, so the screen can be
+    // observed *while* the command is in flight rather than after it settles.
+    let socket = sandbox.socket_path();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => held.push(stream),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_command(&mut session, "status");
+    session.send(KEY_ENTER);
+
+    // Dispatching the command must be acknowledged: the Working line replaces
+    // the static legend while the command runs, and the screen stays on
+    // Commands (it has not jumped to the result yet).
+    let in_flight = session.wait_for("Working: Status...", Duration::from_secs(3));
+    assert!(
+        in_flight.contains("Home \u{203a} Commands"),
+        "the in-flight indicator must show on the Commands screen:\n{in_flight}"
+    );
+    assert!(
+        !in_flight.contains("Enter run"),
+        "the static legend should give way to the Working line while a command runs:\n{in_flight}"
     );
 
     session.quit_and_wait();
@@ -566,13 +673,9 @@ fn pty_daemon_home_item_opens_a_start_stop_restart_screen_instead_of_starting_im
     let mut session = Session::spawn(&sandbox, 100, 32);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    // "daemon" is the second Commands row, right after "setup". Selecting it
-    // must open a sub-screen offering Start/Stop/Restart, not immediately
-    // launch the daemon the way the old single-action binding did.
-    for _ in 0..FIRST_COMMAND_ROW + 1 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> daemon", Duration::from_secs(3));
+    // "daemon" opens a sub-screen offering Start/Stop/Restart, not immediately
+    // launching the daemon the way the old single-action binding did.
+    select_command(&mut session, "daemon");
     session.send(KEY_ENTER);
     let screen = session.wait_for("Restart", Duration::from_secs(3));
     assert!(
@@ -587,12 +690,13 @@ fn pty_daemon_home_item_opens_a_start_stop_restart_screen_instead_of_starting_im
     // Esc from the daemon screen with no action run yet must return to Home
     // without side effects.
     session.send(KEY_ESC);
-    session.wait_for("> daemon", Duration::from_secs(3));
+    session.wait_for("> Commands", Duration::from_secs(3));
 
     // Reopen the daemon screen (selection resets to "Start"), move down once
     // to select "Stop", and run it. No daemon is running in this sandbox, so
     // this must surface the same actionable error the CLI's `daemon stop`
     // would, not hang or silently do nothing.
+    select_command(&mut session, "daemon");
     session.send(KEY_ENTER);
     session.wait_for("Restart", Duration::from_secs(3));
     session.send(KEY_DOWN);
@@ -610,7 +714,7 @@ fn pty_daemon_home_item_opens_a_start_stop_restart_screen_instead_of_starting_im
 
     // Esc from the result screen returns to Home.
     session.send(KEY_ESC);
-    session.wait_for("> daemon", Duration::from_secs(3));
+    session.wait_for("> Commands", Duration::from_secs(3));
 
     session.quit_and_wait();
 }
@@ -631,7 +735,7 @@ fn pty_model_screen_lists_the_catalog_and_activation_reports_confirmed_failure_f
     session.wait_for("> Model", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
-    let catalog_screen = session.wait_for("Model catalog", Duration::from_secs(5));
+    let catalog_screen = session.wait_for("MODEL ID", Duration::from_secs(5));
     assert!(
         catalog_screen.contains(tonguetyped::catalog::DEFAULT_MODEL_ID),
         "model screen should list the default catalog entry:\n{catalog_screen}"
@@ -686,7 +790,42 @@ fn pty_activation_setting_changes_mode_and_persists_it() {
 }
 
 #[test]
-fn pty_overlay_setting_cycles_position_and_persists_it() {
+fn pty_backspace_and_left_right_work_on_a_settings_screen() {
+    // The menu redesign adds Backspace as a second way out (Escape is no longer
+    // the only one) and makes `←`/`→` move the highlight, so a change is one
+    // key away and commits on leave.
+    let sandbox = Sandbox::new("backspace-nav");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_setting(&mut session, "Activation");
+    session.send(KEY_ENTER);
+    let opened = session.wait_for("> Hold the shortcut while speaking", Duration::from_secs(3));
+    assert!(
+        opened.contains("Home \u{203a} Activation"),
+        "a settings screen should carry its breadcrumb:\n{opened}"
+    );
+
+    // Right moves the highlight to the second option; Backspace commits it and
+    // returns home - no Enter, no Escape.
+    session.send(KEY_RIGHT);
+    session.wait_for(
+        "> Press once to start and again to stop",
+        Duration::from_secs(3),
+    );
+    session.send(KEY_BACKSPACE);
+    let home = session.wait_for("> Activation", Duration::from_secs(3));
+    assert!(
+        home.contains("toggle"),
+        "backing out should commit the highlighted mode:\n{home}"
+    );
+    assert!(sandbox.config_contents().contains("mode = \"toggle\""));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_overlay_setting_steps_position_both_ways_and_persists_on_leave() {
     let sandbox = Sandbox::new("overlay-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
@@ -698,37 +837,48 @@ fn pty_overlay_setting_cycles_position_and_persists_it() {
     session.wait_for("> Overlay", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
-    let opened = session.wait_for("Position    top-right", Duration::from_secs(3));
+    // The screen opens on the enable stepper; every value is a `‹ value ›`
+    // stepper, not a plain text value.
+    let opened = session.wait_for("\u{2039} top-right \u{203a}", Duration::from_secs(3));
     assert!(
-        opened.contains("Style       Badge")
-            && opened.contains("Waveform    Live microphone waveform"),
-        "the Overlay screen should show all current values:\n{opened}"
-    );
-    assert!(
-        opened.contains("> Enabled"),
-        "the current enable state should be selected:\n{opened}"
+        opened.contains("\u{2039} Enabled")
+            && opened.contains("2/2")
+            && opened.contains("Badge \u{203a}")
+            && opened.contains("\u{2039} Waveform"),
+        "the Overlay screen should show all current values as steppers:\n{opened}"
     );
 
-    // Selection starts on "Enabled"; one Down selects Position, Enter cycles
-    // it to the next configured value.
+    // Move to the Position row and step right: the value changes immediately,
+    // instead of Enter cycling forward only.
     session.send(KEY_DOWN);
-    session.send(KEY_ENTER);
-    let cycled = session.wait_for("Position    center", Duration::from_secs(3));
+    session.wait_for("> Position", Duration::from_secs(3));
+    session.send(KEY_RIGHT);
+    let stepped = session.wait_for("\u{2039} center \u{203a}", Duration::from_secs(3));
     assert!(
-        cycled.contains("Overlay saved."),
-        "cycling a value should report the save:\n{cycled}"
+        stepped.contains("4/7"),
+        "the counter should show the position moved one step:\n{stepped}"
     );
-    assert!(sandbox.config_contents().contains("position = \"center\""));
 
-    // Home's summary row reflects the new value.
-    session.send(KEY_ESC);
-    let home = session.wait_for(
-        "enabled, center, badge, live waveform",
-        Duration::from_secs(3),
+    // Left steps back to the saved value - the reverse Enter never offered.
+    session.send(KEY_LEFT);
+    let back = session.wait_for("\u{2039} top-right \u{203a}", Duration::from_secs(3));
+    assert!(
+        back.contains("3/7"),
+        "stepping left should walk back to the saved value:\n{back}"
     );
+
+    // Step right again and back out: leaving commits the pending value.
+    session.send(KEY_RIGHT);
+    session.wait_for("\u{2039} center \u{203a}", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    let home = session.wait_for("enabled, center, badge, waveform", Duration::from_secs(3));
     assert!(
         home.contains("> Overlay"),
         "selection should return to the Overlay row:\n{home}"
+    );
+    assert!(
+        sandbox.config_contents().contains("position = \"center\""),
+        "backing out should commit the pending position"
     );
 
     session.quit_and_wait();
@@ -755,21 +905,27 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
     session.wait_for("> Overlay", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
-    // Disabled state: only the two enable rows, no configuration sub-rows.
-    let disabled = session.wait_for("> Disabled", Duration::from_secs(3));
+    // Disabled state: only the enable stepper, no configuration sub-rows.
+    let disabled = session.wait_for("Disabled \u{203a}", Duration::from_secs(3));
     assert!(
-        !disabled.contains("Position") && !disabled.contains("Waveform"),
-        "a disabled overlay must not show position/style/waveform:\n{disabled}"
+        disabled.contains("1/2")
+            && !disabled.contains("Position")
+            && !disabled.contains("Waveform"),
+        "a disabled overlay must show only the enable stepper:\n{disabled}"
     );
 
-    // Move to Enabled and apply: the three configuration rows appear.
-    session.send(KEY_DOWN);
-    session.send(KEY_ENTER);
+    // Step the enable row right: the three configuration steppers appear and
+    // the preview band opens with them.
+    session.send(KEY_RIGHT);
     let enabled = session.wait_for("Position", Duration::from_secs(3));
     assert!(
-        enabled.contains("Overlay saved.") && enabled.contains("> Enabled"),
-        "enabling should save and keep the row selected:\n{enabled}"
+        enabled.contains("\u{2039} Enabled") && enabled.contains("Preview"),
+        "enabling should reveal the configuration rows and the preview:\n{enabled}"
     );
+
+    // Leaving commits the pending enable state.
+    session.send(KEY_ESC);
+    session.wait_for("Settings", Duration::from_secs(3));
     assert!(sandbox.config_contents().contains("enabled = true"));
 
     session.quit_and_wait();
@@ -995,15 +1151,29 @@ fn pty_text_processing_screen_rejects_invalid_input_without_saving() {
     session.send(KEY_ENTER);
     session.wait_for("Spoken punctuation", Duration::from_secs(3));
 
-    // A replacement entry without the '=>' arrow is rejected, and nothing is
-    // saved.
+    // A replacement entry without the '=>' arrow is rejected on Enter, and
+    // nothing is saved.
     session.send(b"no arrow here");
     session.send(KEY_ENTER);
     let error = session.wait_for("Each replacement must be", Duration::from_secs(3));
     assert!(error.contains("from => to"), "{error}");
     assert!(!sandbox.config_contents().contains("no arrow here"));
 
-    session.send(KEY_ESC); // discard the bad form and return home
+    // Leaving commits now too, so an invalid form keeps you on the screen with
+    // the error instead of silently discarding the input.
+    session.send(KEY_ESC);
+    let still_open = session.wait_for("Each replacement must be", Duration::from_secs(3));
+    assert!(
+        still_open.contains("Home \u{203a} Text processing"),
+        "an invalid form must keep the screen open on leave:\n{still_open}"
+    );
+    assert!(!sandbox.config_contents().contains("no arrow here"));
+
+    // Clear the bad replacement: leaving now saves and returns home.
+    for _ in 0.."no arrow here".len() {
+        session.send(KEY_BACKSPACE);
+    }
+    session.send(KEY_ESC);
     session.wait_for("> Text processing", Duration::from_secs(3));
     session.send(KEY_ENTER);
     session.wait_for("Spoken punctuation", Duration::from_secs(3));
@@ -1022,6 +1192,9 @@ fn pty_text_processing_screen_rejects_invalid_input_without_saving() {
         .config_contents()
         .contains("post_process_timeout_seconds = 0"));
 
+    // Restore a valid timeout so leaving commits and returns home.
+    session.send(KEY_BACKSPACE);
+    session.send(b"10");
     session.send(KEY_ESC);
     session.wait_for("> Text processing", Duration::from_secs(3));
     session.quit_and_wait();
@@ -1259,45 +1432,73 @@ fn pty_transcript_output_configures_paste_and_enter() {
         "Paste into the focused application (current)",
         Duration::from_secs(3),
     );
-    assert!(screen.contains("After text    nothing"), "{screen}");
+    assert!(screen.contains("[ ] nothing"), "{screen}");
     assert!(
-        screen.contains("Paste keys    Ctrl+V (most applications)"),
-        "{screen}"
+        screen.contains("Ctrl+V (most applications) \u{203a}")
+            && screen.contains("1/2")
+            && !screen.contains("\u{2039} Ctrl+V"),
+        "the paste keys should render as a stepper with its left arrow dimmed at the start:\n{screen}"
     );
 
-    // Enter on each option row toggles Enter-after and cycles the keys.
+    // `→` on the "After text" row flips it; `→` on the paste-keys row steps the
+    // key set, and `←` steps it back - both directions, no forward-only cycle.
     session.send(KEY_DOWN);
     session.wait_for(">   After text", Duration::from_secs(3));
-    session.send(KEY_ENTER);
-    session.wait_for("After text    press Enter", Duration::from_secs(3));
+    session.send(KEY_RIGHT);
+    session.wait_for("[x] press Enter", Duration::from_secs(3));
     session.send(KEY_DOWN);
     session.wait_for(">   Paste keys", Duration::from_secs(3));
-    session.send(KEY_ENTER);
+    session.send(KEY_RIGHT);
     let screen = session.wait_for("Shift+Insert (terminals)", Duration::from_secs(3));
     assert!(
         screen.contains("Paste into the focused application (current)"),
         "the saved method stays marked while the cursor is on an option:\n{screen}"
+    );
+    assert!(
+        screen.contains("\u{2039} Shift+Insert (terminals)") && screen.contains("2/2"),
+        "at the last paste-key value the counter should read 2/2:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Shift+Insert (terminals) \u{203a}"),
+        "at the last paste-key value the right arrow should be dimmed:\n{screen}"
+    );
+    session.send(KEY_LEFT);
+    session.wait_for("Ctrl+V (most applications)", Duration::from_secs(3));
+    session.send(KEY_RIGHT);
+    session.wait_for("Shift+Insert (terminals)", Duration::from_secs(3));
+
+    // Enter on an option row only saves; it must not cycle the value, which
+    // would wrap Shift+Insert back to Ctrl+V.
+    session.send(KEY_ENTER);
+    session.wait_for("Shift+Insert (terminals)", Duration::from_secs(3));
+
+    // Stepping right at the last value clamps instead of wrapping to the
+    // first: backing out must keep Shift+Insert, not revert to Ctrl+V.
+    session.send(KEY_RIGHT);
+
+    // Leaving commits the option rows; the Settings panel summarizes the choice.
+    session.send(KEY_ESC);
+    session.wait_for(
+        "paste into the focused application with Shift+Insert, then Enter",
+        Duration::from_secs(3),
     );
     let config = sandbox.config_contents();
     assert!(config.contains("method = \"paste\""), "{config}");
     assert!(config.contains("auto_submit = true"), "{config}");
     assert!(config.contains("paste_keys = \"shift-insert\""), "{config}");
 
-    // The Settings panel summarizes the whole choice.
-    session.send(KEY_ESC);
-    session.wait_for(
-        "paste into the focused application with Shift+Insert, then Enter",
-        Duration::from_secs(3),
-    );
     session.quit_and_wait();
 }
 
 #[test]
 fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
-    // The sandbox PATH has no typing helper and the session is pinned to
-    // Wayland + KDE, so this is the exact "no helper installed" state the
-    // warning exists for, and it must name dotool (wtype cannot work on KWin).
-    let sandbox = Sandbox::new("output-no-helper");
+    // The sandbox PATH has no typing helper and the session is pinned to a
+    // Wayland compositor that is neither wlroots, KDE, nor GNOME (weston), so
+    // no backend can type: this is the exact "no helper installed" state the
+    // warning exists for, and it must name dotool (wtype cannot work without
+    // the wlroots virtual-keyboard protocol and the native libei backend is
+    // KDE/GNOME only).
+    let sandbox = Sandbox::on("output-no-helper", "weston");
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
@@ -1455,7 +1656,7 @@ fn pty_model_screen_saves_a_pinned_inference_backend_and_reports_it() {
     // Wait on the catalog title, not "Inference backend": that string is now
     // also the home Settings row's label, so waiting on it would race the
     // screen opening.
-    let screen = session.wait_for("Model catalog", Duration::from_secs(5));
+    let screen = session.wait_for("MODEL ID", Duration::from_secs(5));
     assert!(
         screen.contains("Auto (tries CUDA"),
         "backend panel should list the auto choice:\n{screen}"
@@ -1510,11 +1711,7 @@ fn open_last_result(tag: &str, transcript: &str) -> (Sandbox, Daemon, Session) {
 
     let mut session = Session::spawn(&sandbox, 100, 32);
     session.wait_for("Settings", Duration::from_secs(5));
-    // "last-result" is the seventh Commands row.
-    for _ in 0..FIRST_COMMAND_ROW + 6 {
-        session.send(KEY_DOWN);
-    }
-    session.wait_for("> last-result", Duration::from_secs(3));
+    select_command(&mut session, "last-result");
     session.send(KEY_ENTER);
     session.wait_for("Last result", Duration::from_secs(10));
     (sandbox, daemon, session)
