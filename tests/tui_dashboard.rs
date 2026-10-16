@@ -1392,8 +1392,10 @@ fn pty_transcript_output_configures_paste_and_enter() {
     );
     assert!(screen.contains("[ ] nothing"), "{screen}");
     assert!(
-        screen.contains("\u{2039} Ctrl+V (most applications) \u{203a}"),
-        "the paste keys should render as a stepper:\n{screen}"
+        screen.contains("Ctrl+V (most applications) \u{203a}")
+            && screen.contains("1/2")
+            && !screen.contains("\u{2039} Ctrl+V"),
+        "the paste keys should render as a stepper with its left arrow dimmed at the start:\n{screen}"
     );
 
     // `→` on the "After text" row flips it; `→` on the paste-keys row steps the
@@ -1410,10 +1412,22 @@ fn pty_transcript_output_configures_paste_and_enter() {
         screen.contains("Paste into the focused application (current)"),
         "the saved method stays marked while the cursor is on an option:\n{screen}"
     );
+    assert!(
+        screen.contains("\u{2039} Shift+Insert (terminals)") && screen.contains("2/2"),
+        "at the last paste-key value the counter should read 2/2:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Shift+Insert (terminals) \u{203a}"),
+        "at the last paste-key value the right arrow should be dimmed:\n{screen}"
+    );
     session.send(KEY_LEFT);
     session.wait_for("Ctrl+V (most applications)", Duration::from_secs(3));
     session.send(KEY_RIGHT);
     session.wait_for("Shift+Insert (terminals)", Duration::from_secs(3));
+
+    // Stepping right at the last value clamps instead of wrapping to the
+    // first: backing out must keep Shift+Insert, not revert to Ctrl+V.
+    session.send(KEY_RIGHT);
 
     // Leaving commits the option rows; the Settings panel summarizes the choice.
     session.send(KEY_ESC);

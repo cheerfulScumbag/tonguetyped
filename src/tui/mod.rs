@@ -1187,10 +1187,11 @@ impl App {
 
     /// The Shortcut screen has no editable text: the binding always comes
     /// from the desktop's own dialog, so the arrow keys, Enter, Ctrl+R,
-    /// Escape and `q` are the only commands. While the system dialog is in
-    /// flight, Escape leaves, Enter keeps the current binding, and Ctrl+R
-    /// reopens the dialog - so a window closed with no change is never a dead
-    /// end. While the portal test runs, only Escape does anything.
+    /// Escape/Backspace and `q` are the only commands. While the system dialog
+    /// is in flight, Escape/Backspace leaves, Enter keeps the current binding,
+    /// and Ctrl+R reopens the dialog - so a window closed with no change is
+    /// never a dead end. While the portal test runs, only Escape/Backspace
+    /// does anything.
     fn handle_shortcut_key(&mut self, key: KeyEvent) {
         if let Screen::Shortcut(screen) = &self.screen {
             match &screen.status {
@@ -1199,7 +1200,7 @@ impl App {
                         // Stop waiting and settle on whatever is bound now,
                         // rather than blocking until the reconfigure timeout.
                         KeyCode::Enter => self.keep_current_shortcut(),
-                        KeyCode::Esc => {
+                        KeyCode::Esc | KeyCode::Backspace => {
                             self.cancel_shortcut_dialog();
                             self.screen = Screen::Home;
                         }
@@ -1212,7 +1213,7 @@ impl App {
                     return;
                 }
                 screens::ShortcutStatus::Testing => {
-                    if key.code == KeyCode::Esc {
+                    if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
                         self.shortcut_test = None;
                         self.screen = Screen::Home;
                     }
@@ -2822,6 +2823,41 @@ mod tests {
                 assert!(text.contains("No change was made"), "{text}");
             }
             _ => panic!("expected a settled no-change message"),
+        }
+    }
+
+    #[test]
+    fn backspace_is_back_from_the_shortcut_in_flight_states() {
+        for dialog_open in [true, false] {
+            let mut app = App::new(Config::default());
+            app.open_setting(SettingId::Shortcut);
+            if let Screen::Shortcut(screen) = &mut app.screen {
+                screen.status = if dialog_open {
+                    screens::ShortcutStatus::DialogOpen
+                } else {
+                    screens::ShortcutStatus::Testing
+                };
+            }
+            if dialog_open {
+                app.shortcut_dialog = Some(setup::ReconfigureHandle::for_test(Arc::new(
+                    Mutex::new(None),
+                )));
+            } else {
+                app.shortcut_test = Some(setup::ShortcutTestHandle {
+                    result: Arc::new(Mutex::new(None)),
+                });
+            }
+
+            app.handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+            assert!(
+                matches!(app.screen, Screen::Home),
+                "Backspace must leave the Shortcut screen while its dialog or test is in flight"
+            );
+            assert!(
+                app.shortcut_dialog.is_none() && app.shortcut_test.is_none(),
+                "leaving must stop any in-flight shortcut wait"
+            );
         }
     }
 

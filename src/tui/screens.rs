@@ -717,9 +717,10 @@ impl OutputScreen {
     }
 
     /// Steps the highlighted option row: "after text" flips and the paste keys
-    /// cycle both ways (the `←`/`→` step the captain asked for, replacing
-    /// `Enter`'s forward-only cycle). Method rows have no inline value, so this
-    /// returns `false` and the caller moves the highlight instead.
+    /// step both ways, clamped at the ends (the `←`/`→` step the captain asked
+    /// for, replacing `Enter`'s forward-only cycle). Method rows have no inline
+    /// value, so this returns `false` and the caller moves the highlight
+    /// instead.
     pub(super) fn step(&mut self, delta: i32, config: &mut Config) -> bool {
         match self.selected {
             Self::SUBMIT_ROW => {
@@ -732,7 +733,7 @@ impl OutputScreen {
                     .position(|keys| *keys == config.output.paste_keys)
                     .unwrap_or(0);
                 let len = PasteKeys::ALL.len() as i32;
-                let next = (index as i32 + delta).rem_euclid(len) as usize;
+                let next = (index as i32 + delta).clamp(0, len - 1) as usize;
                 config.output.paste_keys = PasteKeys::ALL[next];
                 true
             }
@@ -805,18 +806,44 @@ impl OutputScreen {
                 .iter()
                 .position(|keys| *keys == config.output.paste_keys)
                 .unwrap_or(0)];
-            rows.push(format!("  {:<14}\u{2039} {keys} \u{203a}", "Paste keys"));
+            rows.push(format!("  {:<14}{keys}", "Paste keys"));
         }
         rows
     }
 
     pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
-        selection_list(
-            "Home \u{203a} Transcript output",
-            &self.rows(config),
-            self.selected,
-            width,
-        )
+        let rows = self.rows(config);
+        let keys = paste_keys_labels();
+        let key_options: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let key_index = PasteKeys::ALL
+            .iter()
+            .position(|keys| *keys == config.output.paste_keys)
+            .unwrap_or(0);
+        let key_value = key_options.get(key_index).copied().unwrap_or("");
+        let lines: Vec<Line> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let is_selected = index == self.selected;
+                let marker = if is_selected { "> " } else { "  " };
+                let mut spans = Vec::new();
+                if index == Self::PASTE_KEYS_ROW {
+                    spans.push(Span::styled(
+                        format!("{marker}  {:<14}", "Paste keys"),
+                        selection_style(is_selected),
+                    ));
+                    spans.extend(stepper_spans(&key_options, key_value, is_selected));
+                } else {
+                    spans.push(Span::styled(
+                        format!("{marker}{row}"),
+                        selection_style(is_selected),
+                    ));
+                }
+                pad_selected_row(&mut spans, is_selected, width);
+                Line::from(spans)
+            })
+            .collect();
+        list_panel("Home \u{203a} Transcript output", lines)
     }
 
     /// The install warning for the highlighted method when it cannot work
@@ -1503,6 +1530,11 @@ pub(super) fn selection_list(
             Line::from(spans)
         })
         .collect();
+    list_panel(title, lines)
+}
+
+/// Wraps ready-made rows in the dashboard's standard bordered list panel.
+fn list_panel(title: &str, lines: Vec<Line<'static>>) -> Paragraph<'static> {
     Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
@@ -1807,6 +1839,69 @@ mod tests {
         screen.apply(&mut config).unwrap();
         assert!(!config.output.auto_submit);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn output_screen_paste_keys_stepper_clamps_at_the_ends() {
+        let capabilities = test_capabilities();
+        let mut config = Config::default();
+        config.output.method = OutputMethod::Paste;
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        screen.selected = OutputScreen::PASTE_KEYS_ROW;
+
+        assert_eq!(config.output.paste_keys, PasteKeys::CtrlV);
+        screen.step(-1, &mut config);
+        assert_eq!(
+            config.output.paste_keys,
+            PasteKeys::CtrlV,
+            "stepping left at the first value must clamp, not wrap"
+        );
+        screen.step(1, &mut config);
+        assert_eq!(config.output.paste_keys, PasteKeys::ShiftInsert);
+        screen.step(1, &mut config);
+        assert_eq!(
+            config.output.paste_keys,
+            PasteKeys::ShiftInsert,
+            "stepping right at the last value must clamp, not wrap"
+        );
+        screen.step(-1, &mut config);
+        assert_eq!(config.output.paste_keys, PasteKeys::CtrlV);
+    }
+
+    #[test]
+    fn output_screen_paste_keys_stepper_dims_the_end_arrows_it_cannot_use() {
+        let capabilities = test_capabilities();
+        let mut config = Config::default();
+        config.output.method = OutputMethod::Paste;
+        let mut screen = OutputScreen::new(&capabilities, &config);
+        screen.selected = OutputScreen::PASTE_KEYS_ROW;
+
+        let first = rendered_widget(screen.list_widget(&config, 68), 70, 12);
+        let first_keys = first
+            .lines()
+            .find(|line| line.contains("Paste keys"))
+            .expect("the paste-keys row must render");
+        assert!(
+            !first_keys.contains('\u{2039}')
+                && first_keys.contains("Ctrl+V")
+                && first_keys.contains('\u{203a}')
+                && first_keys.contains("1/2"),
+            "the first value must hide its left arrow:\n{first}"
+        );
+
+        screen.step(1, &mut config);
+        let last = rendered_widget(screen.list_widget(&config, 68), 70, 12);
+        let last_keys = last
+            .lines()
+            .find(|line| line.contains("Paste keys"))
+            .expect("the paste-keys row must render");
+        assert!(
+            last_keys.contains('\u{2039}')
+                && last_keys.contains("Shift+Insert")
+                && !last_keys.contains('\u{203a}')
+                && last_keys.contains("2/2"),
+            "the last value must hide its right arrow:\n{last}"
+        );
     }
 
     #[test]
