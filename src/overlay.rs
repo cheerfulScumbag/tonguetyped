@@ -190,8 +190,7 @@ const LIVE_TEXT_INSET: f32 = 4.0;
 const LIVE_TEXT_PADDING: f32 = 26.0;
 /// The single-line capsule's vertical padding above and below the phase chip:
 /// the capsule is exactly the chip's diameter plus this padding on each side,
-/// matching the reviewed 88px pill mock. The scrolling box also leaves it below
-/// its last drawn line, so both caption families hug their text.
+/// matching the reviewed 88px pill mock.
 const LIVE_TEXT_VPADDING: f32 = 23.0;
 /// The leading phase chip's radius and the gap between it and the text.
 const LIVE_TEXT_CHIP_RADIUS: f32 = 21.0;
