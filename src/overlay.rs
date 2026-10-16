@@ -1684,10 +1684,15 @@ fn boxed_surface_height(phase: Option<Phase>, live_text: Option<&LiveText>) -> u
         Some(text) => {
             text::caption_lines(&text.committed, &text.tentative, boxed_text_max_width()).len()
         }
-        // No words yet: only a terminal phase draws a short status line below
-        // the chip row; every other phase (the listening pad, the transcribing
-        // spinner, idle) shares the chip row and draws nothing more.
-        None => usize::from(phase.and_then(phase_message).is_some()),
+        // No words yet: only a terminal phase draws a status line below the
+        // chip row; every other phase (the listening pad, the transcribing
+        // spinner, idle) shares the chip row and draws nothing more. The status
+        // line wraps like captured words, so it can reserve more than one row
+        // (the config-error pointer wraps at the box width).
+        None => phase
+            .and_then(phase_message)
+            .map(|message| text::caption_lines(message, "", boxed_text_max_width()).len())
+            .unwrap_or(0),
     };
     let content = if lines == 0 {
         LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_PADDING
@@ -2575,9 +2580,27 @@ fn paint_live_text(
                     tentative: LIVE_TEXT_COMMITTED,
                     alpha: 0.9,
                 };
-                let line = text::caption_line(message, "");
-                let message_y = if boxed { boxed_text_top() } else { y_top };
-                text::draw_line(canvas, text_x, message_y, &line, &colors, None);
+                if boxed {
+                    // The box wraps the status message exactly as it wraps
+                    // captured words, so a longer line (the config-rejected
+                    // pointer) stays fully visible instead of clipping at the
+                    // card's fixed width.
+                    let status = LiveText {
+                        committed: message.to_string(),
+                        tentative: String::new(),
+                    };
+                    text::draw_caption(
+                        canvas,
+                        LIVE_TEXT_PADDING,
+                        boxed_text_top(),
+                        boxed_text_max_width(),
+                        &status,
+                        colors,
+                    );
+                } else {
+                    let line = text::caption_line(message, "");
+                    text::draw_line(canvas, text_x, y_top, &line, &colors, None);
+                }
             }
         }
     }
@@ -3865,6 +3888,53 @@ mod tests {
             chip_region(&status),
             chip_region(&words),
             "the box's no-words status message must not paint over the phase chip"
+        );
+    }
+
+    #[test]
+    fn boxed_config_error_status_wraps_so_the_whole_message_renders() {
+        // The box card is narrower than the config-error pointer, so the status
+        // message must wrap like captured words; drawn as one clipped line, no
+        // text would appear below the first row.
+        let message = phase_message(Phase::ConfigError).expect("config error has a status");
+        let max_width = LIVE_TEXT_BOX_SURFACE.0 as f32 - 2.0 * LIVE_TEXT_PADDING;
+        assert!(
+            text::caption_lines(message, "", max_width).len() > 1,
+            "the config-error pointer must wrap inside the box: {message:?}"
+        );
+
+        let (width, _) = surface_size_for(Style::LiveTextBox);
+        let first_row_top = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 12.0;
+        let row_height = text::CAPTION_LINE_HEIGHT;
+        let text_ink = |pixels: &[u8], top: f32, bottom: f32| -> usize {
+            (top as u32..bottom as u32)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let index = ((y * width + x) * 4) as usize;
+                    pixels[index] > 150 && pixels[index + 1] > 150 && pixels[index + 2] > 150
+                })
+                .count()
+        };
+        let pixels = paint_to_pixels_with_live_text(
+            Some(Phase::ConfigError),
+            0.0,
+            0.0,
+            true,
+            Style::LiveTextBox,
+            &quiet_history(),
+            None,
+        );
+        assert!(
+            text_ink(&pixels, first_row_top, first_row_top + row_height) > 0,
+            "the config-error status message must paint its first line"
+        );
+        assert!(
+            text_ink(
+                &pixels,
+                first_row_top + row_height,
+                first_row_top + 2.0 * row_height,
+            ) > 0,
+            "the wrapped tail of the config-error message must render below the first line"
         );
     }
 
