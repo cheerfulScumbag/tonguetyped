@@ -730,8 +730,9 @@ TongueTyped reads `$XDG_CONFIG_HOME/tonguetyped/config.toml`. Almost everything
 is editable from `tonguetyped setup` and the dashboard; the file is there when
 you want to script it. The running daemon watches this file and applies a valid
 edit live, so you do not have to run `tonguetyped reload` or restart it; an
-invalid edit is rejected and reported in `tonguetyped status`, leaving the last
-good config in effect. A representative slice:
+invalid edit is rejected, the overlay cues that the edit was rejected, and
+`tonguetyped status` carries the detail, leaving the last good config in
+effect. A representative slice:
 
 ```toml
 [activation]
