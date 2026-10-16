@@ -1002,6 +1002,35 @@ pub(crate) fn shows_shape_choice(style_name: &str, look: &str) -> bool {
     offers_shape(style) && resolved_look(style, look) == Look::Waveform
 }
 
+/// Clamps a configured look value to one the style offers: the value unchanged
+/// when the style offers it (and for a style with no look options - the blob,
+/// which ignores the look - the stored value is left alone), else the style's
+/// first offered look. The single owner of the value-level clamping, shared by
+/// the config load/reload migration and the settings screen, so a stored look
+/// can never conflict with its style.
+pub(crate) fn clamp_look_value(style_name: &str, look: &str) -> String {
+    let options = style_look_options(style_name);
+    if options.is_empty() || options.iter().any(|(value, _)| *value == look) {
+        look.to_string()
+    } else {
+        options[0].0.to_string()
+    }
+}
+
+/// The look a legacy `[overlay] live_waveform` / `streaming_indicator` boolean
+/// folds into: the caption styles always painted live text, so they keep
+/// showing it; every other style maps `true` to the waveform look and `false`
+/// to its plain resting shape.
+pub(crate) fn legacy_waveform_look(style_name: &str, live_waveform: bool) -> &'static str {
+    if is_live_text_style(style_for(style_name)) {
+        "live-text"
+    } else if live_waveform {
+        "waveform"
+    } else {
+        "plain"
+    }
+}
+
 /// The display label of a configured look value, falling back to `Waveform`.
 pub(crate) fn look_label(value: &str) -> &'static str {
     match value {
@@ -1763,10 +1792,9 @@ fn caption_variant(configured: Style) -> Style {
     }
 }
 
-/// Whether `style` is one of the `live-text` caption variants. Used by the
-/// offline tests that treat the caption family specially.
-#[cfg(test)]
-fn is_caption_style(style: Style) -> bool {
+/// Whether `style` is one of the `live-text` caption variants: the styles that
+/// can paint streaming text.
+pub(crate) fn is_live_text_style(style: Style) -> bool {
     matches!(style, Style::LiveText | Style::LiveTextBox)
 }
 
@@ -3989,7 +4017,7 @@ mod tests {
             committed: "today I am".to_string(),
             tentative: " testing".to_string(),
         };
-        for style in ALL_STYLES.into_iter().filter(|s| !is_caption_style(*s)) {
+        for style in ALL_STYLES.into_iter().filter(|s| !is_live_text_style(*s)) {
             let without = paint_to_pixels_with_live_text(
                 Some(Phase::Recording),
                 0.25,
@@ -4469,7 +4497,7 @@ mod tests {
         // the long pill's squiggle is the whole style. The caption styles ignore
         // it too: they paint words or the listening pad, never a waveform.
         for style in ALL_STYLES.into_iter().filter(|style| {
-            !matches!(style, Style::Blob | Style::LongPill) && !is_caption_style(*style)
+            !matches!(style, Style::Blob | Style::LongPill) && !is_live_text_style(*style)
         }) {
             let default_pixels = paint_to_pixels(Some(Phase::Recording), 0.25, false, style);
             let streaming_pixels = paint_to_pixels(Some(Phase::Recording), 0.25, true, style);
@@ -5398,7 +5426,7 @@ mod tests {
         };
         for style in ALL_STYLES
             .into_iter()
-            .filter(|style| !is_caption_style(*style))
+            .filter(|style| !is_live_text_style(*style))
         {
             // Only the waveform look reacts to the microphone; the plain look is
             // deliberately still, so it is not checked here.

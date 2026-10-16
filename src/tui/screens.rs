@@ -983,13 +983,7 @@ impl OverlayScreen {
     /// does not offer snaps to the style's first option. A style with no
     /// options (the blob) is left alone.
     fn clamp_pending_look(&mut self) {
-        let options = overlay::style_look_options(&self.style);
-        let Some((first, _)) = options.first() else {
-            return;
-        };
-        if !options.iter().any(|(value, _)| *value == self.look) {
-            self.look = (*first).to_string();
-        }
+        self.look = overlay::clamp_look_value(&self.style, &self.look);
     }
 
     /// Steps the highlighted row's pending value. The enable row clamps between
