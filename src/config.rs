@@ -831,6 +831,21 @@ impl HistoryConfig {
         };
         format!("{entries}, {age}")
     }
+
+    /// How the transcript-folder export reads in a configuration summary: the
+    /// folder path when the export is active, or a gated label when no file
+    /// would be written - either because the folder is empty or because
+    /// keeping transcripts is off.
+    pub fn folder_summary(&self) -> String {
+        let folder = self.transcript_folder.trim();
+        if !self.enabled {
+            "disabled (history off)".to_string()
+        } else if folder.is_empty() {
+            "disabled".to_string()
+        } else {
+            folder.to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1473,6 +1488,25 @@ mod tests {
             unlimited.history.retention_summary(),
             "unlimited entries, unlimited age"
         );
+    }
+
+    #[test]
+    fn history_folder_summary_gates_on_keeping_transcripts() {
+        let mut config = Config::default();
+        config.history.enabled = true;
+        config.history.transcript_folder = "/tmp/tt-out".to_string();
+        assert_eq!(config.history.folder_summary(), "/tmp/tt-out");
+
+        config.history.enabled = false;
+        assert_eq!(
+            config.history.folder_summary(),
+            "disabled (history off)",
+            "a folder set while keeping transcripts is off must not read as active"
+        );
+
+        config.history.enabled = true;
+        config.history.transcript_folder = String::new();
+        assert_eq!(config.history.folder_summary(), "disabled");
     }
 
     #[test]

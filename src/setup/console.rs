@@ -1660,11 +1660,7 @@ impl ConsoleState {
             )),
             Line::from(format!(
                 "Folder:      {}",
-                if self.config.history.transcript_folder.trim().is_empty() {
-                    "disabled".to_string()
-                } else {
-                    self.config.history.transcript_folder.clone()
-                }
+                self.config.history.folder_summary()
             )),
             Line::from(format!(
                 "Autostart:   {}",

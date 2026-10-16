@@ -40,9 +40,9 @@ an interactive dashboard for every setting.
   app through `wtype`, `dotool`, `enigo`, or a built-in native `libei` session -
   whichever actually works on your compositor. When typing fails, the transcript
   is left on the clipboard.
-- **Dictate into files.** Point `transcript_folder` at a directory and every
-  finished transcript is also written there as a plain-text file, independent of
-  the focused app or the clipboard.
+- **Dictate into files.** Point `transcript_folder` at a directory and, while
+  keeping transcripts is on, every finished transcript is also written there as
+  a plain-text file, independent of the focused app or the clipboard.
 - **Unobtrusive feedback.** A click-through overlay shows recording,
   transcribing, success, and failure - nine styles, on any number of screens.
 - **Terminal-native control.** Script it, or use the dashboard. Every command is
