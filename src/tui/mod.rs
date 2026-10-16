@@ -1783,8 +1783,14 @@ impl App {
             ])
             .split(area);
 
-        frame.render_widget(screen.list_widget(chunks[0].height), chunks[0]);
-        frame.render_widget(screen.backend_widget(), chunks[1]);
+        frame.render_widget(
+            screen.list_widget(chunks[0].width.saturating_sub(2) as usize, chunks[0].height),
+            chunks[0],
+        );
+        frame.render_widget(
+            screen.backend_widget(chunks[1].width.saturating_sub(2) as usize),
+            chunks[1],
+        );
         let chunks = &chunks[1..];
 
         match &self.pending {
@@ -1832,7 +1838,10 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(4), Constraint::Length(1)])
             .split(area);
-        frame.render_widget(screen.list_widget(&self.config), chunks[0]);
+        frame.render_widget(
+            screen.list_widget(&self.config, chunks[0].width.saturating_sub(2) as usize),
+            chunks[0],
+        );
         frame.render_widget(
             Paragraph::new("↑/↓ row   Enter apply   Esc/\u{232b} back   q quit"),
             chunks[1],
@@ -2031,9 +2040,10 @@ impl App {
             .constraints([Constraint::Min(6), Constraint::Length(1)])
             .split(area);
         frame.render_widget(
-            screen.body(&activation::keybind_display(
-                &self.config.activation.keybind,
-            )),
+            screen.body(
+                &activation::keybind_display(&self.config.activation.keybind),
+                chunks[0].width.saturating_sub(2) as usize,
+            ),
             chunks[0],
         );
         frame.render_widget(Paragraph::new(screen.footer()), chunks[1]);

@@ -98,12 +98,13 @@ impl ModelScreen {
         self.backends.len() as u16 + 2
     }
 
-    pub(super) fn backend_widget(&self) -> Paragraph<'static> {
+    pub(super) fn backend_widget(&self, width: usize) -> Paragraph<'static> {
         let focused = self.focus == ModelFocus::Backend;
         let lines = backend_panel_lines(
             &self.backends,
             &self.configured_backend,
             focused.then_some(self.backend_selected),
+            width,
         );
         Paragraph::new(lines).block(
             Block::default()
@@ -113,7 +114,7 @@ impl ModelScreen {
         )
     }
 
-    pub(super) fn list_widget(&self, height: u16) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, width: usize, height: u16) -> Paragraph<'static> {
         let lines: Vec<Line> = self
             .rows
             .iter()
@@ -146,8 +147,9 @@ impl ModelScreen {
                     status,
                     row.info.language_summary(),
                 );
-                let style = selection_style(highlighted);
-                Line::from(Span::styled(text, style))
+                let mut spans = vec![Span::styled(text, selection_style(highlighted))];
+                pad_selected_row(&mut spans, highlighted, width);
+                Line::from(spans)
             })
             .collect();
         let visible_rows = usize::from(height.saturating_sub(2)).max(1);
@@ -232,11 +234,13 @@ fn focus_border(focused: bool) -> Style {
 /// disagree about which backends exist, which are usable, or which is active.
 /// Only usable backends are selectable; every unavailable one stays listed
 /// with its reason. `cursor` is the index *among usable backends* to
-/// highlight, or `None` when the panel is not focused.
+/// highlight, or `None` when the panel is not focused; the selected row is a
+/// full-width highlight bar within `width` (the panel's inner width).
 fn backend_panel_lines(
     backends: &[BackendChoice],
     configured: &str,
     cursor: Option<usize>,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = backends
         .iter()
@@ -254,14 +258,9 @@ fn backend_panel_lines(
                 "{marker}{:<53} {status}",
                 crate::inference::backend_preference_label(choice.name)
             );
-            let style = if highlighted {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(text, style))
+            let mut spans = vec![Span::styled(text, selection_style(highlighted))];
+            pad_selected_row(&mut spans, highlighted, width);
+            Line::from(spans)
         })
         .collect();
     lines.extend(backends.iter().filter_map(|choice| {
@@ -317,11 +316,12 @@ impl BackendScreen {
         self.usable_backends().nth(self.selected)
     }
 
-    pub(super) fn list_widget(&self, config: &Config) -> Paragraph<'static> {
+    pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
         let lines = backend_panel_lines(
             &self.backends,
             &config.model.preferred_backend,
             Some(self.selected),
+            width,
         );
         Paragraph::new(lines).block(
             Block::default()
@@ -621,7 +621,7 @@ impl ShortcutScreen {
         self.selected_action = next;
     }
 
-    pub(super) fn body(&self, bound: &str) -> Paragraph<'static> {
+    pub(super) fn body(&self, bound: &str, width: usize) -> Paragraph<'static> {
         let mut lines = vec![
             Line::from(format!("Currently bound: {bound}")),
             Line::from(
@@ -633,10 +633,12 @@ impl ShortcutScreen {
         for (index, action) in SHORTCUT_ACTIONS.iter().enumerate() {
             let selected = index == self.selected_action;
             let marker = if selected { "> " } else { "  " };
-            lines.push(Line::from(Span::styled(
+            let mut spans = vec![Span::styled(
                 format!("{marker}{action}"),
                 selection_style(selected),
-            )));
+            )];
+            pad_selected_row(&mut spans, selected, width);
+            lines.push(Line::from(spans));
         }
         lines.push(Line::from(""));
         lines.push(self.status_line());
@@ -682,8 +684,7 @@ impl ShortcutScreen {
 
 /// Transcript output: the four methods, then - for the methods that insert
 /// text - Enter-after and, for `paste`, the paste keys. Like the Overlay
-/// screen, the option rows follow the saved method, and Enter on one toggles
-/// or cycles its value.
+/// screen, the option rows change only on `←`/`→`; `Enter` only saves.
 pub(super) struct OutputScreen {
     pub labels: Vec<String>,
     pub selected: usize,
@@ -2076,7 +2077,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| frame.render_widget(screen.backend_widget(), frame.area()))
+            .draw(|frame| frame.render_widget(screen.backend_widget(78), frame.area()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let area = *buffer.area();
@@ -2119,7 +2120,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| frame.render_widget(screen.list_widget(config), frame.area()))
+            .draw(|frame| frame.render_widget(screen.list_widget(config, 78), frame.area()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let area = *buffer.area();
@@ -2159,6 +2160,69 @@ mod tests {
             text.contains("cuda unavailable"),
             "the unavailable backend should still be listed:\n{text}"
         );
+    }
+
+    fn rendered_buffer(
+        widget: impl ratatui::widgets::Widget,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(widget, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Renders a widget and asserts the row it draws as a highlight bar fills
+    /// the whole inner width, not just the width of its text.
+    fn assert_full_width_highlight_bar(
+        buffer: &ratatui::buffer::Buffer,
+        inner_left: u16,
+        inner_width: u16,
+    ) {
+        let area = *buffer.area();
+        let row = (area.y..area.y + area.height)
+            .find(|&y| (area.x..area.x + area.width).any(|x| buffer[(x, y)].bg == Color::Cyan))
+            .expect("expected exactly one row drawn as a highlight bar");
+        for x in inner_left..inner_left + inner_width {
+            assert_eq!(
+                buffer[(x, row)].bg,
+                Color::Cyan,
+                "cell ({x},{row}) should be part of the full-width highlight bar"
+            );
+        }
+    }
+
+    #[test]
+    fn shortcut_selected_action_row_is_a_full_width_highlight_bar() {
+        let screen = ShortcutScreen::new(&Config::default());
+        let buffer = rendered_buffer(screen.body("Super+T", 40), 42, 10);
+        assert_full_width_highlight_bar(&buffer, 1, 40);
+    }
+
+    #[test]
+    fn model_catalog_selected_row_is_a_full_width_highlight_bar() {
+        let screen = ModelScreen::new(&Config::default(), choices());
+        let buffer = rendered_buffer(screen.list_widget(100, 12), 102, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 100);
+    }
+
+    #[test]
+    fn model_backend_panel_selected_row_is_a_full_width_highlight_bar() {
+        let mut screen = ModelScreen::new(&Config::default(), choices());
+        screen.toggle_focus();
+        let buffer = rendered_buffer(screen.backend_widget(78), 80, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 78);
+    }
+
+    #[test]
+    fn dedicated_backend_selected_row_is_a_full_width_highlight_bar() {
+        let config = Config::default();
+        let screen = BackendScreen::new(&config, choices());
+        let buffer = rendered_buffer(screen.list_widget(&config, 78), 80, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 78);
     }
 
     fn rendered_widget(widget: impl ratatui::widgets::Widget, width: u16, height: u16) -> String {
