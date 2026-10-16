@@ -2638,14 +2638,8 @@ fn paint_long_pill(
                             alpha: 0.9,
                         };
                         let line = text::caption_line(message, "");
-                        let line_w = text::line_width(&line);
                         let available = (line_end - line_start).max(40.0);
-                        let (x, clip) = if line_w <= available {
-                            (line_start, None)
-                        } else {
-                            (line_end - line_w, Some(line_start))
-                        };
-                        text::draw_line(canvas, x, y_top, &line, &colors, clip);
+                        text::draw_line_fitted(canvas, line_start, cy, &line, &colors, available);
                     }
                 }
             },
@@ -5669,6 +5663,49 @@ mod tests {
         assert_ne!(
             original, rolled,
             "new audio should roll the long pill's trace"
+        );
+    }
+
+    #[test]
+    fn long_pill_live_text_status_message_keeps_its_head_visible() {
+        // The long pill is a fixed-width frame: a status message wider than the
+        // bar must be shrunk to fit with its head at the text origin, not
+        // left-clipped to its tail by the streaming-words marquee.
+        let (width, height) = surface_size_for(Style::LongPill);
+        let message = phase_message(Phase::ConfigError).expect("config error has a status");
+        let line = text::caption_line(message, "");
+        let line_start = width as f32 * 0.039;
+        let button_radius = height as f32 * 0.376;
+        let button_cx = width as f32 - height as f32 * 0.516;
+        let available = (button_cx - button_radius - height as f32 * 0.21) - line_start;
+        assert!(
+            text::line_width(&line) > available,
+            "the config-error status must overflow the bar at full size for this test to bite"
+        );
+
+        let pixels = paint_to_pixels_with_look(
+            Some(Phase::ConfigError),
+            0.0,
+            0.0,
+            Look::LiveText,
+            WaveformShape::Squiggle,
+            Style::LongPill,
+            &quiet_history(),
+            None,
+        );
+        let text_band_end = (button_cx - button_radius) as u32 - 1;
+        let bright = |x: u32, y: u32| -> bool {
+            let index = ((y * width + x) * 4) as usize;
+            let pixel = &pixels[index..index + 4];
+            pixel[0] > 150 && pixel[1] > 150 && pixel[2] > 150 && pixel[3] > 150
+        };
+        let leftmost = (line_start as u32..text_band_end)
+            .find(|&x| (0..height).any(|y| bright(x, y)))
+            .expect("the status message must paint text");
+        assert!(
+            leftmost <= line_start as u32 + 6,
+            "the whole status message must stay visible: it starts at x={leftmost}, \
+             but the text origin is x={line_start}"
         );
     }
 

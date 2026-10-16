@@ -203,6 +203,46 @@ pub(super) fn draw_line(
     let scale = PxScale::from(CAPTION_FONT_SIZE);
     let scaled = font.as_scaled(scale);
     let baseline = y_top + scaled.ascent();
+    draw_glyphs(canvas, font, scale, x, baseline, line, colors, clip_left);
+}
+
+/// Draw one laid-out line scaled down just enough to fit `max_width`, left
+/// aligned at `x` and vertically centred on `y_center`, with no clipping. Used
+/// for a fixed-width frame's status message so the whole message stays visible
+/// instead of the newest-words marquee clipping its head.
+pub(super) fn draw_line_fitted(
+    canvas: &mut Canvas,
+    x: f32,
+    y_center: f32,
+    line: &LaidLine,
+    colors: &CaptionColors,
+    max_width: f32,
+) {
+    let Some(font) = font() else { return };
+    let natural = line_width(line);
+    let size = if natural > max_width && natural > 0.0 {
+        CAPTION_FONT_SIZE * max_width / natural
+    } else {
+        CAPTION_FONT_SIZE
+    };
+    let scale = PxScale::from(size);
+    let baseline = y_center - size * 0.62 + font.as_scaled(scale).ascent();
+    draw_glyphs(canvas, font, scale, x, baseline, line, colors, None);
+}
+
+/// The glyph blend loop shared by the fixed-size and fitted single-line draws.
+#[allow(clippy::too_many_arguments)]
+fn draw_glyphs(
+    canvas: &mut Canvas,
+    font: &FontVec,
+    scale: PxScale,
+    x: f32,
+    baseline: f32,
+    line: &LaidLine,
+    colors: &CaptionColors,
+    clip_left: Option<f32>,
+) {
+    let scaled = font.as_scaled(scale);
     let mut cursor = x;
     for laid in &line.chars {
         let ch = laid.ch;
