@@ -669,10 +669,12 @@ impl ShortcutScreen {
     /// The key legend, aware of the in-flight state: while the desktop's
     /// settings window is open, Enter keeps the current binding and Ctrl+R
     /// reopens the dialog, so a window closed with no change is never a dead
-    /// end.
+    /// end. While the portal test runs only back is honored, so the legend
+    /// names only that.
     pub(super) fn footer(&self) -> &'static str {
         match self.status {
             ShortcutStatus::DialogOpen => "Enter keep current   Ctrl+R reopen   Esc/\u{232b} back",
+            ShortcutStatus::Testing => "Esc/\u{232b} back",
             _ => "↑/↓ row   Enter run   Ctrl+R dialog   Esc/\u{232b} back",
         }
     }

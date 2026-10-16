@@ -2862,6 +2862,30 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_testing_footer_names_only_the_back_key_it_handles() {
+        let mut app = App::new(Config::default());
+        app.open_setting(SettingId::Shortcut);
+        if let Screen::Shortcut(screen) = &mut app.screen {
+            screen.status = screens::ShortcutStatus::Testing;
+        }
+
+        let Screen::Shortcut(screen) = &app.screen else {
+            panic!("the Shortcut screen must stay open");
+        };
+        let footer = screen.footer();
+        assert!(
+            footer.contains("Esc") && footer.contains('\u{232b}'),
+            "the testing legend must still name back: {footer}"
+        );
+        for ignored in ["Enter", "Ctrl+R", "\u{2191}/\u{2193}"] {
+            assert!(
+                !footer.contains(ignored),
+                "the testing legend must not advertise {ignored} while it is ignored: {footer}"
+            );
+        }
+    }
+
+    #[test]
     fn a_passed_test_never_fabricates_a_binding() {
         use crate::activation::ShortcutTestOutcome;
 
