@@ -608,10 +608,10 @@ can stream across the overlay, and the finalized text is typed when you stop.
 Whether a model can do this is a property of the model, not a setting, so the
 live decode runs the way Handy does it. Whether the words are *shown* is your
 call: choose a live-capable style's `live-text` look (see "Overlay" above) to
-see them. `tonguetyped model list` marks the streaming models with a `live (en)`
-tag under **STREAMING**, and the dashboard's model screen tags them `LIVE`; the
-rest of the catalog produces no live text and shows only the recording
-indicator.
+see them. `tonguetyped model list` marks the streaming models with a `live` tag
+under **STREAMING** (or `live (en)` for the English-only ones), and the
+dashboard's model screen tags them `LIVE`; the rest of the catalog produces no
+live text and shows only the recording indicator.
 
 Four things to know before choosing a streaming model:
 
@@ -636,25 +636,32 @@ Four things to know before choosing a streaming model:
 - **Live text and the waveform never appear together.** A style set to the
   `live-text` look paints words (or the listening pad) and never a waveform;
   every other look paints its own recording animation and never live words.
-- **Every streaming model is English-only.** The small, fast models that stream
-  have no multilingual variant, so live text is an English feature. Pick a
-  Whisper (or other multilingual) model when you dictate in another language;
-  you keep the full transcript, just without live text.
+- **Most streaming models are English-only, but not all.** The small, fast
+  Moonshine-streaming and English Parakeet ports stream English only; the
+  multilingual Parakeet-family and Voxtral-realtime ports stream their own
+  language sets and are tagged `live` (no `(en)`) in `model list`. Pick a
+  Whisper (or another multilingual offline) model when a streaming model does
+  not cover your language; you keep the full transcript, just without live
+  text.
 
 Streaming models are recorded through the model's own native stream (nothing is
 re-decoded on a timer), so the feature costs no extra CPU beyond the model
 itself. A streaming model has no separate batch decode: the finalized text is
 the transcript.
 
-A streaming model's stream has a fixed output window - Moonshine-streaming caps
-its decoder at roughly 48 s of English - and once one stream reaches that cap it
-stops emitting words. So a live recording is decoded as a sequence of segments:
-when the running segment reaches the model-aware window (half the model's
-advertised ceiling, about 24 s), its text is committed and a fresh stream starts
-on the audio that follows, keeping the live text flowing for a long dictation.
-Each segment boundary is placed in a pause where the audio has one, and the
-finished segments are joined with a single space, so nothing at the seam is
-dropped or duplicated.
+Some streaming models have a fixed output window - Moonshine-streaming caps its
+decoder at roughly 48 s of English - and once one stream reaches that cap it
+stops emitting words. Those are decoded as a sequence of segments: when the
+running segment reaches the model-aware window (half the model's advertised
+ceiling, about 24 s), its text is committed and a fresh stream starts on the
+audio that follows, keeping the live text flowing for a long dictation. Each
+segment boundary is placed in a pause where the audio has one, and the finished
+segments are joined with a single space, so nothing at the seam is dropped or
+duplicated. The unbounded streaming ports (Parakeet, Voxtral-realtime) advertise
+no model cap, but each live segment is still bounded by the decode window
+(`transcription.chunk_seconds`, 30 s by default), so they roll over the same
+way; set `chunk_seconds = 0` to run a single stream to the end of the recording
+instead.
 
 ### Long recordings and file transcription
 
@@ -802,12 +809,12 @@ substitutes a different model or family.
 **A curated catalog.** `src/catalog.rs` tracks reviewed GGUF models from the
 offline families this project has checked against its VAD-then-single-buffer
 pipeline (whisper, parakeet, moonshine, canary, and cohere), plus the streaming
-`moonshine_streaming` ports that feed live text (see "Live text" above), all
-published by
+ports that feed live text (Moonshine-streaming, several Parakeet variants, and
+Voxtral-realtime; see "Live text" above), all published by
 [handy-computer](https://huggingface.co/handy-computer). Each entry is pinned to
 a commit with an expected byte size and SHA-256, and `tonguetyped model list`
-labels it with its family and language coverage (and its `live (en)` streaming
-tag). Families differ in how much
+labels it with its family and language coverage (and its `live`/`live (en)`
+streaming tag). Families differ in how much
 audio one call accepts: whisper and parakeet take any length, moonshine's
 decoder has a fixed output budget (about 48 s of English, kept partially if a
 run still hits it), and canary and

@@ -452,13 +452,16 @@ fn configure(
     let model_labels: Vec<String> = crate::catalog::ENTRIES
         .iter()
         .map(|entry| {
-            if entry.info().supports_streaming() {
-                format!(
-                    "{}  (live text with a live-text look, English only)",
-                    entry.id
-                )
-            } else {
-                entry.id.to_string()
+            let info = entry.info();
+            match (info.supports_streaming(), info.is_english_only()) {
+                (false, _) => entry.id.to_string(),
+                (true, true) => {
+                    format!(
+                        "{}  (live text with a live-text look, English only)",
+                        entry.id
+                    )
+                }
+                (true, false) => format!("{}  (live text with a live-text look)", entry.id),
             }
         })
         .collect();
