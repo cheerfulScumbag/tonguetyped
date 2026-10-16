@@ -1682,10 +1682,10 @@ fn boxed_surface_height(phase: Option<Phase>, live_text: Option<&LiveText>) -> u
         Some(text) => {
             text::caption_lines(&text.committed, &text.tentative, boxed_text_max_width()).len()
         }
-        // No words yet: the listening pad shares the chip row.
-        None if phase == Some(Phase::Recording) => 0,
-        // A terminal phase with no words draws one short status line.
-        None => 1,
+        // No words yet: only a terminal phase draws a short status line below
+        // the chip row; every other phase (the listening pad, the transcribing
+        // spinner, idle) shares the chip row and draws nothing more.
+        None => usize::from(phase.and_then(phase_message).is_some()),
     };
     let content = if lines == 0 {
         LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_PADDING
@@ -3950,6 +3950,35 @@ mod tests {
         assert!(
             box_height("one two three") < many,
             "a short phrase must shrink the box back down"
+        );
+    }
+
+    #[test]
+    fn the_empty_box_reserves_a_row_only_for_a_drawn_status_line() {
+        // With no captured words the box must reserve a text row only when a
+        // status line is actually drawn below the chip: a terminal phase draws
+        // one. Recording (the listening pad shares the chip row), Transcribing
+        // (the spinner chip is the whole caption), and idle draw none, so the
+        // box hugs the chip row instead of leaving a dead band.
+        let height = |phase: Option<Phase>| caption_surface_size(Style::LiveTextBox, phase, None).1;
+        assert_eq!(
+            height(Some(Phase::Recording)),
+            LIVE_TEXT_BOX_MIN_HEIGHT,
+            "the listening pad shares the chip row"
+        );
+        assert_eq!(
+            height(Some(Phase::Transcribing)),
+            LIVE_TEXT_BOX_MIN_HEIGHT,
+            "transcribing with no words draws no line below the chip"
+        );
+        assert_eq!(
+            height(None),
+            LIVE_TEXT_BOX_MIN_HEIGHT,
+            "the idle box draws nothing, so it must not reserve a row"
+        );
+        assert!(
+            height(Some(Phase::Success)) > LIVE_TEXT_BOX_MIN_HEIGHT,
+            "a terminal status message reserves its one drawn row"
         );
     }
 
