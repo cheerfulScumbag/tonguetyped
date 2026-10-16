@@ -166,27 +166,46 @@ const CANCELLED_COLOR: (u8, u8, u8) = (0x86, 0x8E, 0x96);
 const ERROR_COLOR: (u8, u8, u8) = (0xC9, 0x2A, 0x2A);
 const GLYPH_COLOR: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
 
-/// The `LiveText` style's surface ceiling: a pill sized for a long caption line
-/// plus padding (the reviewed mockup's 720x96). The single-line caption is
-/// content-sized between [`LIVE_TEXT_MIN_WIDTH`] and this ceiling, so an empty
-/// or short caption renders as a small pill instead of a wide, mostly-empty
-/// bar; it is anchored at the configured `overlay.position` like the badge
-/// styles. The box style keeps its own fixed taller surface below.
+/// The single-line caption's surface ceiling: a pill sized for a long caption
+/// line plus padding (the reviewed mockup's 720x96). The single-line caption is
+/// content-sized in width between [`LIVE_TEXT_MIN_WIDTH`] and this ceiling and
+/// in height from its chip slot and [`LIVE_TEXT_VPADDING`], so an empty or
+/// short caption renders as a small pill that hugs its content instead of a
+/// wide, mostly-empty bar; it is anchored at the configured `overlay.position`
+/// like the badge styles. The box style shares the content-sizing but keeps its
+/// own wrapping surface; see [`LIVE_TEXT_BOX_SURFACE`].
 const LIVE_TEXT_SURFACE: (u32, u32) = (720, 96);
 /// The narrowest the single-line caption pill shrinks to: wide enough for the
 /// empty state's cue and listening pad without collapsing to a stub.
 const LIVE_TEXT_MIN_WIDTH: u32 = 150;
-/// The `LiveTextBox` style's surface: a taller card that wraps several lines
-/// and scrolls internally, for long passages.
+/// The `LiveTextBox` style's surface: a wrapping card that grows to fit its
+/// lines and scrolls internally past [`text::CAPTION_MAX_LINES`], for long
+/// passages. The width is fixed (it sets the wrap measure); the height is
+/// content-sized from the card's own top/bottom padding up to this ceiling.
 const LIVE_TEXT_BOX_SURFACE: (u32, u32) = (400, 320);
 /// Inset of the card's dark background from the surface edge, leaving room for
 /// the capsule's anti-aliased ends to fade out before the surface boundary.
 const LIVE_TEXT_INSET: f32 = 4.0;
 /// Left/right padding between the card edge and the contents.
 const LIVE_TEXT_PADDING: f32 = 26.0;
+/// The single-line capsule's vertical padding above and below the phase chip:
+/// the capsule is exactly the chip's diameter plus this padding on each side,
+/// matching the reviewed 88px pill mock.
+const LIVE_TEXT_VPADDING: f32 = 23.0;
 /// The leading phase chip's radius and the gap between it and the text.
 const LIVE_TEXT_CHIP_RADIUS: f32 = 21.0;
 const LIVE_TEXT_CHIP_GAP: f32 = 15.0;
+/// Gap between the scrolling box's leading chip row and its first text row.
+const LIVE_TEXT_BOX_CHIP_GAP: f32 = 12.0;
+/// The smallest the scrolling box shrinks to: the chip row plus its padding,
+/// the empty listening state before the first word.
+const LIVE_TEXT_BOX_MIN_HEIGHT: u32 = 96;
+/// The caption surface is quantised up to this many pixels: a word-by-word
+/// change that does not move the measured size by a whole step never resizes
+/// the layer. Only a quantised change commits a new `set_size` (the surface/
+/// `layer_spec` note in the PR 74 report), so the layer is not resized per
+/// frame while words stream in.
+const LIVE_TEXT_SIZE_QUANTUM: u32 = 8;
 /// The card's dark glass fill: a vertical gradient from a lifted top to a
 /// near-black bottom, under a just-under-solid opacity so it reads as glass.
 const LIVE_TEXT_BACKGROUND_TOP: (u8, u8, u8) = (0x26, 0x26, 0x2B);
@@ -698,11 +717,12 @@ impl State {
     }
 
     /// The size to request for `style` given the current content. Every style
-    /// uses its fixed representative size except the single-line caption
-    /// styles, whose pill is measured from the cue plus the current line (or
-    /// the listening pad / status message) and clamped between
-    /// [`LIVE_TEXT_MIN_WIDTH`] and [`LIVE_TEXT_SURFACE`]. A full-screen style
-    /// requests `(0, 0)` so the compositor stretches it to the output.
+    /// uses its fixed representative size except the caption styles, which are
+    /// content-measured (see [`caption_surface_size`]): the single-line pill and
+    /// the scrolling box both hug their text, and every caption size is
+    /// quantised so the layer is not resized for each frame of a streamed
+    /// partial. A full-screen style requests `(0, 0)` so the compositor
+    /// stretches it to the output.
     fn desired_layer_size(&self, style: Style) -> (u32, u32) {
         if is_fullscreen_style(style) {
             return (0, 0);
@@ -1196,9 +1216,14 @@ impl LayerShellHandler for State {
         };
         let (width, height) = configure.new_size;
         // A full-screen style's real size arrives here (the compositor fills in
-        // the stretched dimensions); fall back to the style's representative
-        // size only if a compositor reports a zero dimension.
-        let fallback = surface_size_for(self.style);
+        // the stretched dimensions); fall back only if a compositor reports a
+        // zero dimension. The caption styles fall back to their content-measured
+        // size, the rest to their fixed representative size.
+        let fallback = if is_fullscreen_style(self.style) {
+            surface_size_for(self.style)
+        } else {
+            self.desired_layer_size(self.style)
+        };
         let (width, height) = (
             if width == 0 { fallback.0 } else { width },
             if height == 0 { fallback.1 } else { height },
@@ -1576,8 +1601,9 @@ pub(crate) enum Style {
     /// The streaming caption, minimal variant: the same single-line card with a
     /// single leading phase dot instead of the full chip.
     LiveTextMinimal,
-    /// The streaming caption, box variant: a taller wrapped card that scrolls
-    /// internally, for long passages.
+    /// The streaming caption, box variant: the same content sizing but a
+    /// wrapping card that grows a line per wrapped row and scrolls internally
+    /// past its cap, for long passages.
     LiveTextBox,
 }
 
@@ -1608,12 +1634,73 @@ fn is_caption_style(style: Style) -> bool {
     )
 }
 
-/// The surface size for a caption style. The box keeps its fixed taller wrapped
-/// card; the single-line variants are content-measured, so an empty or short
-/// caption renders as a small pill that grows with the words. The width mirrors
-/// the layout `paint_live_text` draws for a non-boxed caption: the leading cue,
-/// then the current line (frozen plus tentative words, a caret while words are
-/// arriving) or the listening pad or the terminal status message, then the
+/// The vertical centre of the scrolling box's leading chip row (and so the row
+/// its empty listening pad shares). Both the chip and the pad are measured from
+/// the box's top padding, independent of the box's content-sized height.
+fn boxed_chip_center() -> f32 {
+    LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS
+}
+
+/// The top of the box's first text row: below the leading chip row plus the
+/// gap between them. `paint_live_text` and [`boxed_surface_height`] share this
+/// so the drawn lines and the measured height can never drift.
+fn boxed_text_top() -> f32 {
+    LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_BOX_CHIP_GAP
+}
+
+/// The wrap measure for the box's text, matching `paint_live_text`'s
+/// `right - LIVE_TEXT_PADDING`.
+fn boxed_text_max_width() -> f32 {
+    (LIVE_TEXT_BOX_SURFACE.0 as f32 - 2.0 * LIVE_TEXT_PADDING).max(40.0)
+}
+
+/// Rounds a measured pixel size up to the next [`LIVE_TEXT_SIZE_QUANTUM`]
+/// boundary, so a change too small to cross a step does not resize the layer.
+fn quantize_size(value: f32) -> u32 {
+    let step = LIVE_TEXT_SIZE_QUANTUM.max(1) as f32;
+    ((value / step).ceil() * step) as u32
+}
+
+/// The single-line caption's content height: the capsule hugging its phase
+/// chip (the tallest element on the line) plus [`LIVE_TEXT_VPADDING`] and the
+/// background inset on each side, quantised like the width.
+fn single_line_surface_height() -> u32 {
+    let capsule = LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_VPADDING * 2.0;
+    quantize_size(capsule + LIVE_TEXT_INSET * 2.0)
+}
+
+/// The scrolling box's content height: the leading chip row plus one row per
+/// wrapped line and the bottom padding, so the card hugs its text with no dead
+/// band below the last line. The empty (listening) state is just the chip row;
+/// a terminal status message counts as its single drawn line; the wrap is
+/// capped at [`text::CAPTION_MAX_LINES`], so the box stops growing and scrolls
+/// past that cap. Clamped to [`LIVE_TEXT_BOX_MIN_HEIGHT`] and the surface
+/// ceiling.
+fn boxed_surface_height(phase: Option<Phase>, live_text: Option<&LiveText>) -> u32 {
+    let captured = live_text.filter(|text| !text.is_empty());
+    let lines = match captured {
+        Some(text) => {
+            text::caption_lines(&text.committed, &text.tentative, boxed_text_max_width()).len()
+        }
+        // No words yet: only a terminal phase draws a short status line below
+        // the chip row; every other phase (the listening pad, the transcribing
+        // spinner, idle) shares the chip row and draws nothing more.
+        None => usize::from(phase.and_then(phase_message).is_some()),
+    };
+    let content = if lines == 0 {
+        LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_PADDING
+    } else {
+        boxed_text_top() + lines as f32 * text::CAPTION_LINE_HEIGHT + LIVE_TEXT_PADDING
+    };
+    quantize_size(content).clamp(LIVE_TEXT_BOX_MIN_HEIGHT, LIVE_TEXT_BOX_SURFACE.1)
+}
+
+/// The surface size for a caption style. Both families are content-measured so
+/// the card hugs its text: the box grows one line-height at a time up to its
+/// ceiling, then scrolls; the single-line variants hug their chip and line. The
+/// single-line width mirrors the layout `paint_live_text` draws: the leading
+/// cue, then the current line (frozen plus tentative words, a caret while words
+/// are arriving) or the listening pad or the terminal status message, then the
 /// right padding. With no phase (idle) it falls back to the empty-state width.
 fn caption_surface_size(
     style: Style,
@@ -1621,7 +1708,10 @@ fn caption_surface_size(
     live_text: Option<&LiveText>,
 ) -> (u32, u32) {
     if style == Style::LiveTextBox {
-        return LIVE_TEXT_BOX_SURFACE;
+        return (
+            LIVE_TEXT_BOX_SURFACE.0,
+            boxed_surface_height(phase, live_text),
+        );
     }
     let minimal = style == Style::LiveTextMinimal;
     let captured = live_text.filter(|text| !text.is_empty());
@@ -1655,9 +1745,9 @@ fn caption_surface_size(
             .map(|message| text::line_width(&text::caption_line(message, "")))
             .unwrap_or(0.0),
     };
-    let width = ((origin + content + LIVE_TEXT_PADDING).ceil() as u32)
+    let width = quantize_size(origin + content + LIVE_TEXT_PADDING)
         .clamp(LIVE_TEXT_MIN_WIDTH, LIVE_TEXT_SURFACE.0);
-    (width, LIVE_TEXT_SURFACE.1)
+    (width, single_line_surface_height())
 }
 
 /// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
@@ -2374,17 +2464,11 @@ fn paint_live_text(
         LIVE_TEXT_BACKGROUND_OPACITY,
     );
 
-    // The vertical centre of the first text line (the box stacks from the top,
-    // the single-line cards centre on the surface).
-    let line_center = if boxed {
-        LIVE_TEXT_PADDING + text::CAPTION_LINE_HEIGHT / 2.0
-    } else {
-        cy
-    };
+    // The single-line cards centre on the surface; the box stacks from the top
+    // (see `boxed_text_top`) and returns before the caret, so it never reads
+    // `line_center`/`y_top`.
+    let line_center = cy;
     let y_top = line_center - text::CAPTION_FONT_SIZE * 0.62;
-    // The box stacks its content below the leading chip, so every text row
-    // (captured words and the no-words status message alike) starts here.
-    let boxed_text_top = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 12.0;
 
     let right = width - LIVE_TEXT_PADDING;
     let captured = live_text.filter(|text| !text.is_empty());
@@ -2396,8 +2480,14 @@ fn paint_live_text(
     // read as a stray extra dot.
     let text_x = if boxed {
         let chip_cx = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS;
-        let chip_cy = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS;
-        draw_caption_chip(canvas, chip_cx, chip_cy, LIVE_TEXT_CHIP_RADIUS, phase, t);
+        draw_caption_chip(
+            canvas,
+            chip_cx,
+            boxed_chip_center(),
+            LIVE_TEXT_CHIP_RADIUS,
+            phase,
+            t,
+        );
         LIVE_TEXT_PADDING
     } else if minimal {
         if captured.is_some() || !matches!(phase, Phase::Recording) {
@@ -2420,12 +2510,11 @@ fn paint_live_text(
             alpha: 1.0,
         };
         if boxed {
-            let max_width = (right - LIVE_TEXT_PADDING).max(40.0);
             text::draw_caption(
                 canvas,
                 LIVE_TEXT_PADDING,
-                boxed_text_top,
-                max_width,
+                boxed_text_top(),
+                boxed_text_max_width(),
                 live_text,
                 colors,
             );
@@ -2466,12 +2555,15 @@ fn paint_live_text(
         Phase::Recording => {
             // The listening pad: the caption is live, waiting for the first
             // word. It never falls back to the waveform.
-            let pad_x = if boxed {
-                LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 22.0
+            let (pad_x, pad_y) = if boxed {
+                (
+                    LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + 22.0,
+                    boxed_chip_center(),
+                )
             } else {
-                text_x + 6.0
+                (text_x + 6.0, cy)
             };
-            paint_listening_pad(canvas, pad_x, cy, t, bolden(phase_color(phase)));
+            paint_listening_pad(canvas, pad_x, pad_y, t, bolden(phase_color(phase)));
         }
         _ => {
             // A terminal phase with no captured words: a short status message.
@@ -2482,7 +2574,7 @@ fn paint_live_text(
                     alpha: 0.9,
                 };
                 let line = text::caption_line(message, "");
-                let message_y = if boxed { boxed_text_top } else { y_top };
+                let message_y = if boxed { boxed_text_top() } else { y_top };
                 text::draw_line(canvas, text_x, message_y, &line, &colors, None);
             }
         }
@@ -2929,7 +3021,8 @@ fn paint_half_circle(
 /// the recording animations follow, oldest first - an empty slice means
 /// silence, and a representative pattern is how the offline mockups show the
 /// speaking look.
-/// Returns `(width, height, pixels)` with `width * height * 4` bytes. For the
+/// Returns `(width, height, pixels)` with `width * height * 4` bytes. The
+/// content-sized caption styles return the size their content measures; for the
 /// full-screen `border` style this is the representative `BORDER_PREVIEW` size,
 /// not a compositor-provided output size.
 #[doc(hidden)]
@@ -2956,7 +3049,14 @@ pub fn render_frame_pixels(
     for level in levels {
         history.push(*level);
     }
-    let (width, height) = surface_size_for(style);
+    // The caption families are content-sized (an empty caption or a short
+    // phrase renders the pill/box it actually needs); the fixed styles use
+    // their representative size.
+    let (width, height) = if is_caption_style(style) {
+        caption_surface_size(style, phase, None)
+    } else {
+        surface_size_for(style)
+    };
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     {
         let mut canvas = Canvas {
@@ -2998,17 +3098,17 @@ pub fn render_live_text_pixels(
     for level in levels {
         history.push(*level);
     }
-    let (width, height) = surface_size_for(style);
+    let live_text = LiveText {
+        committed: committed.to_string(),
+        tentative: tentative.to_string(),
+    };
+    let (width, height) = caption_surface_size(style, Some(Phase::Recording), Some(&live_text));
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     {
         let mut canvas = Canvas {
             pixels: &mut pixels,
             width,
             height,
-        };
-        let live_text = LiveText {
-            committed: committed.to_string(),
-            tentative: tentative.to_string(),
         };
         paint(
             &mut canvas,
@@ -3530,16 +3630,28 @@ mod tests {
             "a long line clamps to the ceiling"
         );
 
+        // The single-line height hugs the phase chip: the reviewed 88px capsule
+        // plus the background inset, not a fixed bar.
+        assert_eq!(
+            empty.1,
+            single_line_surface_height(),
+            "the single-line height is the chip capsule plus its inset"
+        );
+
         // The minimal variant shares the content sizing and the small floor.
         let minimal_empty =
             caption_surface_size(Style::LiveTextMinimal, Some(Phase::Recording), None);
         assert!(minimal_empty.0 >= LIVE_TEXT_MIN_WIDTH);
         assert!(minimal_empty.0 < LIVE_TEXT_SURFACE.0);
 
-        // The box keeps its fixed taller wrapped surface.
-        assert_eq!(
-            caption_surface_size(Style::LiveTextBox, Some(Phase::Recording), None),
-            LIVE_TEXT_BOX_SURFACE
+        // The box is content-sized too: an empty one is just the chip row,
+        // narrower-fixed and shorter than its ceiling.
+        let box_empty = caption_surface_size(Style::LiveTextBox, Some(Phase::Recording), None);
+        assert_eq!(box_empty.0, LIVE_TEXT_BOX_SURFACE.0);
+        assert_eq!(box_empty.1, LIVE_TEXT_BOX_MIN_HEIGHT);
+        assert!(
+            box_empty.1 < LIVE_TEXT_BOX_SURFACE.1,
+            "the empty box must hug its chip row, not fill the ceiling"
         );
     }
 
@@ -3744,7 +3856,14 @@ mod tests {
     fn live_text_renders_words_and_distinguishes_committed_from_tentative() {
         let (width, height, words) =
             render_live_text_pixels("live-text", "today I am", " testing", &[]);
-        assert_eq!((width, height), LIVE_TEXT_SURFACE);
+        assert_eq!(
+            height, LIVE_TEXT_SURFACE.1,
+            "the single-line caption keeps its chip-sized height"
+        );
+        assert!(
+            width < LIVE_TEXT_SURFACE.0,
+            "the words measure a content-sized width, narrower than the ceiling"
+        );
         assert!(
             words.iter().any(|&byte| byte != 0),
             "a caption with words must paint pixels"
@@ -3762,6 +3881,174 @@ mod tests {
         assert_ne!(
             committed_only, tentative_only,
             "committed and tentative text must be visually distinct"
+        );
+    }
+
+    /// The lowest row (scanning up from the bottom) holding a bright, mostly
+    /// opaque pixel - the caption's text or phase glyph, as opposed to the dark
+    /// glass background. Measures how much padding a card leaves below its last
+    /// drawn line, so a dead band under the text is caught.
+    fn lowest_bright_row(width: u32, height: u32, pixels: &[u8]) -> Option<u32> {
+        (0..height).rev().find(|&y| {
+            (0..width).any(|x| {
+                let index = ((y * width + x) * 4) as usize;
+                let (b, g, r, a) = (
+                    pixels[index],
+                    pixels[index + 1],
+                    pixels[index + 2],
+                    pixels[index + 3],
+                );
+                a > 150 && r > 90 && g > 90 && b > 90
+            })
+        })
+    }
+
+    #[test]
+    fn the_scrolling_box_grows_with_its_lines_then_caps() {
+        let box_height = |text: &str| {
+            caption_surface_size(
+                Style::LiveTextBox,
+                Some(Phase::Recording),
+                Some(&LiveText {
+                    committed: text.to_string(),
+                    tentative: String::new(),
+                }),
+            )
+            .1
+        };
+        let empty = box_height("");
+        assert_eq!(
+            empty, LIVE_TEXT_BOX_MIN_HEIGHT,
+            "the empty box is just the chip row"
+        );
+        let one = box_height("hello");
+        let two = box_height(&"word ".repeat(9));
+        let many = box_height(&"word ".repeat(400));
+        assert!(
+            one > empty,
+            "a first word opens a text row below the chip: {one} <= {empty}"
+        );
+
+        assert!(
+            two > one,
+            "a second wrapped line grows the box: {two} <= {one}"
+        );
+        assert!(
+            many > two,
+            "more lines keep growing the box: {many} <= {two}"
+        );
+        assert!(
+            many <= LIVE_TEXT_BOX_SURFACE.1,
+            "the box clamps to the surface ceiling: {many}"
+        );
+
+        // Past the wrap cap the box stops growing and scrolls instead.
+        let capped = box_height(&"word ".repeat(800));
+        assert_eq!(capped, many, "past the cap the box height stops growing");
+
+        // Shrinking the text (a revised partial) shrinks the box back.
+        assert!(
+            box_height("one two three") < many,
+            "a short phrase must shrink the box back down"
+        );
+    }
+
+    #[test]
+    fn the_empty_box_reserves_a_row_only_for_a_drawn_status_line() {
+        // With no captured words the box must reserve a text row only when a
+        // status line is actually drawn below the chip: a terminal phase draws
+        // one. Recording (the listening pad shares the chip row), Transcribing
+        // (the spinner chip is the whole caption), and idle draw none, so the
+        // box hugs the chip row instead of leaving a dead band.
+        let height = |phase: Option<Phase>| caption_surface_size(Style::LiveTextBox, phase, None).1;
+        assert_eq!(
+            height(Some(Phase::Recording)),
+            LIVE_TEXT_BOX_MIN_HEIGHT,
+            "the listening pad shares the chip row"
+        );
+        assert_eq!(
+            height(Some(Phase::Transcribing)),
+            LIVE_TEXT_BOX_MIN_HEIGHT,
+            "transcribing with no words draws no line below the chip"
+        );
+        assert_eq!(
+            height(None),
+            LIVE_TEXT_BOX_MIN_HEIGHT,
+            "the idle box draws nothing, so it must not reserve a row"
+        );
+        assert!(
+            height(Some(Phase::Success)) > LIVE_TEXT_BOX_MIN_HEIGHT,
+            "a terminal status message reserves its one drawn row"
+        );
+    }
+
+    #[test]
+    fn the_scrolling_box_leaves_only_its_padding_below_the_last_line() {
+        // A few wrapped lines fill a short card. The lowest text row must sit
+        // within the intended bottom padding of the surface edge - no tall dead
+        // band under it (the pre-fix card was a fixed 320px with the text
+        // hugging the top).
+        let (width, height, pixels) = render_live_text_pixels(
+            "live-text-box",
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen",
+            " fifteen sixteen",
+            &[],
+        );
+        assert!(
+            height < LIVE_TEXT_BOX_SURFACE.1,
+            "a few lines must not fill the tall ceiling: {height}"
+        );
+        let lowest = lowest_bright_row(width, height, &pixels).expect("the box paints its text");
+        let dead_band = height - 1 - lowest;
+        // The bottom padding (`LIVE_TEXT_PADDING`) plus the line box's descender
+        // slack (`CAPTION_LINE_HEIGHT` over the glyphs) and the quantise slack.
+        // The pre-fix fixed card left ~150px here.
+        let allowed =
+            LIVE_TEXT_PADDING as u32 + text::CAPTION_LINE_HEIGHT as u32 + LIVE_TEXT_SIZE_QUANTUM;
+        assert!(
+            dead_band <= allowed,
+            "dead space below the last line was {dead_band}px (height {height}, lowest row {lowest})"
+        );
+        assert!(
+            dead_band >= LIVE_TEXT_VPADDING as u32 / 2,
+            "the box must still breathe below the text: {dead_band}px"
+        );
+    }
+
+    #[test]
+    fn the_single_line_caption_hugs_its_text_height() {
+        // The single-line caption centres its one line and hugs it: the pill is
+        // the chip capsule, not a fixed tall bar, so the bottom gap is only the
+        // intended padding rather than a dead band.
+        let (width, height, pixels) =
+            render_live_text_pixels("live-text", "today I am testing", "", &[]);
+        assert_eq!(
+            height,
+            single_line_surface_height(),
+            "the pill is exactly its chip-capsule height"
+        );
+        let lowest = lowest_bright_row(width, height, &pixels).expect("the pill paints its text");
+        let dead_band = height - 1 - lowest;
+        let allowed =
+            LIVE_TEXT_VPADDING as u32 + text::CAPTION_LINE_HEIGHT as u32 + LIVE_TEXT_SIZE_QUANTUM;
+        assert!(
+            dead_band <= allowed,
+            "the pill leaves only its padding below the text: {dead_band}px (height {height})"
+        );
+    }
+
+    #[test]
+    fn caption_sizes_quantise_to_whole_steps() {
+        assert_eq!(quantize_size(0.0), 0);
+        assert_eq!(quantize_size(1.0), LIVE_TEXT_SIZE_QUANTUM);
+        assert_eq!(
+            quantize_size(LIVE_TEXT_SIZE_QUANTUM as f32),
+            LIVE_TEXT_SIZE_QUANTUM
+        );
+        assert_eq!(
+            quantize_size(LIVE_TEXT_SIZE_QUANTUM as f32 + 0.5),
+            2 * LIVE_TEXT_SIZE_QUANTUM,
+            "a size past a step rounds up to the next boundary"
         );
     }
 

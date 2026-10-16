@@ -420,7 +420,7 @@ and a no-speech outcome (an empty capture). `overlay.style` picks the look:
 | `long-pill` | A wide dark glass bar with a squiggly live waveform and a round status button |
 | `live-text` | The streaming caption (glass): a dark glass card with a leading phase chip and one line of a streaming model's live words (see "Live text"); shows the listening pad until the first word. Pick this style to see live text - it is never shown by any other style |
 | `live-text-minimal` | The streaming caption with a single leading phase dot instead of the full chip |
-| `live-text-box` | The streaming caption as a taller wrapped card that scrolls internally, for long passages |
+| `live-text-box` | The streaming caption as a wrapped card that grows with its lines and scrolls internally, for long passages |
 
 Every style's recording animation follows your live microphone level: `badge`,
 `minimal`, and `pill` show a scrolling multi-bar waveform when
@@ -602,14 +602,15 @@ Four things to know before choosing a streaming model:
   of the caption styles to see it: **Live Text (glass)**
   (`overlay.style = "live-text"`), **Live Text (minimal)**
   (`live-text-minimal`, a leading dot instead of the chip), or **Live Text
-  (box)** (`live-text-box`, a taller wrapped card that scrolls, for long
-  passages). The caption is a dark glass card with a leading phase chip, the
-  committed text bright, the still-revisable tail dimmed, and a caret; a
-  listening pad shows before the first word, and the words hold through the
-  terminal phases. The single-line caption sizes its pill to its content - a
-  small card while empty, growing only as words arrive. With any other style
-  (for example `blob`) the overlay shows that style and no live text at all,
-  even with a streaming model active.
+  (box)** (`live-text-box`, a wrapped card that grows with its lines and
+  scrolls, for long passages). The caption is a dark glass card with a leading
+  phase chip, the committed text bright, the still-revisable tail dimmed, and a
+  caret; a listening pad shows before the first word, and the words hold through
+  the terminal phases. The caption sizes to its content - a small card while
+  empty, growing only as words arrive (the box grows a wrapped line at a time
+  and scrolls past its line cap). With any other style (for example `blob`) the
+  overlay shows that style and no live text at all, even with a streaming model
+  active.
 - **Live text and the waveform never appear together.** The caption styles
   paint words (or the listening pad) and never a waveform; every other style
   paints its own recording animation and never live words.
