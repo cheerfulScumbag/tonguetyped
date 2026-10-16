@@ -1269,10 +1269,7 @@ impl TextProcessingScreen {
             (
                 "Spoken punctuation",
                 self.selected == Self::ROW_SPOKEN,
-                toggle_row_value(
-                    self.spoken_punctuation,
-                    self.selected == Self::ROW_SPOKEN,
-                ),
+                toggle_row_value(self.spoken_punctuation, self.selected == Self::ROW_SPOKEN),
             ),
             (
                 "Remove filler words",

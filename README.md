@@ -279,12 +279,14 @@ Run `tonguetyped` with no subcommand:
 tonguetyped
 ```
 
-The dashboard opens on a settings overview - one row each for Model, Inference
-backend, Translation, Decoding, Text processing, Microphone, Activation,
-Shortcut, Transcript output, Typing backend, Transcript folder, History
-retention, Startup, Overlay, and Media pause - above a list of the remaining
-commands. Selecting a row opens a screen that edits just that area, with the
-same live microphone preview and shortcut dialog the setup wizard uses.
+The dashboard opens on a settings overview, grouped into four sections -
+**Language & model**, **Capture & activation**, **Output**, and **Behaviour** -
+with one row each for Model, Inference backend, Translation, Decoding, Text
+processing, Microphone, Activation, Shortcut, Transcript output, Typing backend,
+Transcript folder, History retention, Startup, Overlay, and Media pause. A
+Commands row below them opens a separate screen listing the remaining commands.
+Selecting a settings row opens a screen that edits just that area, with the same
+live microphone preview and shortcut dialog the setup wizard uses.
 
 ### Commands
 

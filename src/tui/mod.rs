@@ -8,16 +8,17 @@
 //! service that must outlive this dashboard session (see that function's
 //! doc comment).
 //!
-//! The home screen is two stacked panels with one selection cursor: a
-//! fixed Settings panel listing the fifteen configuration areas (Model,
-//! Inference backend, Translation, Decoding, Text processing, Microphone,
-//! Activation, Shortcut, Transcript output, Typing backend, Transcript folder,
-//! History retention, Startup, Overlay, Media pause)
-//! with their current values, and a Commands panel derived
+//! The home screen is one Settings panel with one selection cursor, grouped
+//! into four labeled sections (Language & model, Capture & activation, Output,
+//! Behaviour) listing the fifteen configuration areas (Model, Inference
+//! backend, Translation, Decoding, Text processing, Microphone, Activation,
+//! Shortcut, Transcript output, Typing backend, Transcript folder, History
+//! retention, Startup, Overlay, Media pause) with their current values, plus a
+//! Commands row. The Commands row opens a dedicated Commands screen derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
 //! Toggle. `model` and `autostart` are CLI commands but live in the Settings
-//! panel rather than the Commands panel, so each configuration area has
+//! panel rather than the Commands screen, so each configuration area has
 //! exactly one home-screen entry point.
 
 mod logo;
@@ -264,7 +265,7 @@ const HOME_ROW_COUNT: usize = SettingId::ALL.len() + 1;
 /// the panel's two border rows.
 const SETTINGS_PANEL_HEIGHT: u16 = 15 + 4 + 1 + 2;
 
-/// The dashboard's Commands panel, derived from the exact same clap metadata
+/// The dashboard's Commands screen, derived from the exact same clap metadata
 /// `--help` renders - see this module's doc comment. The implicit `help`
 /// meta-subcommand clap adds is excluded; it has no useful standalone
 /// dashboard action. `start`/`stop` (single-shot recording start/stop) are
