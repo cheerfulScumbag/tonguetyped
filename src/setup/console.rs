@@ -6,8 +6,12 @@ use crate::activation::ReconfigureOutcome;
 use crate::audio::{self, level_to_ratio};
 use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
 use crate::overlay::{
-    POSITION_VALUES as OVERLAY_POSITION_VALUES, STYLE_LABELS as OVERLAY_STYLE_LABELS,
-    STYLE_VALUES as OVERLAY_STYLE_VALUES, WAVEFORM_LABELS as OVERLAY_WAVEFORM_LABELS,
+    clamp_look_value as overlay_clamp_look_value, default_shape as overlay_default_shape,
+    has_look_choice as overlay_has_look_choice, look_label as overlay_look_label,
+    shape_label as overlay_shape_label, shows_shape_choice as overlay_shows_shape_choice,
+    style_look_options as overlay_style_look_options, POSITION_VALUES as OVERLAY_POSITION_VALUES,
+    SHAPE_LABELS as OVERLAY_SHAPE_LABELS, SHAPE_VALUES as OVERLAY_SHAPE_VALUES,
+    STYLE_LABELS as OVERLAY_STYLE_LABELS, STYLE_VALUES as OVERLAY_STYLE_VALUES,
 };
 use crate::text_input::TextField;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -74,7 +78,8 @@ enum StepKind {
     OverlayEnabled,
     OverlayPosition,
     OverlayStyle,
-    OverlayWaveform,
+    OverlayLook,
+    OverlayShape,
     Confirm,
 }
 
@@ -116,7 +121,7 @@ struct ConsoleState {
     step: StepKind,
     model_values: Vec<String>,
     /// Display labels matching `model_values` position for position: the id,
-    /// plus a "live text with a caption style, English only" tag for a
+    /// plus a "live text with a live-text look, English only" tag for a
     /// streaming model so the trade-off is visible at selection time.
     model_labels: Vec<String>,
     model_selection: usize,
@@ -147,7 +152,8 @@ struct ConsoleState {
     overlay_enabled_selection: usize,
     overlay_position_selection: usize,
     overlay_style_selection: usize,
-    overlay_waveform_selection: usize,
+    overlay_look_selection: usize,
+    overlay_shape_selection: usize,
     shortcut_handle: Option<ReconfigureHandle>,
     shortcut_feedback: Option<Result<ReconfigureOutcome, String>>,
     error: Option<String>,
@@ -170,7 +176,7 @@ impl ConsoleState {
             .map(|entry| {
                 if entry.info().supports_streaming() {
                     format!(
-                        "{}  (live text with a caption style, English only)",
+                        "{}  (live text with a live-text look, English only)",
                         entry.id
                     )
                 } else {
@@ -246,7 +252,18 @@ impl ConsoleState {
             .iter()
             .position(|value| *value == config.overlay.style)
             .unwrap_or(0);
-        let overlay_waveform_selection = usize::from(config.overlay.live_waveform);
+        let overlay_style = OVERLAY_STYLE_VALUES
+            .get(overlay_style_selection)
+            .copied()
+            .unwrap_or(OVERLAY_STYLE_VALUES[0]);
+        let overlay_look_selection = overlay_style_look_options(overlay_style)
+            .iter()
+            .position(|(value, _)| *value == config.overlay.look)
+            .unwrap_or(0);
+        let overlay_shape_selection = OVERLAY_SHAPE_VALUES
+            .iter()
+            .position(|value| *value == config.overlay.waveform_shape)
+            .unwrap_or(0);
 
         Self {
             config,
@@ -278,7 +295,8 @@ impl ConsoleState {
             overlay_enabled_selection,
             overlay_position_selection,
             overlay_style_selection,
-            overlay_waveform_selection,
+            overlay_look_selection,
+            overlay_shape_selection,
             shortcut_handle: None,
             shortcut_feedback: None,
             error: None,
@@ -536,7 +554,8 @@ impl ConsoleState {
             StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
             StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
             StepKind::OverlayStyle => OVERLAY_STYLE_VALUES.len(),
-            StepKind::OverlayWaveform => OVERLAY_WAVEFORM_LABELS.len(),
+            StepKind::OverlayLook => self.overlay_look_option_count(),
+            StepKind::OverlayShape => OVERLAY_SHAPE_VALUES.len(),
             StepKind::Shortcut
             | StepKind::Confirm
             | StepKind::Downloading
@@ -563,7 +582,8 @@ impl ConsoleState {
             StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
             StepKind::OverlayPosition => &mut self.overlay_position_selection,
             StepKind::OverlayStyle => &mut self.overlay_style_selection,
-            StepKind::OverlayWaveform => &mut self.overlay_waveform_selection,
+            StepKind::OverlayLook => &mut self.overlay_look_selection,
+            StepKind::OverlayShape => &mut self.overlay_shape_selection,
             StepKind::Shortcut
             | StepKind::Confirm
             | StepKind::Downloading
@@ -584,11 +604,42 @@ impl ConsoleState {
         self.selected_output_method().inserts_text() && self.capabilities.has_type_backend()
     }
 
-    /// The overlay's position/waveform sub-steps are only worth configuring
+    /// The overlay's position/style/look sub-steps are only worth configuring
     /// once the overlay itself is enabled - mirrors `has_backend_step`'s
     /// pattern of skipping a sub-step whose parent choice ruled it out.
     fn overlay_options_shown(&self) -> bool {
         self.overlay_enabled_selection == 1
+    }
+
+    /// The currently selected overlay style value.
+    fn overlay_style_value(&self) -> &'static str {
+        OVERLAY_STYLE_VALUES
+            .get(self.overlay_style_selection)
+            .copied()
+            .unwrap_or(OVERLAY_STYLE_VALUES[0])
+    }
+
+    /// How many look options the selected style offers.
+    fn overlay_look_option_count(&self) -> usize {
+        overlay_style_look_options(self.overlay_style_value()).len()
+    }
+
+    /// The look value the current selection names for the selected style.
+    fn overlay_look_value(&self) -> String {
+        let options = overlay_style_look_options(self.overlay_style_value());
+        let index = self
+            .overlay_look_selection
+            .min(options.len().saturating_sub(1));
+        options
+            .get(index)
+            .map(|(value, _)| (*value).to_string())
+            .unwrap_or_else(|| "waveform".to_string())
+    }
+
+    /// Whether the overlay-shape step applies: the selected style offers the
+    /// shape and the selected look is the waveform.
+    fn overlay_shape_shown(&self) -> bool {
+        overlay_shows_shape_choice(self.overlay_style_value(), &self.overlay_look_value())
     }
 
     /// The full ordered list of steps this run would actually visit, given
@@ -627,7 +678,12 @@ impl ConsoleState {
         if self.overlay_options_shown() {
             steps.push(OverlayPosition);
             steps.push(OverlayStyle);
-            steps.push(OverlayWaveform);
+            if overlay_has_look_choice(self.overlay_style_value()) {
+                steps.push(OverlayLook);
+            }
+            if self.overlay_shape_shown() {
+                steps.push(OverlayShape);
+            }
         }
         steps.push(Confirm);
         steps
@@ -797,11 +853,37 @@ impl ConsoleState {
                     OVERLAY_POSITION_VALUES[self.overlay_position_selection].to_string();
             }
             StepKind::OverlayStyle => {
-                self.config.overlay.style =
-                    OVERLAY_STYLE_VALUES[self.overlay_style_selection].to_string();
+                let changed = self.config.overlay.style != self.overlay_style_value();
+                self.config.overlay.style = self.overlay_style_value().to_string();
+                if changed {
+                    // A new style may offer a different set of looks; keep a
+                    // stored look it still offers and otherwise snap to its
+                    // first, then start its own waveform shape.
+                    self.config.overlay.look = overlay_clamp_look_value(
+                        &self.config.overlay.style,
+                        &self.config.overlay.look,
+                    );
+                    self.overlay_look_selection =
+                        overlay_style_look_options(&self.config.overlay.style)
+                            .iter()
+                            .position(|(value, _)| *value == self.config.overlay.look)
+                            .unwrap_or(0);
+                    self.config.overlay.waveform_shape =
+                        overlay_default_shape(&self.config.overlay.style).to_string();
+                    self.overlay_shape_selection = OVERLAY_SHAPE_VALUES
+                        .iter()
+                        .position(|value| *value == self.config.overlay.waveform_shape)
+                        .unwrap_or(0);
+                }
             }
-            StepKind::OverlayWaveform => {
-                self.config.overlay.live_waveform = self.overlay_waveform_selection == 1;
+            StepKind::OverlayLook => {
+                self.config.overlay.look = self.overlay_look_value();
+            }
+            StepKind::OverlayShape => {
+                self.config.overlay.waveform_shape = OVERLAY_SHAPE_VALUES[self
+                    .overlay_shape_selection
+                    .min(OVERLAY_SHAPE_VALUES.len() - 1)]
+                .to_string();
             }
             StepKind::Downloading => {}
             StepKind::Confirm => unreachable!("confirm handled separately"),
@@ -927,7 +1009,8 @@ impl ConsoleState {
             StepKind::OverlayEnabled => "Overlay",
             StepKind::OverlayPosition => "Overlay position",
             StepKind::OverlayStyle => "Overlay style",
-            StepKind::OverlayWaveform => "Overlay waveform",
+            StepKind::OverlayLook => "Overlay look",
+            StepKind::OverlayShape => "Overlay waveform shape",
             StepKind::Confirm => "Review",
         }
     }
@@ -1149,20 +1232,27 @@ impl ConsoleState {
                 &OVERLAY_STYLE_LABELS.map(String::from),
                 self.overlay_style_selection,
             ),
-            StepKind::OverlayWaveform => self.render_overlay_step(
+            StepKind::OverlayLook => {
+                let labels: Vec<String> = overlay_style_look_options(self.overlay_style_value())
+                    .iter()
+                    .map(|(_, label)| label.to_string())
+                    .collect();
+                self.render_overlay_step(frame, area, &labels, self.overlay_look_selection)
+            }
+            StepKind::OverlayShape => self.render_overlay_step(
                 frame,
                 area,
-                &OVERLAY_WAVEFORM_LABELS.map(String::from),
-                self.overlay_waveform_selection,
+                &OVERLAY_SHAPE_LABELS.map(String::from),
+                self.overlay_shape_selection,
             ),
             StepKind::Confirm => self.render_confirm(frame, area),
         }
     }
 
-    /// One of the four Overlay steps: the option list plus a live preview band
-    /// that follows the current enable/position/style/waveform selections, so
-    /// the overlay is visible before the wizard finishes. Falls back to the
-    /// plain list when the terminal is too short for the band.
+    /// One of the Overlay steps: the option list plus a live preview band that
+    /// follows the current enable/position/style/look selections, so the
+    /// overlay is visible before the wizard finishes. Falls back to the plain
+    /// list when the terminal is too short for the band.
     fn render_overlay_step(&self, frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
         if area.height < PREVIEW_BAND_HEIGHT + 3 {
             frame.render_widget(
@@ -1188,7 +1278,11 @@ impl ConsoleState {
             .min(OVERLAY_POSITION_VALUES.len() - 1);
         let style = OVERLAY_STYLE_VALUES[style_index];
         let position = OVERLAY_POSITION_VALUES[position_index];
-        let waveform = self.overlay_waveform_selection == 1;
+        let look = self.overlay_look_value();
+        let shape = OVERLAY_SHAPE_VALUES
+            .get(self.overlay_shape_selection)
+            .copied()
+            .unwrap_or(OVERLAY_SHAPE_VALUES[0]);
         let enabled = self.overlay_enabled_selection == 1;
 
         let title = format!(
@@ -1201,7 +1295,7 @@ impl ConsoleState {
         if enabled && inner.width > 2 && inner.height > 0 {
             let stage = inner.inner(ratatui::layout::Margin::new(1, 0));
             let cells =
-                crate::tui::overlay_preview_cells(style, waveform, stage.width, stage.height);
+                crate::tui::overlay_preview_cells(style, &look, shape, stage.width, stage.height);
             let cols = cells.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
             let rows = cells.len() as u16;
             frame.render_widget(
@@ -1583,15 +1677,24 @@ impl ConsoleState {
             Line::from(format!(
                 "Overlay:     {}",
                 if self.config.overlay.enabled {
+                    let style = &self.config.overlay.style;
+                    let look = if overlay_style_look_options(style).is_empty() {
+                        "no options".to_string()
+                    } else {
+                        let resolved = overlay_clamp_look_value(style, &self.config.overlay.look);
+                        format!("{} look", overlay_look_label(&resolved).to_lowercase())
+                    };
+                    let shape = if overlay_shows_shape_choice(style, &self.config.overlay.look) {
+                        format!(
+                            ", {}",
+                            overlay_shape_label(&self.config.overlay.waveform_shape).to_lowercase()
+                        )
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "enabled, {}, {} style, {}",
-                        self.config.overlay.position,
-                        self.config.overlay.style,
-                        if self.config.overlay.live_waveform {
-                            "live waveform"
-                        } else {
-                            "simple pulse"
-                        }
+                        "enabled, {}, {} style, {}{}",
+                        self.config.overlay.position, self.config.overlay.style, look, shape
                     )
                 } else {
                     "disabled".to_string()
@@ -1744,7 +1847,7 @@ mod tests {
     }
 
     #[test]
-    fn enabling_the_overlay_walks_through_position_style_and_waveform_before_confirm() {
+    fn enabling_the_overlay_walks_through_position_style_look_and_shape_before_confirm() {
         let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
         state.step = StepKind::OverlayEnabled;
         state.overlay_enabled_selection = 1;
@@ -1765,21 +1868,138 @@ mod tests {
             .unwrap();
         state.advance().unwrap();
         assert_eq!(state.config.overlay.style, "pill");
-        assert_eq!(state.step, StepKind::OverlayWaveform);
+        assert_eq!(state.step, StepKind::OverlayLook);
 
-        state.overlay_waveform_selection = 1;
+        // The wide pill offers plain or waveform; pick the waveform.
+        state.overlay_look_selection = 1;
         state.advance().unwrap();
-        assert!(state.config.overlay.live_waveform);
+        assert_eq!(state.config.overlay.look, "waveform");
+        assert_eq!(state.step, StepKind::OverlayShape);
+
+        // Pick the squiggly line, then the wizard is done.
+        state.overlay_shape_selection = 1;
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.waveform_shape, "squiggle");
         assert_eq!(state.step, StepKind::Confirm);
     }
 
     #[test]
-    fn retreating_from_confirm_returns_to_waveform_when_overlay_is_enabled_and_to_overlay_enabled_otherwise(
+    fn a_blob_overlay_skips_the_look_and_shape_steps() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::OverlayStyle;
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "blob")
+            .unwrap();
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.style, "blob");
+        assert_eq!(
+            state.step,
+            StepKind::Confirm,
+            "the blob has no look options, so it skips straight to Confirm"
+        );
+    }
+
+    #[test]
+    fn a_single_option_box_overlay_skips_the_look_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::OverlayStyle;
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "live-text-box")
+            .unwrap();
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.style, "live-text-box");
+        assert_eq!(state.config.overlay.look, "live-text");
+        assert_eq!(
+            state.step,
+            StepKind::Confirm,
+            "the box offers a single look, so it skips straight to Confirm"
+        );
+    }
+
+    #[test]
+    fn keeping_the_same_style_does_not_reset_the_stored_look() {
+        // Re-choosing the style the config already has must not silently
+        // replace the stored look with the style's first option.
+        let mut config = Config::default();
+        config.overlay.style = "pill".to_string();
+        config.overlay.look = "waveform".to_string();
+        let mut state = ConsoleState::new(config, no_mic_capabilities());
+        state.step = StepKind::OverlayStyle;
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "pill")
+            .unwrap();
+
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.look, "waveform");
+        assert_eq!(state.overlay_look_selection, 1);
+
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.look, "waveform");
+    }
+
+    #[test]
+    fn choosing_the_long_pill_defaults_the_shape_to_its_squiggle() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::OverlayStyle;
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "long-pill")
+            .unwrap();
+
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.style, "long-pill");
+        assert_eq!(state.config.overlay.waveform_shape, "squiggle");
+        assert_eq!(state.overlay_shape_selection, 1);
+    }
+
+    fn rendered_confirm(state: &ConsoleState) -> String {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| state.render_confirm(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn confirm_summary_shows_no_options_for_the_optionless_blob() {
+        // A style with no look options must not repeat the previous style's
+        // stale look in the Confirm summary.
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.config.overlay.enabled = true;
+        state.config.overlay.style = "blob".to_string();
+        state.config.overlay.look = "live-text".to_string();
+
+        let text = rendered_confirm(&state);
+        assert!(
+            text.contains("blob style, no options"),
+            "the optionless blob must summarize as no options:\n{text}"
+        );
+        assert!(
+            !text.to_lowercase().contains("live text look"),
+            "the summary must not show a look the blob cannot paint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn retreating_from_confirm_returns_to_look_when_overlay_is_enabled_and_to_overlay_enabled_otherwise(
     ) {
         let mut enabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
         enabled_state.step = StepKind::Confirm;
         enabled_state.overlay_enabled_selection = 1;
-        assert_eq!(enabled_state.prev_step(), Some(StepKind::OverlayWaveform));
+        assert_eq!(enabled_state.prev_step(), Some(StepKind::OverlayLook));
 
         let mut disabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
         disabled_state.step = StepKind::Confirm;

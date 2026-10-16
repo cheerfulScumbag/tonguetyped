@@ -44,7 +44,7 @@ an interactive dashboard for every setting.
   finished transcript is also written there as a plain-text file, independent of
   the focused app or the clipboard.
 - **Unobtrusive feedback.** A click-through overlay shows recording,
-  transcribing, success, and failure - ten styles, on any number of screens.
+  transcribing, success, and failure - nine styles, on any number of screens.
 - **Terminal-native control.** Script it, or use the dashboard. Every command is
   a plain subcommand over a local Unix socket.
 - **Your transcripts stay yours.** History is a local SQLite database with
@@ -409,29 +409,46 @@ pause_media = true
 
 Visual feedback is on by default and never takes keyboard focus or pointer
 input. It identifies listening, transcribing, success, cancellation, failure,
-and a no-speech outcome (an empty capture). `overlay.style` picks the look:
+and a no-speech outcome (an empty capture). `overlay.style` picks the style:
 
 | Style | Description |
 | --- | --- |
-| `badge` | The default small rounded badge with an icon and phase colour |
-| `minimal` | A bare dot, no chrome |
-| `pill` | A wider pill-shaped badge with a live microphone waveform |
+| `badge` | The default small rounded badge |
+| `minimal` | A thin ring, no filled background |
+| `pill` | A wider capsule |
 | `blob` | A bright, glowing orb that stays soft and round in silence and spikes with your voice |
 | `half-circle` | A gleaming semicircle docked to the top-centre edge |
 | `border` | A full-screen frame that glows along every edge, brightest in the corners |
-| `long-pill` | A wide dark glass bar with a squiggly live waveform and a round status button |
-| `live-text` | The streaming caption (glass): a dark glass card with a leading phase chip and one line of a streaming model's live words (see "Live text"); shows the listening pad until the first word. Pick this style to see live text - it is never shown by any other style |
-| `live-text-minimal` | The streaming caption with a single leading phase dot instead of the full chip |
+| `long-pill` | A wide dark glass bar with a waveform and a round status button |
+| `live-text` | The streaming caption (glass): a dark glass card with a leading phase chip and one line of a streaming model's live words (see "Live text") |
 | `live-text-box` | The streaming caption as a wrapped card that grows with its lines and scrolls internally, for long passages |
 
-Every style's recording animation follows your live microphone level: `badge`,
-`minimal`, and `pill` show a scrolling multi-bar waveform when
-`overlay.live_waveform` is on (the default), or a pulsing dot that swells with
-your voice when it is off; `long-pill` always shows its squiggly trace; `blob`
-sprouts sharp spikes on voice peaks and settles into a soft, round, slowly
-breathing ball in silence; and `border`/`half-circle` pulse and sweep with
-your voice. Loud speech is a big response; silence is calm, with the
-waveform's quiet stretches rendered as tiny dots.
+Each style offers a short menu of **looks** (`overlay.look`): its resting shape
+(`plain`), its voice-reactive **waveform** (`waveform`, the default), or **live
+text** (`live-text`). Which looks a style offers depends on the style, so the
+settings screens never offer a pair that cannot be painted:
+
+- `badge`, `minimal`, `pill`, `half-circle`, and `border` offer `plain` or
+  `waveform`.
+- `blob` has no options; it reacts in its own way.
+- `long-pill` and the glass `live-text` caption offer `waveform` or `live-text`.
+- `live-text-box` is `live-text` only.
+
+A stored look a style does not offer is clamped to the style's first option.
+
+The `waveform` look can be drawn as uniform `bars` or a continuous `squiggle`
+(the long pill's line) via `overlay.waveform_shape` (`bars` by default, and
+`squiggle` for the long pill, which has always drawn its continuous line). Only
+the wide styles - `pill`, `long-pill`, and the glass caption - offer the shape
+choice; the round styles and the live-text look ignore it.
+
+Every waveform look follows your live microphone level: `badge`, `minimal`, and
+`pill` show a scrolling multi-bar waveform; `long-pill` shows its squiggly trace
+(or bars); `blob` sprouts sharp spikes on voice peaks and settles into a soft,
+round, slowly breathing ball in silence; and `border`/`half-circle` pulse and
+sweep with your voice. The `plain` look is the resting shape with no waveform.
+Loud speech is a big response; silence is calm, with the waveform's quiet
+stretches rendered as tiny dots.
 
 `border` and `half-circle` ignore `overlay.position`; the other styles honour
 `overlay.position` (`top-left`, `top-right`, `bottom-left`, `bottom-right`,
@@ -450,15 +467,14 @@ notification - in that fallback tier your desktop controls placement, so
 `overlay.position` and `overlay.monitor` no longer apply. Run `tonguetyped
 doctor` to see which tier is active.
 
-`overlay.live_waveform` (`true` by default) picks the busier recording glyph:
-the live multi-bar microphone waveform instead of the simple pulsing dot.
 Enable sound feedback separately:
 
 ```toml
 [overlay]
 enabled = true
-style = "pill"
-live_waveform = true
+style = "long-pill"
+look = "waveform"
+waveform_shape = "squiggle"
 
 [audio]
 feedback_sounds = true
@@ -591,10 +607,11 @@ Some models transcribe *as you speak*: while a recording is running their words
 can stream across the overlay, and the finalized text is typed when you stop.
 Whether a model can do this is a property of the model, not a setting, so the
 live decode runs the way Handy does it. Whether the words are *shown* is your
-call: choose a `live-text` overlay style (below) to see them. `tonguetyped model
-list` marks the streaming models with a `live (en)` tag under **STREAMING**, and
-the dashboard's model screen tags them `LIVE`; the rest of the catalog produces
-no live text and shows only the recording indicator.
+call: choose a live-capable style's `live-text` look (see "Overlay" above) to
+see them. `tonguetyped model list` marks the streaming models with a `live (en)`
+tag under **STREAMING**, and the dashboard's model screen tags them `LIVE`; the
+rest of the catalog produces no live text and shows only the recording
+indicator.
 
 Four things to know before choosing a streaming model:
 
@@ -602,22 +619,23 @@ Four things to know before choosing a streaming model:
   never typed into the focused application, and the transcript that is actually
   typed is the model's finalized result. Rewrites mid-recording therefore never
   reach your editor.
-- **Live text is a choice of overlay style, not a model behaviour.** Pick one
-  of the caption styles to see it: **Live Text (glass)**
-  (`overlay.style = "live-text"`), **Live Text (minimal)**
-  (`live-text-minimal`, a leading dot instead of the chip), or **Live Text
-  (box)** (`live-text-box`, a wrapped card that grows with its lines and
-  scrolls, for long passages). The caption is a dark glass card with a leading
-  phase chip, the committed text bright, the still-revisable tail dimmed, and a
-  caret; a listening pad shows before the first word, and the words hold through
-  the terminal phases. The caption sizes to its content - a small card while
-  empty, growing only as words arrive (the box grows a wrapped line at a time
-  and scrolls past its line cap). With any other style (for example `blob`) the
-  overlay shows that style and no live text at all, even with a streaming model
-  active.
-- **Live text and the waveform never appear together.** The caption styles
-  paint words (or the listening pad) and never a waveform; every other style
-  paints its own recording animation and never live words.
+- **Live text is a choice of overlay look, not a model behaviour.** On a
+  live-capable style, set `overlay.look = "live-text"` to see it: **Long Pill**
+  and the glass **Live Text** caption (`overlay.style = "live-text"`) offer
+  `waveform` or `live-text`, and **Live Text (box)** (`live-text-box`, a wrapped
+  card that grows with its lines and scrolls, for long passages) is live-text
+  only. The caption
+  is a dark glass card with a leading phase chip, the committed text bright, the
+  still-revisable tail dimmed, and a caret; a listening pad shows before the
+  first word, and the words hold through the terminal phases. The single-line
+  caption sizes its pill to its content - a small card while empty, growing only
+  as words arrive (the box grows a wrapped line at a time and scrolls past its
+  line cap). With any other style, or a live-capable style set to `plain` or
+  `waveform` (for example `blob`, or `pill` on its default), the overlay shows
+  that look and no live text at all, even with a streaming model active.
+- **Live text and the waveform never appear together.** A style set to the
+  `live-text` look paints words (or the listening pad) and never a waveform;
+  every other look paints its own recording animation and never live words.
 - **Every streaming model is English-only.** The small, fast models that stream
   have no multilingual variant, so live text is an English feature. Pick a
   Whisper (or other multilingual) model when you dictate in another language;

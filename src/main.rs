@@ -160,8 +160,8 @@ async fn run_model_command(command: ModelCommand) -> anyhow::Result<()> {
                 };
                 let info = entry.info();
                 // Only streaming models can produce live text while you speak
-                // (shown when a caption style is chosen), and every one of them
-                // is English-only, so the tag carries both facts.
+                // (shown when a style's live-text look is chosen), and every one
+                // of them is English-only, so the tag carries both facts.
                 let streaming = if info.supports_streaming() {
                     "live (en)"
                 } else {
