@@ -348,7 +348,7 @@ struct App {
     /// `render_overlay` runs on every 66ms tick, and the offline rasteriser
     /// allocates and paints the style's full-resolution surface (1920x1080 for
     /// `border`) each call, so the pixels are rendered once and reused until the
-    /// previewed style or the waveform toggle changes.
+    /// previewed style, look, or waveform shape changes.
     overlay_preview: RefCell<Option<OverlayPreview>>,
 }
 
@@ -2165,7 +2165,7 @@ impl App {
     }
 
     /// The preview cells for the selected overlay style, reusing the cached
-    /// rasterisation when the style and waveform toggle are unchanged so the
+    /// rasterisation when the style, look, and waveform shape are unchanged so the
     /// dashboard does not re-render the full-resolution frame every tick. The
     /// raster is fitted uniformly into the `max_cols` x `max_rows` box at its
     /// true aspect ratio (see `preview_cell_size`), so wide styles stay wide

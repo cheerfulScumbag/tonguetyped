@@ -604,7 +604,7 @@ impl ConsoleState {
         self.selected_output_method().inserts_text() && self.capabilities.has_type_backend()
     }
 
-    /// The overlay's position/waveform sub-steps are only worth configuring
+    /// The overlay's position/style/look sub-steps are only worth configuring
     /// once the overlay itself is enabled - mirrors `has_backend_step`'s
     /// pattern of skipping a sub-step whose parent choice ruled it out.
     fn overlay_options_shown(&self) -> bool {
@@ -1681,8 +1681,7 @@ impl ConsoleState {
                     let look = if overlay_style_look_options(style).is_empty() {
                         "no options".to_string()
                     } else {
-                        let resolved =
-                            overlay_clamp_look_value(style, &self.config.overlay.look);
+                        let resolved = overlay_clamp_look_value(style, &self.config.overlay.look);
                         format!("{} look", overlay_look_label(&resolved).to_lowercase())
                     };
                     let shape = if overlay_shows_shape_choice(style, &self.config.overlay.look) {

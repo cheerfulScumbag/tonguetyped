@@ -29,14 +29,16 @@
 //!
 //! Besides the state cues above, the overlay can paint **live text**: when a
 //! streaming model is active, the coordinator forwards its partial transcript
-//! through [`OverlayHandle::try_send_live_text`] and, when a `live-text` style
-//! is configured (see [`Style::LiveText`]), the overlay draws it as a dark
-//! glass card with a leading phase chip, the frozen prefix bright, the
-//! still-revisable tail dimmed, and a caret. The configured style is
-//! authoritative: a non-caption style (for example `blob`) never switches to
-//! the caption, so with a streaming model it shows itself and paints no live
-//! text at all. That text is preview only: it is never typed, persisted, or
-//! mirrored to the fallback chain.
+//! through [`OverlayHandle::try_send_live_text`] and, when the configured style
+//! is set to its `live-text` look (the glass captions, or the long pill's
+//! `live-text` option - see [`look_options`]), the overlay draws the words
+//! inside that style's own frame: the caption as a dark glass card with a
+//! leading phase chip, the frozen prefix bright, the still-revisable tail
+//! dimmed, and a caret. The configured style is authoritative: a style with no
+//! `live-text` look (for example `blob`) never switches to the caption, so with
+//! a streaming model it shows itself and paints no live text at all. That text
+//! is preview only: it is never typed, persisted, or mirrored to the fallback
+//! chain.
 
 use crate::config::OverlayConfig;
 use crate::feedback::FeedbackEvent;
@@ -915,8 +917,9 @@ pub(crate) const POSITION_VALUES: [&str; 7] = [
 /// separately from the small `Pill`. The `live-text` and `live-text-box` values
 /// are the streaming caption family: a dark glass card showing the live partial
 /// words from a streaming model (see [`LiveText`]), with the listening pad
-/// before the first word. They are the only styles that can paint live text, and
-/// which look they show is the separate `look` choice.
+/// before the first word. The long pill can also paint those words through its
+/// `live-text` look; which look a style shows is the separate `look` choice (see
+/// [`look_options`]).
 pub(crate) const STYLE_VALUES: [&str; 9] = [
     "badge",
     "minimal",
@@ -1767,10 +1770,10 @@ fn stroke_arc(
 /// line hugging the whole screen edge that fades smoothly inward, brightest in
 /// the corners, `HalfCircle` is a glowing, pulsing phase-coloured
 /// semicircle resting flat on the top edge of the screen at top-centre, and
-/// `LongPill` is a wide dark bar holding one continuous squiggly waveform line
-/// plus a round phase status button at its right end (the captain's reference
-/// look). Every style reskins all six phases consistently, per the design
-/// review.
+/// `LongPill` is a wide dark bar holding a waveform (its continuous squiggle by
+/// default) or live words, plus a round phase status button at its right end
+/// (the captain's reference look). Every style reskins all six phases
+/// consistently, per the design review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
     Badge,
@@ -1793,9 +1796,10 @@ pub(crate) enum Style {
 
 /// The style the overlay actually paints: exactly the configured style, always.
 /// The active model never switches it, and neither does an incoming live-text
-/// snapshot - live text is painted only when the user has chosen one of the
-/// `live-text` caption styles, and any other style (for example `blob`) stays
-/// on screen and paints no live text even for a streaming model.
+/// snapshot - live text is painted only when the user has chosen a style's
+/// `live-text` look (the captions, or the long pill's own bar), and any style
+/// without one (for example `blob`) stays on screen and paints no live text even
+/// for a streaming model.
 fn resolved_style(configured: &str) -> Style {
     style_for(configured)
 }
@@ -1809,8 +1813,9 @@ fn caption_variant(configured: Style) -> Style {
     }
 }
 
-/// Whether `style` is one of the `live-text` caption variants: the styles that
-/// can paint streaming text.
+/// Whether `style` is one of the `live-text` caption variants: the standing
+/// caption surfaces. The long pill also paints live text, but through its
+/// `live-text` look rather than as its identity, so it is not included here.
 pub(crate) fn is_live_text_style(style: Style) -> bool {
     matches!(style, Style::LiveText | Style::LiveTextBox)
 }
@@ -2135,8 +2140,8 @@ fn phase_color(phase: Phase) -> (u8, u8, u8) {
 
 /// The per-frame inputs a style draws from, grouped so `paint` and the style
 /// functions keep a readable argument list: the live microphone level history
-/// and the most recent live-text snapshot (only the `live-text` presentation
-/// reads the latter).
+/// and the most recent live-text snapshot (only the live-text look reads the
+/// latter).
 struct OverlayFrame<'a> {
     levels: &'a LevelHistory,
     live_text: Option<&'a LiveText>,
