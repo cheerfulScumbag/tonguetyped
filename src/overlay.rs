@@ -1676,10 +1676,7 @@ fn single_line_surface_height() -> u32 {
 /// sizing - must agree on this: a config-error supersedes the held words because
 /// a rejected config edit is not dictation, so all caption styles paint the
 /// config-error status message instead of the last utterance's words.
-fn caption_captured<'a>(
-    phase: Option<Phase>,
-    live_text: Option<&'a LiveText>,
-) -> Option<&'a LiveText> {
+fn caption_captured(phase: Option<Phase>, live_text: Option<&LiveText>) -> Option<&LiveText> {
     if matches!(phase, Some(Phase::ConfigError)) {
         return None;
     }
