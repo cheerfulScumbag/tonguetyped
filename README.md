@@ -437,7 +437,8 @@ settings screens never offer a pair that cannot be painted:
 A stored look a style does not offer is clamped to the style's first option.
 
 The `waveform` look can be drawn as uniform `bars` or a continuous `squiggle`
-(the long pill's line) via `overlay.waveform_shape` (`bars` by default). Only
+(the long pill's line) via `overlay.waveform_shape` (`bars` by default, and
+`squiggle` for the long pill, which has always drawn its continuous line). Only
 the wide styles - `pill`, `long-pill`, and the glass caption - offer the shape
 choice; the round styles and the live-text look ignore it.
 

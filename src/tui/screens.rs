@@ -1006,6 +1006,9 @@ impl OverlayScreen {
             OverlayRow::Style => {
                 self.style = step_value(&overlay::STYLE_VALUES, &self.style, delta);
                 self.clamp_pending_look();
+                // A new style has its own waveform shape; the long pill's
+                // squiggle is its default, the rest take bars.
+                self.waveform_shape = overlay::default_shape(&self.style).to_string();
             }
             OverlayRow::Look => {
                 let options: Vec<&str> = overlay::style_look_options(&self.style)
@@ -1803,6 +1806,18 @@ mod tests {
             .row_labels()
             .iter()
             .any(|row| *row == "Waveform shape"));
+    }
+
+    #[test]
+    fn cycling_the_style_to_the_long_pill_restores_its_squiggle_default() {
+        let mut config = Config::default();
+        config.overlay.style = "half-circle".to_string();
+        config.overlay.look = "waveform".to_string();
+        let mut screen = OverlayScreen::new(&config);
+        screen.selected = 3; // Style row
+        screen.apply(&mut config);
+        assert_eq!(config.overlay.style, "long-pill");
+        assert_eq!(config.overlay.waveform_shape, "squiggle");
     }
 
     #[test]

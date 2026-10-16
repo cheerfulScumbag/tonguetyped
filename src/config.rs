@@ -1136,10 +1136,12 @@ fn migrate_legacy_activation_config(raw: &mut toml::Value) -> bool {
 /// into the current `look` string, keeping the caption styles on live text so
 /// they do not turn into a waveform; folds the retired `live-text-minimal`
 /// style onto the surviving glass `live-text` caption with the live-text look;
-/// and clamps a stored look to one the configured style offers, so the settings
-/// UIs and the preview never show a look the style cannot paint. An explicit
-/// `look` that the style offers is never overwritten. Mutates `raw` in place
-/// and returns whether a migration happened.
+/// clamps a stored look to one the configured style offers, so the settings
+/// UIs and the preview never show a look the style cannot paint; and supplies
+/// the style's own waveform shape when the config names none, so the long pill
+/// keeps the squiggle it always drew. An explicit `look` that the style offers
+/// and an explicit shape are never overwritten. Mutates `raw` in place and
+/// returns whether a migration happened.
 fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
     let Some(overlay) = raw
         .as_table_mut()
@@ -1207,6 +1209,19 @@ fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
     if clamped != look {
         overlay.insert("look".to_string(), toml::Value::String(clamped));
         migrated = true;
+    }
+
+    // A style that never named a shape keeps the one it always drew: the long
+    // pill's squiggle, rather than falling through to the generic bars default.
+    if overlay.get("waveform_shape").is_none() {
+        let default = crate::overlay::default_shape(&style);
+        if default != "bars" {
+            overlay.insert(
+                "waveform_shape".to_string(),
+                toml::Value::String(default.to_string()),
+            );
+            migrated = true;
+        }
     }
 
     migrated
@@ -2155,6 +2170,30 @@ mod tests {
         assert!(migrate_legacy_overlay_config(&mut raw));
         let config: Config = raw.try_into().unwrap();
         assert_eq!(config.overlay.look, "plain");
+    }
+
+    #[test]
+    fn long_pill_keeps_its_squiggle_when_the_config_named_no_shape() {
+        // A long-pill config that never named a shape keeps the continuous
+        // squiggle it always drew instead of falling through to `bars`.
+        let mut raw: toml::Value = toml::from_str("[overlay]\nstyle = \"long-pill\"\n").unwrap();
+        assert!(migrate_legacy_overlay_config(&mut raw));
+        let config: Config = raw.try_into().unwrap();
+        assert_eq!(config.overlay.waveform_shape, "squiggle");
+
+        // An explicit shape is never overwritten, and the other wide styles
+        // keep the uniform bars default.
+        let mut explicit: toml::Value =
+            toml::from_str("[overlay]\nstyle = \"long-pill\"\nwaveform_shape = \"bars\"\n")
+                .unwrap();
+        assert!(!migrate_legacy_overlay_config(&mut explicit));
+        let config: Config = explicit.try_into().unwrap();
+        assert_eq!(config.overlay.waveform_shape, "bars");
+
+        let mut pill: toml::Value = toml::from_str("[overlay]\nstyle = \"pill\"\n").unwrap();
+        assert!(!migrate_legacy_overlay_config(&mut pill));
+        let config: Config = pill.try_into().unwrap();
+        assert_eq!(config.overlay.waveform_shape, "bars");
     }
 
     #[test]

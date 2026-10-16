@@ -6,8 +6,8 @@ use crate::activation::ReconfigureOutcome;
 use crate::audio::{self, level_to_ratio};
 use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
 use crate::overlay::{
-    clamp_look_value as overlay_clamp_look_value, look_label as overlay_look_label,
-    shape_label as overlay_shape_label,
+    clamp_look_value as overlay_clamp_look_value, default_shape as overlay_default_shape,
+    look_label as overlay_look_label, shape_label as overlay_shape_label,
     shows_shape_choice as overlay_shows_shape_choice,
     style_look_options as overlay_style_look_options, POSITION_VALUES as OVERLAY_POSITION_VALUES,
     SHAPE_LABELS as OVERLAY_SHAPE_LABELS, SHAPE_VALUES as OVERLAY_SHAPE_VALUES,
@@ -853,11 +853,28 @@ impl ConsoleState {
                     OVERLAY_POSITION_VALUES[self.overlay_position_selection].to_string();
             }
             StepKind::OverlayStyle => {
-                self.config.overlay.style =
-                    OVERLAY_STYLE_VALUES[self.overlay_style_selection].to_string();
-                // The new style may offer a different set of looks; reset the
-                // look cursor so the next step starts from its first option.
-                self.overlay_look_selection = 0;
+                let changed = self.config.overlay.style != self.overlay_style_value();
+                self.config.overlay.style = self.overlay_style_value().to_string();
+                if changed {
+                    // A new style may offer a different set of looks; keep a
+                    // stored look it still offers and otherwise snap to its
+                    // first, then start its own waveform shape.
+                    self.config.overlay.look = overlay_clamp_look_value(
+                        &self.config.overlay.style,
+                        &self.config.overlay.look,
+                    );
+                    self.overlay_look_selection =
+                        overlay_style_look_options(&self.config.overlay.style)
+                            .iter()
+                            .position(|(value, _)| *value == self.config.overlay.look)
+                            .unwrap_or(0);
+                    self.config.overlay.waveform_shape =
+                        overlay_default_shape(&self.config.overlay.style).to_string();
+                    self.overlay_shape_selection = OVERLAY_SHAPE_VALUES
+                        .iter()
+                        .position(|value| *value == self.config.overlay.waveform_shape)
+                        .unwrap_or(0);
+                }
             }
             StepKind::OverlayLook => {
                 self.config.overlay.look = self.overlay_look_value();
@@ -1882,6 +1899,43 @@ mod tests {
             StepKind::Confirm,
             "the blob has no look options, so it skips straight to Confirm"
         );
+    }
+
+    #[test]
+    fn keeping_the_same_style_does_not_reset_the_stored_look() {
+        // Re-choosing the style the config already has must not silently
+        // replace the stored look with the style's first option.
+        let mut config = Config::default();
+        config.overlay.style = "pill".to_string();
+        config.overlay.look = "waveform".to_string();
+        let mut state = ConsoleState::new(config, no_mic_capabilities());
+        state.step = StepKind::OverlayStyle;
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "pill")
+            .unwrap();
+
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.look, "waveform");
+        assert_eq!(state.overlay_look_selection, 1);
+
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.look, "waveform");
+    }
+
+    #[test]
+    fn choosing_the_long_pill_defaults_the_shape_to_its_squiggle() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::OverlayStyle;
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "long-pill")
+            .unwrap();
+
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.style, "long-pill");
+        assert_eq!(state.config.overlay.waveform_shape, "squiggle");
+        assert_eq!(state.overlay_shape_selection, 1);
     }
 
     fn rendered_confirm(state: &ConsoleState) -> String {

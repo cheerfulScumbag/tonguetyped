@@ -988,6 +988,16 @@ pub(crate) fn offers_shape(style: Style) -> bool {
     matches!(style, Style::Pill | Style::LongPill | Style::LiveText)
 }
 
+/// The waveform shape a style starts on before the config names one: the long
+/// pill has always drawn its continuous squiggle, so it keeps that as its
+/// resting shape; every other shape style starts on the uniform bars.
+pub(crate) fn default_shape(style_name: &str) -> &'static str {
+    match style_for(style_name) {
+        Style::LongPill => "squiggle",
+        _ => "bars",
+    }
+}
+
 /// The `(value, label)` look options for a configured style name, for the two
 /// configuration UIs.
 pub(crate) fn style_look_options(style_name: &str) -> &'static [(&'static str, &'static str)] {
