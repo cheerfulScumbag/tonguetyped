@@ -1696,14 +1696,7 @@ impl App {
                 value
             }
             SettingId::TypingBackend => self.config.output.typing_backend.clone(),
-            SettingId::TranscriptFolder => {
-                let folder = self.config.history.transcript_folder.trim();
-                if folder.is_empty() {
-                    "disabled".to_string()
-                } else {
-                    folder.to_string()
-                }
-            }
+            SettingId::TranscriptFolder => self.config.history.folder_summary(),
             SettingId::HistoryRetention => self.config.history.retention_summary(),
             SettingId::Startup => {
                 if self.config.startup.autostart {

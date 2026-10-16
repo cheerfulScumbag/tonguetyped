@@ -1143,11 +1143,12 @@ impl TextFieldsScreen {
     }
 
     /// The "Transcript folder" screen: the folder each finished transcript is
-    /// also written into as a plain-text file. Empty disables the export.
+    /// written into as a plain-text file while transcripts are kept. Empty
+    /// disables the export, as does keeping transcripts off.
     pub(super) fn transcript_folder(config: &Config) -> Self {
         Self {
             title: "Transcript folder",
-            hint: "Leave empty to disable. A leading ~ means your home directory.",
+            hint: "Leave empty to disable. Written only while keeping transcripts is on. ~ = home.",
             fields: vec![(
                 "Folder",
                 TextField::new(config.history.transcript_folder.clone()),

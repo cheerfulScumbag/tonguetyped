@@ -1212,7 +1212,7 @@ impl ConsoleState {
                 &["Folder"],
                 std::slice::from_ref(&self.folder_field),
                 0,
-                &[],
+                &["Empty disables it; only written while keeping transcripts is on".to_string()],
             ),
             StepKind::OverlayEnabled => self.render_overlay_step(
                 frame,
@@ -1660,11 +1660,7 @@ impl ConsoleState {
             )),
             Line::from(format!(
                 "Folder:      {}",
-                if self.config.history.transcript_folder.trim().is_empty() {
-                    "disabled".to_string()
-                } else {
-                    self.config.history.transcript_folder.clone()
-                }
+                self.config.history.folder_summary()
             )),
             Line::from(format!(
                 "Autostart:   {}",

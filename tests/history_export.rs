@@ -234,11 +234,11 @@ async fn coordinator_applies_retention_and_exports_transcripts_to_a_folder() {
         "the just-dictated row must remain: {rows:?}"
     );
 
-    // Scenario C: the folder export is independent of the history database.
-    // With history disabled but a folder set, each dictation still lands as a
-    // file and no row is written; the files accumulate one-per-dictation and
-    // are never overwritten or pruned. The folder does not exist yet, as when
-    // a user types a fresh path, and the product must create it.
+    // Scenario C: a folder set on its own must write nothing. With keeping
+    // transcripts off, the folder is inert - no file lands, no folder is even
+    // created, and no database appears - proving the export is gated on the
+    // keep-transcripts option rather than on the folder being set. The folder
+    // does not exist yet, as when a user types a fresh path.
     let folder = unique_dir("export-root").join("nested/dictations");
     let export_data_root = unique_dir("export-data");
     isolate_data_dir(&export_data_root);
@@ -252,27 +252,19 @@ async fn coordinator_applies_retention_and_exports_transcripts_to_a_folder() {
     dictate(&coordinator).await;
     dictate(&coordinator).await;
 
-    let files = exported_files(&folder);
-    assert_eq!(
-        files.len(),
-        2,
-        "one file per dictation, with no overwrite: {files:?}"
+    assert!(
+        exported_files(&folder).is_empty(),
+        "keeping transcripts off must not write files even with a folder set: {:?}",
+        exported_files(&folder)
     );
-    for file in &files {
-        assert_eq!(std::fs::read_to_string(file).unwrap(), "keep this text\n");
-        assert!(
-            file.file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .ends_with(".txt"),
-            "exported filenames are date-stamped .txt: {file:?}"
-        );
-    }
+    assert!(
+        !folder.exists(),
+        "keeping transcripts off must not even create the folder"
+    );
     let export_db = tonguetyped::history::history_db_path().unwrap();
     assert!(
         !export_db.exists(),
-        "history disabled must not create the database when only the folder is set"
+        "keeping transcripts off must not create the database"
     );
 
     // Scenario D: the exported files outlive the database retention. With both
@@ -319,7 +311,7 @@ async fn coordinator_applies_retention_and_exports_transcripts_to_a_folder() {
     isolate_data_dir(&broken_data_root);
     let runtime = Arc::new(StubRuntime::new("still delivered"));
     let mut config = Config::default();
-    config.history.enabled = false;
+    config.history.enabled = true;
     config.history.transcript_folder = broken_folder.to_string_lossy().into_owned();
     config.transcription.max_recording_seconds = 5;
     let coordinator = Arc::new(Coordinator::with_runtime(config, runtime.clone()).unwrap());

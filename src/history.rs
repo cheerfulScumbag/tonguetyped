@@ -130,7 +130,8 @@ pub fn history_db_path() -> anyhow::Result<PathBuf> {
 
 /// Writes one finished transcript into `folder` as a plain-text file stamped
 /// with the date and time, and returns the file it wrote. Called on every
-/// finished dictation while a transcript folder is configured.
+/// finished dictation while a transcript folder is configured and keeping
+/// transcripts is on.
 ///
 /// Write-once by contract: this only ever writes (creating `folder` if
 /// needed, and picking a `-2`, `-3`, ... suffixed name rather than
