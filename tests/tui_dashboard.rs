@@ -844,7 +844,7 @@ fn pty_overlay_setting_steps_position_both_ways_and_persists_on_leave() {
         opened.contains("\u{2039} Enabled")
             && opened.contains("2/2")
             && opened.contains("Badge \u{203a}")
-            && opened.contains("Waveform \u{203a}"),
+            && opened.contains("\u{2039} Waveform"),
         "the Overlay screen should show all current values as steppers:\n{opened}"
     );
 

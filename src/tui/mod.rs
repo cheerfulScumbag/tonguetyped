@@ -2338,14 +2338,8 @@ pub(crate) fn overlay_preview_cells(
     max_cols: u16,
     max_rows: u16,
 ) -> Vec<Line<'static>> {
-    let (width, height, pixels) = crate::overlay::render_frame_pixels(
-        style,
-        Some("recording"),
-        0.0,
-        look,
-        shape,
-        &[],
-    );
+    let (width, height, pixels) =
+        crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, look, shape, &[]);
     let (cols, rows) = preview_cell_size(width, height, max_cols, max_rows);
     preview_lines_from_pixels(width, height, &pixels, cols, rows)
 }

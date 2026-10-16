@@ -1020,7 +1020,8 @@ impl OverlayScreen {
                 self.clamp_pending_look();
             }
             OverlayRow::Shape => {
-                self.waveform_shape = step_value(&overlay::SHAPE_VALUES, &self.waveform_shape, delta);
+                self.waveform_shape =
+                    step_value(&overlay::SHAPE_VALUES, &self.waveform_shape, delta);
             }
         }
     }
@@ -1765,7 +1766,7 @@ mod tests {
         config.overlay.look = "live-text".to_string();
         let screen = OverlayScreen::new(&config);
         assert!(
-            !screen.row_labels().iter().any(|row| *row == "Look"),
+            !screen.row_labels().contains(&"Look"),
             "the box offers a single look, so no Look row should appear"
         );
     }
@@ -1796,29 +1797,20 @@ mod tests {
         config.overlay.style = "long-pill".to_string();
         config.overlay.look = "waveform".to_string();
         let screen = OverlayScreen::new(&config);
-        assert!(screen
-            .row_labels()
-            .iter()
-            .any(|row| *row == "Waveform shape"));
+        assert!(screen.row_labels().contains(&"Waveform shape"));
 
         // Switching the pending look to live text hides the shape row.
         let mut screen = OverlayScreen::new(&config);
         screen.selected = 3; // Look row for a long pill
         screen.step(1); // waveform -> live text
         assert_eq!(screen.look, "live-text");
-        assert!(!screen
-            .row_labels()
-            .iter()
-            .any(|row| *row == "Waveform shape"));
+        assert!(!screen.row_labels().contains(&"Waveform shape"));
 
         // A round style never shows it.
         config.overlay.style = "badge".to_string();
         config.overlay.look = "waveform".to_string();
         let screen = OverlayScreen::new(&config);
-        assert!(!screen
-            .row_labels()
-            .iter()
-            .any(|row| *row == "Waveform shape"));
+        assert!(!screen.row_labels().contains(&"Waveform shape"));
     }
 
     #[test]
