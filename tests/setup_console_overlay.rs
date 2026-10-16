@@ -528,3 +528,26 @@ fn pty_inference_backend_step_lists_usable_backends_and_persists_the_choice() {
     let config = sandbox.config_contents();
     assert!(config.contains("preferred_backend = \"cpu\""), "{config}");
 }
+
+#[test]
+fn pty_confirm_step_backs_out_with_backspace() {
+    let sandbox = Sandbox::new("confirm-backspace");
+    let mut session = Session::spawn(&sandbox, 100, 32);
+
+    advance_to_overlay_enabled(&mut session);
+    session.wait_for("Overlay", Duration::from_secs(5));
+    session.send(KEY_UP); // Enabled -> Disabled skips the overlay sub-steps
+    session.send(KEY_ENTER);
+    session.wait_for("Write this configuration?", Duration::from_secs(5));
+
+    // Backspace is the second back key everywhere else in the wizard, so the
+    // final Review step must honor it too. If it retreats, the next Enter lands
+    // back on Review; if it is ignored, that Enter saves and exits and this
+    // wait times out.
+    session.send(KEY_BACKSPACE);
+    session.send(KEY_ENTER);
+    session.wait_for("Write this configuration?", Duration::from_secs(5));
+
+    session.send(KEY_ENTER); // save
+    session.wait_for_exit(Duration::from_secs(5));
+}

@@ -1425,6 +1425,11 @@ fn pty_transcript_output_configures_paste_and_enter() {
     session.send(KEY_RIGHT);
     session.wait_for("Shift+Insert (terminals)", Duration::from_secs(3));
 
+    // Enter on an option row only saves; it must not cycle the value, which
+    // would wrap Shift+Insert back to Ctrl+V.
+    session.send(KEY_ENTER);
+    session.wait_for("Shift+Insert (terminals)", Duration::from_secs(3));
+
     // Stepping right at the last value clamps instead of wrapping to the
     // first: backing out must keep Shift+Insert, not revert to Ctrl+V.
     session.send(KEY_RIGHT);

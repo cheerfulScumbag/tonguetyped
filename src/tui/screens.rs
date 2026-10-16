@@ -748,7 +748,9 @@ impl OutputScreen {
     /// untouched and returns the refusal for the result line, so the screen
     /// explains what to install instead of silently saving a method that can
     /// never deliver a transcript. Leaving `type`/`paste` also clears
-    /// Enter-after, which only those methods accept.
+    /// Enter-after, which only those methods accept. The option rows have no
+    /// `Enter` action: their value is stepped with `←`/`→`, so `Enter` only
+    /// saves, matching the Overlay screen where `Enter` only commits.
     pub(super) fn apply(&mut self, config: &mut Config) -> Result<(), String> {
         if let Some(method) = OUTPUT_METHODS.get(self.selected).copied() {
             if self.problems[self.selected].is_some() {
@@ -761,18 +763,6 @@ impl OutputScreen {
                 config.output.typing_backend = "auto".to_string();
                 config.output.auto_submit = false;
             }
-            return Ok(());
-        }
-        match self.selected {
-            Self::SUBMIT_ROW => config.output.auto_submit = !config.output.auto_submit,
-            Self::PASTE_KEYS_ROW => {
-                let index = PasteKeys::ALL
-                    .iter()
-                    .position(|keys| *keys == config.output.paste_keys)
-                    .unwrap_or(0);
-                config.output.paste_keys = PasteKeys::ALL[(index + 1) % PasteKeys::ALL.len()];
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -1816,13 +1806,24 @@ mod tests {
         assert!(rows[4].contains("nothing"), "{rows:?}");
         assert!(rows[5].contains("Ctrl+V"), "{rows:?}");
 
-        // Enter on the option rows toggles paste-and-enter and cycles the
-        // paste keys.
+        // Enter on the option rows only saves; `←`/`→` (the stepper) is the
+        // only thing that changes their value, matching the Overlay screen.
         screen.selected = 4;
         screen.apply(&mut config).unwrap();
+        assert!(
+            !config.output.auto_submit,
+            "Enter must not toggle the After-text row"
+        );
+        screen.step(1, &mut config);
         assert!(config.output.auto_submit);
         screen.selected = 5;
         screen.apply(&mut config).unwrap();
+        assert_eq!(
+            config.output.paste_keys,
+            PasteKeys::CtrlV,
+            "Enter must not cycle the paste keys"
+        );
+        screen.step(1, &mut config);
         assert_eq!(config.output.paste_keys, PasteKeys::ShiftInsert);
         let rows = screen.rows(&config);
         assert!(rows[4].contains("press Enter"), "{rows:?}");

@@ -502,7 +502,7 @@ impl ConsoleState {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
                 ControlFlow::Finish(SetupOutcome::Cancelled)
             }
-            KeyCode::Esc | KeyCode::Left => self.retreat(),
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => self.retreat(),
             _ => ControlFlow::Continue,
         })
     }
