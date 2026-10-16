@@ -287,7 +287,7 @@ fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
     advance_to_shortcut_step(&mut session);
     let shortcut_screen = session.visible_text();
     assert!(
-        shortcut_screen.contains("Ctrl+R set via system dialog"),
+        shortcut_screen.contains("Ctrl+R dialog"),
         "Shortcut step hint should advertise the Ctrl+R dialog path:\n{shortcut_screen}"
     );
     assert!(
@@ -332,7 +332,7 @@ fn pty_shortcut_step_continues_when_no_shortcut_is_bound() {
     let mut session = Session::spawn(&sandbox, 100, 32);
 
     advance_to_shortcut_step(&mut session);
-    session.wait_for("Ctrl+R set via system dialog", Duration::from_secs(5));
+    session.wait_for("Ctrl+R dialog", Duration::from_secs(5));
 
     // Enter continues without setting anything - the binding is the desktop's
     // to own, so the wizard must not block on a key it never chose.
