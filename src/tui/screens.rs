@@ -1162,7 +1162,7 @@ impl TextFieldsScreen {
                     None => spans.extend(field_value_spans(field, selected)),
                 }
                 pad_selected_row(&mut spans, selected, width);
-                Line::from(spans)
+                Line::from(spans).style(selection_style(selected))
             })
             .collect();
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
@@ -1269,12 +1269,15 @@ impl TextProcessingScreen {
             (
                 "Spoken punctuation",
                 self.selected == Self::ROW_SPOKEN,
-                toggle_row_value(self.spoken_punctuation),
+                toggle_row_value(
+                    self.spoken_punctuation,
+                    self.selected == Self::ROW_SPOKEN,
+                ),
             ),
             (
                 "Remove filler words",
                 self.selected == Self::ROW_FILLERS,
-                toggle_row_value(self.remove_fillers),
+                toggle_row_value(self.remove_fillers, self.selected == Self::ROW_FILLERS),
             ),
             (
                 "Cleanup command",
@@ -1301,7 +1304,7 @@ impl TextProcessingScreen {
                 )];
                 spans.extend(value.iter().cloned());
                 pad_selected_row(&mut spans, *selected, width);
-                Line::from(spans)
+                Line::from(spans).style(selection_style(*selected))
             })
             .collect();
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
@@ -1329,47 +1332,59 @@ fn text_row_value(field: &TextField, selected: bool, placeholder: &str) -> Vec<S
     }
 }
 
-/// The value half of a `TextProcessingScreen` toggle row.
-fn toggle_row_value(enabled: bool) -> Vec<Span<'static>> {
-    let (text, color) = if enabled {
-        ("[x] on", Color::Green)
+/// The value half of a `TextProcessingScreen` toggle row. On the selected row
+/// the value uses the highlight-bar style so the bar stays uniform.
+fn toggle_row_value(enabled: bool, selected: bool) -> Vec<Span<'static>> {
+    let text = if enabled { "[x] on" } else { "[ ] off" };
+    let style = if selected {
+        selection_style(true)
     } else {
-        ("[ ] off", Color::DarkGray)
+        Style::default().fg(if enabled {
+            Color::Green
+        } else {
+            Color::DarkGray
+        })
     };
-    vec![Span::styled(text.to_string(), Style::default().fg(color))]
+    vec![Span::styled(text.to_string(), style)]
 }
 
 /// The value half of one `TextFieldsScreen` row. The selected field draws a
-/// reversed cell at the cursor so the editing position is visible; an
+/// reversed cell at the cursor so the editing position is visible, and the
+/// value rides on the highlight bar so the bar is not punched through; an
 /// unselected field is plain text.
 fn field_value_spans(field: &TextField, selected: bool) -> Vec<Span<'static>> {
     if !selected {
         return vec![Span::raw(field.value().to_string())];
     }
     let (before, cursor_char, after) = field.split_at_cursor();
-    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+    let bar = selection_style(true);
     vec![
-        Span::raw(before),
+        Span::styled(before, bar),
         Span::styled(
             cursor_char.map(String::from).unwrap_or_else(|| " ".into()),
-            reversed,
+            bar.add_modifier(Modifier::REVERSED),
         ),
-        Span::raw(after),
+        Span::styled(after, bar),
     ]
 }
 
 /// The dim hint drawn in place of an empty text field. When the field is
 /// selected its first character carries the cursor, so the hint starts in
-/// the same column on every row.
+/// the same column on every row, and the hint rides on the highlight bar.
 fn placeholder_spans(text: &str, selected: bool) -> Vec<Span<'static>> {
-    let dim = Style::default().fg(Color::DarkGray);
     let mut chars = text.chars();
     match chars.next().filter(|_| selected) {
         Some(first) => vec![
-            Span::styled(first.to_string(), dim.add_modifier(Modifier::REVERSED)),
-            Span::styled(chars.as_str().to_string(), dim),
+            Span::styled(
+                first.to_string(),
+                selection_style(true).add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled(chars.as_str().to_string(), selection_style(true)),
         ],
-        None => vec![Span::styled(text.to_string(), dim)],
+        None => vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )],
     }
 }
 
@@ -2207,6 +2222,42 @@ mod tests {
         let screen = ModelScreen::new(&Config::default(), choices());
         let buffer = rendered_buffer(screen.list_widget(100, 12), 102, 12);
         assert_full_width_highlight_bar(&buffer, 1, 100);
+    }
+
+    #[test]
+    fn text_fields_selected_value_row_is_a_full_width_highlight_bar() {
+        let screen = TextFieldsScreen::history_retention(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(40), 42, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 40);
+    }
+
+    #[test]
+    fn text_fields_selected_empty_row_is_a_full_width_highlight_bar() {
+        let screen = TextFieldsScreen::transcript_folder(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(40), 42, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 40);
+    }
+
+    #[test]
+    fn text_fields_selected_placeholder_row_is_a_full_width_highlight_bar() {
+        let screen = TextFieldsScreen::decoding(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(100), 102, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 100);
+    }
+
+    #[test]
+    fn text_processing_selected_text_row_is_a_full_width_highlight_bar() {
+        let screen = TextProcessingScreen::new(&Config::default());
+        let buffer = rendered_buffer(screen.list_widget(60), 62, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 60);
+    }
+
+    #[test]
+    fn text_processing_selected_toggle_row_is_a_full_width_highlight_bar() {
+        let mut screen = TextProcessingScreen::new(&Config::default());
+        screen.selected = TextProcessingScreen::ROW_SPOKEN;
+        let buffer = rendered_buffer(screen.list_widget(60), 62, 12);
+        assert_full_width_highlight_bar(&buffer, 1, 60);
     }
 
     #[test]
