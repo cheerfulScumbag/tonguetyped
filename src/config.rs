@@ -888,29 +888,32 @@ pub struct OverlayConfig {
     // to pin the overlay to. See `overlay::target_for`.
     #[serde(default = "default_overlay_monitor")]
     pub monitor: String,
-    // Which recording glyph the non-caption overlay styles show: the plain
-    // pulsing dot (`false`) or the live multi-bar microphone waveform (`true`,
-    // the default). Every non-caption style's recording animation is
-    // voice-reactive either way - this only picks the busier glyph, feeding
-    // the real microphone level through `audio::publish_level` to the overlay
-    // actor. Renamed from
-    // `streaming_indicator`, which described the old synthetic stand-in for
-    // Handy's streaming panel; the serde alias and `migrate_legacy_overlay_config`
-    // keep existing config files loading and rewrite the key on save. This
-    // toggle never affects the live-text caption styles, which paint words or
-    // their listening pad and never a waveform.
-    #[serde(default = "default_true", alias = "streaming_indicator")]
-    pub live_waveform: bool,
-    // Which overlay look to show - the reviewed list lives in
-    // `overlay::STYLE_VALUES`, which now includes the `live-text`,
-    // `live-text-minimal`, and `live-text-box` streaming caption family. The
-    // configured style is authoritative: choosing a `live-text` style is what
-    // shows live streaming text, and any other style stays on screen and shows
-    // no live text even with a streaming model.
-    // `src/overlay.rs::style_for` parses this, falling back to `badge` for an
-    // unrecognized value exactly like `anchor_for` falls back on `position`.
+    // Which overlay shape to draw - the reviewed list lives in
+    // `overlay::STYLE_VALUES`. The style is authoritative for placement and for
+    // which looks and waveform shapes it offers (see `overlay::looks_for` /
+    // `overlay::shapes_for`). `src/overlay.rs::style_for` parses this, falling
+    // back to `badge` for an unrecognized value exactly like `anchor_for` falls
+    // back on `position`.
     #[serde(default = "default_overlay_style")]
     pub style: String,
+    // Which look the chosen style shows: its resting shape (`"plain"`), its
+    // voice-reactive waveform (`"waveform"`, the default), or live streaming
+    // text (`"live-text"`). Which values a style offers depends on the style -
+    // the round styles take plain or waveform, the wide styles take waveform or
+    // live-text, the box takes live-text only, and the blob has no options. The
+    // overlay clamps an unsupported value to the style's first offered look
+    // (`overlay::resolved_look`), so a stored value never conflicts with the
+    // style. This replaces the old `live_waveform` boolean, which
+    // `migrate_legacy_overlay_config` folds in (true -> `waveform`, false ->
+    // `plain`).
+    #[serde(default = "default_overlay_look")]
+    pub look: String,
+    // Which waveform glyph a wide style draws for the `"waveform"` look:
+    // uniform bars (`"bars"`, the default) or the long pill's continuous
+    // squiggly line (`"squiggle"`). Only the wide styles offer the choice (see
+    // `overlay::shapes_for`); the round styles and the live-text look ignore it.
+    #[serde(default = "default_overlay_waveform_shape")]
+    pub waveform_shape: String,
 }
 
 impl Default for OverlayConfig {
@@ -919,8 +922,9 @@ impl Default for OverlayConfig {
             enabled: true,
             position: default_overlay_position(),
             monitor: default_overlay_monitor(),
-            live_waveform: true,
             style: default_overlay_style(),
+            look: default_overlay_look(),
+            waveform_shape: default_overlay_waveform_shape(),
         }
     }
 }
@@ -1033,6 +1037,14 @@ fn default_overlay_style() -> String {
     "badge".to_string()
 }
 
+fn default_overlay_look() -> String {
+    "waveform".to_string()
+}
+
+fn default_overlay_waveform_shape() -> String {
+    "bars".to_string()
+}
+
 /// Rewrites a config file's pre-consolidation `[model]` table - the GPU-only
 /// `gpu_model` plus the separate, CPU-only legacy GGML `selected` field - into
 /// the single backend-neutral `active_model` this version reads. Mutates
@@ -1118,12 +1130,13 @@ fn migrate_legacy_activation_config(raw: &mut toml::Value) -> bool {
     true
 }
 
-/// Renames the legacy `[overlay] streaming_indicator` key to its current
-/// `live_waveform` name. The field kept its meaning when the waveform became
-/// truly microphone-reactive, so only the key changes; an explicit value is
-/// carried over untouched (a config that never had the key keeps the new
-/// default on the next save). Mutates `raw` in place and returns whether a
-/// migration happened.
+/// Folds the legacy `[overlay] live_waveform` boolean and its older
+/// `streaming_indicator` name into the current `look` string. Both named the
+/// recording glyph: `true` meant the microphone waveform and `false` the plain
+/// resting shape, so they map to `"waveform"` and `"plain"`. `live_waveform`
+/// wins when both keys are present (its meaning never changed, only its name).
+/// An explicit `look` is never overwritten. Mutates `raw` in place and returns
+/// whether a migration happened.
 fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
     let Some(overlay) = raw
         .as_table_mut()
@@ -1132,10 +1145,19 @@ fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
     else {
         return false;
     };
-    let Some(value) = overlay.remove("streaming_indicator") else {
+    let live_waveform = overlay.remove("live_waveform");
+    let streaming_indicator = overlay.remove("streaming_indicator");
+    let Some(value) = live_waveform.or(streaming_indicator) else {
         return false;
     };
-    overlay.entry("live_waveform".to_string()).or_insert(value);
+    let look = if value.as_bool() == Some(false) {
+        "plain"
+    } else {
+        "waveform"
+    };
+    overlay
+        .entry("look".to_string())
+        .or_insert_with(|| toml::Value::String(look.to_string()));
     true
 }
 
@@ -1950,7 +1972,7 @@ mod tests {
     fn feedback_settings_default_the_overlay_on_and_sounds_off() {
         let mut config = Config::default();
         assert!(config.overlay.enabled);
-        assert!(config.overlay.live_waveform);
+        assert_eq!(config.overlay.look, "waveform");
         assert!(!config.audio.feedback_sounds);
 
         config.audio.feedback_sounds = true;
@@ -1982,39 +2004,50 @@ mod tests {
     }
 
     #[test]
-    fn live_waveform_defaults_on_and_round_trips_through_toml() {
+    fn overlay_look_and_waveform_shape_default_and_round_trip_through_toml() {
         let config: Config = toml::from_str("[overlay]\nenabled = true\n").unwrap();
-        assert!(config.overlay.live_waveform);
+        assert_eq!(config.overlay.look, "waveform");
+        assert_eq!(config.overlay.waveform_shape, "bars");
 
-        let config: Config =
-            toml::from_str("[overlay]\nenabled = true\nlive_waveform = false\n").unwrap();
-        assert!(!config.overlay.live_waveform);
+        let config: Config = toml::from_str(
+            "[overlay]\nenabled = true\nlook = \"plain\"\nwaveform_shape = \"squiggle\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.overlay.look, "plain");
+        assert_eq!(config.overlay.waveform_shape, "squiggle");
     }
 
     #[test]
-    fn legacy_streaming_indicator_still_loads_and_migrates_to_live_waveform() {
-        // The serde alias keeps an un-migrated file readable even on paths
-        // that parse TOML directly.
-        let config: Config =
-            toml::from_str("[overlay]\nenabled = true\nstreaming_indicator = false\n").unwrap();
-        assert!(!config.overlay.live_waveform);
-
-        // The on-load migration renames the key and preserves its value.
+    fn legacy_waveform_toggles_migrate_to_look() {
+        // Both legacy booleans fold into `look`: false named the resting shape
+        // and true the waveform.
         let mut raw: toml::Value =
             toml::from_str("[overlay]\nstreaming_indicator = false\n").unwrap();
         assert!(migrate_legacy_overlay_config(&mut raw));
         assert!(raw["overlay"].get("streaming_indicator").is_none());
-        assert_eq!(raw["overlay"]["live_waveform"].as_bool(), Some(false));
+        assert_eq!(raw["overlay"]["look"].as_str(), Some("plain"));
 
-        // No legacy key means no migration, and an explicit new key wins over a
-        // stale legacy one.
+        let mut raw: toml::Value = toml::from_str("[overlay]\nlive_waveform = true\n").unwrap();
+        assert!(migrate_legacy_overlay_config(&mut raw));
+        assert!(raw["overlay"].get("live_waveform").is_none());
+        assert_eq!(raw["overlay"]["look"].as_str(), Some("waveform"));
+
+        // No legacy key means no migration.
         let mut untouched: toml::Value = toml::from_str("[overlay]\nstyle = \"pill\"\n").unwrap();
         assert!(!migrate_legacy_overlay_config(&mut untouched));
+
+        // `live_waveform` wins over the older `streaming_indicator` name, and
+        // an explicit `look` is never overwritten.
         let mut both: toml::Value =
             toml::from_str("[overlay]\nstreaming_indicator = false\nlive_waveform = true\n")
                 .unwrap();
         assert!(migrate_legacy_overlay_config(&mut both));
-        assert_eq!(both["overlay"]["live_waveform"].as_bool(), Some(true));
+        assert_eq!(both["overlay"]["look"].as_str(), Some("waveform"));
+
+        let mut explicit: toml::Value =
+            toml::from_str("[overlay]\nlive_waveform = false\nlook = \"live-text\"\n").unwrap();
+        assert!(migrate_legacy_overlay_config(&mut explicit));
+        assert_eq!(explicit["overlay"]["look"].as_str(), Some("live-text"));
     }
 
     #[test]

@@ -445,7 +445,7 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
         "the Inference backend row should show the configured preference:\n{screen}"
     );
     assert!(
-        screen.contains("Overlay            enabled, top-right, badge, live waveform"),
+        screen.contains("Overlay            enabled, top-right, badge, waveform"),
         "the Overlay row should summarize the real config:\n{screen}"
     );
     assert!(
@@ -844,7 +844,7 @@ fn pty_overlay_setting_steps_position_both_ways_and_persists_on_leave() {
         opened.contains("\u{2039} Enabled")
             && opened.contains("2/2")
             && opened.contains("Badge \u{203a}")
-            && opened.contains("Live microphone waveform"),
+            && opened.contains("Waveform \u{203a}"),
         "the Overlay screen should show all current values as steppers:\n{opened}"
     );
 
@@ -871,10 +871,7 @@ fn pty_overlay_setting_steps_position_both_ways_and_persists_on_leave() {
     session.send(KEY_RIGHT);
     session.wait_for("\u{2039} center \u{203a}", Duration::from_secs(3));
     session.send(KEY_ESC);
-    let home = session.wait_for(
-        "enabled, center, badge, live waveform",
-        Duration::from_secs(3),
-    );
+    let home = session.wait_for("enabled, center, badge, waveform", Duration::from_secs(3));
     assert!(
         home.contains("> Overlay"),
         "selection should return to the Overlay row:\n{home}"

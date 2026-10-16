@@ -454,7 +454,7 @@ fn configure(
         .map(|entry| {
             if entry.info().supports_streaming() {
                 format!(
-                    "{}  (live text with a caption style, English only)",
+                    "{}  (live text with a live-text look, English only)",
                     entry.id
                 )
             } else {

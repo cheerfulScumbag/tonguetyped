@@ -178,11 +178,18 @@ in
               "half-circle"
               "long-pill"
               "live-text"
-              "live-text-minimal"
               "live-text-box"
-            ]) "Overlay look.";
+            ]) "Overlay shape.";
+            look = setting (types.enum [
+              "plain"
+              "waveform"
+              "live-text"
+            ]) "Overlay look: the resting shape, the voice-reactive waveform, or live streaming text.";
+            waveform_shape = setting (types.enum [
+              "bars"
+              "squiggle"
+            ]) "Waveform glyph for the `waveform` look: uniform bars or the long pill's squiggly line.";
             monitor = setting types.str "`all`, or one output name from `tonguetyped doctor`.";
-            live_waveform = setting types.bool "Show the live microphone waveform instead of a pulsing dot.";
           };
         };
       };

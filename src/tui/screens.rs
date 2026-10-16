@@ -909,22 +909,36 @@ impl TypingBackendScreen {
     }
 }
 
-/// The Overlay screen keeps the wizard's enabled/position/style/waveform
-/// choices on one screen. Every row is a stepper: `←`/`→` moves the highlighted
-/// value in either direction (clamped at the ends), the preview follows the
-/// pending values before anything is saved, and `Enter` - or backing out -
-/// commits them. The three configuration rows appear only while the pending
-/// enable value is on.
+/// One selectable row of the Overlay screen. The row list is derived from the
+/// pending values, so the look and shape rows appear only where they apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayRow {
+    Enabled,
+    Position,
+    Style,
+    Look,
+    Shape,
+}
+
+/// The Overlay screen keeps the enabled/position/style/look choices on one
+/// screen. Every row is a stepper: `←`/`→` moves the highlighted value in
+/// either direction (clamped at the ends), the preview follows the pending
+/// values before anything is saved, and `Enter` - or backing out - commits
+/// them. The configuration rows appear only while the pending enable value is
+/// on: the look row follows the chosen style (round styles: plain or waveform;
+/// wide styles: waveform or live text; the box: live text only; the blob:
+/// none), and the waveform-shape row appears only for a wide style whose look
+/// is the waveform, so the screen never offers a nonsensical combination.
 pub(super) struct OverlayScreen {
-    /// Row cursor: 0 is the enable stepper, 1..3 the position/style/waveform
-    /// steppers (present only while `enabled`).
+    /// Row cursor into the current row list (see `row_kinds`).
     pub selected: usize,
     /// The pending values the cursor edits, committed into `config` by
     /// `commit`. The preview reads these, so it updates on every step.
     pub enabled: bool,
     pub position: String,
     pub style: String,
-    pub live_waveform: bool,
+    pub look: String,
+    pub waveform_shape: String,
     pub result: Option<Result<(), String>>,
 }
 
@@ -935,88 +949,141 @@ impl OverlayScreen {
             enabled: config.overlay.enabled,
             position: config.overlay.position.clone(),
             style: config.overlay.style.clone(),
-            live_waveform: config.overlay.live_waveform,
+            look: config.overlay.look.clone(),
+            waveform_shape: config.overlay.waveform_shape.clone(),
             result: None,
         }
     }
 
-    fn row_count(&self) -> usize {
-        if self.enabled {
-            4
-        } else {
-            1
+    /// The rows this screen shows, in order, given the pending values. The
+    /// look row follows the pending style (skipped for a style with no options,
+    /// the blob) and the shape row follows the pending style and look.
+    fn row_kinds(&self) -> Vec<OverlayRow> {
+        let mut rows = vec![OverlayRow::Enabled];
+        if !self.enabled {
+            return rows;
         }
+        rows.push(OverlayRow::Position);
+        rows.push(OverlayRow::Style);
+        if !overlay::style_look_options(&self.style).is_empty() {
+            rows.push(OverlayRow::Look);
+        }
+        if overlay::shows_shape_choice(&self.style, &self.look) {
+            rows.push(OverlayRow::Shape);
+        }
+        rows
     }
 
     pub(super) fn move_selection(&mut self, delta: i32) {
-        let len = self.row_count() as i32;
+        let len = self.row_kinds().len() as i32;
         self.selected = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
     }
 
-    /// Steps the highlighted row's pending value. The enable row clamps between
-    /// Disabled and Enabled, position/style clamp at the ends of their lists,
-    /// and waveform flips.
-    pub(super) fn step(&mut self, delta: i32) {
-        match self.selected {
-            0 => {
-                self.enabled = (usize::from(self.enabled) as i32 + delta).clamp(0, 1) == 1;
-            }
-            1 => self.position = step_value(&overlay::POSITION_VALUES, &self.position, delta),
-            2 => self.style = step_value(&overlay::STYLE_VALUES, &self.style, delta),
-            3 => {
-                self.live_waveform =
-                    (usize::from(self.live_waveform) as i32 + delta).clamp(0, 1) == 1;
-            }
-            _ => {}
+    /// Keeps the pending look valid for the pending style: a value the style
+    /// does not offer snaps to the style's first option. A style with no
+    /// options (the blob) is left alone.
+    fn clamp_pending_look(&mut self) {
+        let options = overlay::style_look_options(&self.style);
+        let Some((first, _)) = options.first() else {
+            return;
+        };
+        if !options.iter().any(|(value, _)| *value == self.look) {
+            self.look = (*first).to_string();
         }
     }
 
-    /// Writes the pending values into the config.
+    /// Steps the highlighted row's pending value. The enable row clamps between
+    /// Disabled and Enabled; the position, look and shape rows clamp at the ends
+    /// of their lists; the style row also keeps the look valid for the new
+    /// style.
+    pub(super) fn step(&mut self, delta: i32) {
+        let row = self
+            .row_kinds()
+            .get(self.selected)
+            .copied()
+            .unwrap_or(OverlayRow::Enabled);
+        match row {
+            OverlayRow::Enabled => {
+                self.enabled = (usize::from(self.enabled) as i32 + delta).clamp(0, 1) == 1;
+            }
+            OverlayRow::Position => {
+                self.position = step_value(&overlay::POSITION_VALUES, &self.position, delta)
+            }
+            OverlayRow::Style => {
+                self.style = step_value(&overlay::STYLE_VALUES, &self.style, delta);
+                self.clamp_pending_look();
+            }
+            OverlayRow::Look => {
+                let options: Vec<&str> = overlay::style_look_options(&self.style)
+                    .iter()
+                    .map(|(value, _)| *value)
+                    .collect();
+                self.look = step_value(&options, &self.look, delta);
+                self.clamp_pending_look();
+            }
+            OverlayRow::Shape => {
+                self.waveform_shape = step_value(&overlay::SHAPE_VALUES, &self.waveform_shape, delta);
+            }
+        }
+    }
+
+    /// Writes the pending values into the config, clamping the look to the
+    /// style so the stored value stays sane.
     pub(super) fn commit(&mut self, config: &mut Config) {
         config.overlay.enabled = self.enabled;
         config.overlay.position = self.position.clone();
         config.overlay.style = self.style.clone();
-        config.overlay.live_waveform = self.live_waveform;
+        self.clamp_pending_look();
+        config.overlay.look = self.look.clone();
+        config.overlay.waveform_shape = self.waveform_shape.clone();
     }
 
-    /// The row labels in display order: the enable stepper, then the three
-    /// configuration steppers while enabled.
+    /// The row labels in display order: the enable stepper, then the
+    /// configuration steppers that apply to the pending values.
     fn row_labels(&self) -> Vec<&'static str> {
-        let mut labels = vec!["Overlay"];
-        if self.enabled {
-            labels.extend(["Position", "Style", "Waveform"]);
-        }
-        labels
+        self.row_kinds()
+            .iter()
+            .map(|row| match row {
+                OverlayRow::Enabled => "Overlay",
+                OverlayRow::Position => "Position",
+                OverlayRow::Style => "Style",
+                OverlayRow::Look => "Look",
+                OverlayRow::Shape => "Waveform shape",
+            })
+            .collect()
     }
 
     pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
+        let rows = self.row_kinds();
+        // The look labels for the pending style, so the stepper's value and its
+        // option count line up with what the overlay actually offers.
+        let look_labels: Vec<&'static str> = overlay::style_look_options(&self.style)
+            .iter()
+            .map(|(_, label)| *label)
+            .collect();
         let lines: Vec<Line> = self
             .row_labels()
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(index, label)| {
                 let selected = index == self.selected;
                 let marker = if selected { "> " } else { "  " };
                 let mut spans = vec![Span::styled(
-                    format!("{marker}{label:<12}"),
+                    format!("{marker}{label:<16}"),
                     selection_style(selected),
                 )];
-                let (options, value): (&[&str], &str) = match index {
-                    0 => (
+                let (options, value): (&[&str], &str) = match rows[index] {
+                    OverlayRow::Enabled => (
                         &["Disabled", "Enabled"],
                         if self.enabled { "Enabled" } else { "Disabled" },
                     ),
-                    1 => (&overlay::POSITION_VALUES, self.position.as_str()),
-                    2 => (&overlay::STYLE_LABELS, overlay_style_label(&self.style)),
-                    3 => (
-                        &overlay::WAVEFORM_LABELS,
-                        if self.live_waveform {
-                            overlay::WAVEFORM_LABELS[1]
-                        } else {
-                            overlay::WAVEFORM_LABELS[0]
-                        },
+                    OverlayRow::Position => (&overlay::POSITION_VALUES, self.position.as_str()),
+                    OverlayRow::Style => (&overlay::STYLE_LABELS, overlay_style_label(&self.style)),
+                    OverlayRow::Look => (&look_labels, overlay::look_label(&self.look)),
+                    OverlayRow::Shape => (
+                        &overlay::SHAPE_LABELS,
+                        overlay::shape_label(&self.waveform_shape),
                     ),
-                    _ => (&[], ""),
                 };
                 spans.extend(stepper_spans(options, value, selected));
                 pad_selected_row(&mut spans, selected, width);
@@ -1432,6 +1499,25 @@ fn apply_decoding(screen: &TextFieldsScreen, config: &mut Config) -> Result<(), 
         .apply_decoding_form(prompt.1.value(), &knobs)
 }
 
+/// A one-line summary of the overlay's look for the home-screen Settings row
+/// (for example "waveform, bars" or "live text"), derived from the same
+/// per-style options the Overlay screen shows.
+pub(super) fn overlay_look_summary(config: &Config) -> String {
+    let style = &config.overlay.style;
+    if overlay::style_look_options(style).is_empty() {
+        return "no options".to_string();
+    }
+    let look = overlay::look_label(&config.overlay.look).to_lowercase();
+    if overlay::shows_shape_choice(style, &config.overlay.look) {
+        format!(
+            "{look}, {}",
+            overlay::shape_label(&config.overlay.waveform_shape).to_lowercase()
+        )
+    } else {
+        look
+    }
+}
+
 pub(super) fn overlay_style_label(style: &str) -> &'static str {
     overlay::STYLE_VALUES
         .iter()
@@ -1655,11 +1741,15 @@ mod tests {
     }
 
     #[test]
-    fn overlay_disabling_hides_the_three_configuration_rows() {
+    fn overlay_disabling_hides_the_configuration_rows() {
         let config = Config::default();
         let mut screen = OverlayScreen::new(&config);
+        // Default is an enabled badge: Overlay, Position, Style, Look.
         assert!(screen.enabled);
-        assert_eq!(screen.row_labels().len(), 4);
+        assert_eq!(
+            screen.row_labels(),
+            vec!["Overlay", "Position", "Style", "Look"]
+        );
 
         screen.selected = 0;
         screen.step(-1); // step the enable row to Disabled
@@ -1671,28 +1761,54 @@ mod tests {
     }
 
     #[test]
-    fn overlay_waveform_row_toggles_and_uses_the_shared_labels() {
+    fn overlay_look_row_cycles_the_two_badge_looks() {
         let config = Config::default();
         let mut screen = OverlayScreen::new(&config);
-        screen.selected = 3; // Waveform row
-                             // The default is the live waveform; step left to the simple pulse, then
-                             // right back, so both directions flip the toggle.
-        assert!(screen.live_waveform);
+        // The default badge style offers waveform or plain at row index 3.
+        screen.selected = 3;
+        assert_eq!(screen.look, "waveform");
         screen.step(-1);
-        assert!(
-            !screen.live_waveform,
-            "stepping left selects the simple pulse"
-        );
+        assert_eq!(screen.look, "plain", "stepping left selects the plain look");
         screen.step(1);
-        assert!(
-            screen.live_waveform,
-            "stepping right selects the live waveform"
+        assert_eq!(
+            screen.look, "waveform",
+            "stepping right selects the waveform"
         );
         assert_eq!(
             screen.row_labels(),
-            vec!["Overlay", "Position", "Style", "Waveform"]
+            vec!["Overlay", "Position", "Style", "Look"]
         );
-        assert_eq!(overlay::WAVEFORM_LABELS.len(), 2);
+    }
+
+    #[test]
+    fn overlay_shape_row_appears_only_for_a_wide_waveform_look() {
+        let mut config = Config::default();
+        config.overlay.style = "long-pill".to_string();
+        config.overlay.look = "waveform".to_string();
+        let screen = OverlayScreen::new(&config);
+        assert!(screen
+            .row_labels()
+            .iter()
+            .any(|row| *row == "Waveform shape"));
+
+        // Switching the pending look to live text hides the shape row.
+        let mut screen = OverlayScreen::new(&config);
+        screen.selected = 3; // Look row for a long pill
+        screen.step(1); // waveform -> live text
+        assert_eq!(screen.look, "live-text");
+        assert!(!screen
+            .row_labels()
+            .iter()
+            .any(|row| *row == "Waveform shape"));
+
+        // A round style never shows it.
+        config.overlay.style = "badge".to_string();
+        config.overlay.look = "waveform".to_string();
+        let screen = OverlayScreen::new(&config);
+        assert!(!screen
+            .row_labels()
+            .iter()
+            .any(|row| *row == "Waveform shape"));
     }
 
     #[test]

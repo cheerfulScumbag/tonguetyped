@@ -451,7 +451,8 @@ fn run_actor(ready: std::sync::mpsc::Sender<Option<Sender<Command>>>) -> anyhow:
         phase: None,
         deadline: None,
         anim_start: Instant::now(),
-        live_waveform: false,
+        look: Look::Waveform,
+        shape: WaveformShape::Bars,
         style: Style::Badge,
         // Overwritten by the first `handle_command`; surfaces are not created
         // until then, so these are never used to build a surface beforehand.
@@ -551,7 +552,8 @@ struct State {
     phase: Option<Phase>,
     deadline: Option<Instant>,
     anim_start: Instant,
-    live_waveform: bool,
+    look: Look,
+    shape: WaveformShape,
     style: Style,
     position: String,
     target: Target,
@@ -604,8 +606,9 @@ impl State {
                 self.levels.clear();
             }
         }
-        self.live_waveform = command.config.live_waveform;
         self.style = resolved_style(&command.config.style);
+        self.look = resolved_look(self.style, &command.config.look);
+        self.shape = shape_for(&command.config.waveform_shape);
         self.position = command.config.position.clone();
         self.target = target_for(&command.config.monitor);
 
@@ -719,17 +722,18 @@ impl State {
     }
 
     /// The size to request for `style` given the current content. Every style
-    /// uses its fixed representative size except the caption styles, which are
-    /// content-measured (see [`caption_surface_size`]): the single-line pill and
-    /// the scrolling box both hug their text, and every caption size is
-    /// quantised so the layer is not resized for each frame of a streamed
-    /// partial. A full-screen style requests `(0, 0)` so the compositor
+    /// uses its fixed representative size except the content-sized captions
+    /// (see [`content_sized_caption`]): the glass caption's `live-text` pill is
+    /// measured from the cue plus the current line (or the listening pad /
+    /// status message) and clamped between [`LIVE_TEXT_MIN_WIDTH`] and
+    /// [`LIVE_TEXT_SURFACE`], and the box grows a wrapped line at a time up to
+    /// its ceiling. A full-screen style requests `(0, 0)` so the compositor
     /// stretches it to the output.
     fn desired_layer_size(&self, style: Style) -> (u32, u32) {
         if is_fullscreen_style(style) {
             return (0, 0);
         }
-        if is_caption_style(style) {
+        if content_sized_caption(style, self.look) {
             return caption_surface_size(style, self.phase, self.live_text.as_ref());
         }
         surface_size_for(style)
@@ -870,7 +874,8 @@ impl State {
             self.phase,
             t,
             breath,
-            self.live_waveform,
+            self.look,
+            self.shape,
             self.style,
             OverlayFrame {
                 levels: &self.levels,
@@ -907,13 +912,12 @@ pub(crate) const POSITION_VALUES: [&str; 7] = [
 /// corners, `HalfCircle` as a captain-requested glowing, pulsing
 /// semicircle resting on the top edge, and `LongPill` as a captain-requested
 /// wide dark bar with a squiggly live waveform and a round status button,
-/// separately from the small `Pill`. The `live-text`, `live-text-minimal`, and
-/// `live-text-box` values are the streaming caption family: a dark glass card
-/// showing the live partial words from a streaming model (see [`LiveText`]),
-/// with the listening pad before the first word. They are the only styles that
-/// paint live text, and they are chosen explicitly rather than adopted when a
-/// streaming model is active.
-pub(crate) const STYLE_VALUES: [&str; 10] = [
+/// separately from the small `Pill`. The `live-text` and `live-text-box` values
+/// are the streaming caption family: a dark glass card showing the live partial
+/// words from a streaming model (see [`LiveText`]), with the listening pad
+/// before the first word. They are the only styles that can paint live text, and
+/// which look they show is the separate `look` choice.
+pub(crate) const STYLE_VALUES: [&str; 9] = [
     "badge",
     "minimal",
     "pill",
@@ -922,12 +926,11 @@ pub(crate) const STYLE_VALUES: [&str; 10] = [
     "half-circle",
     "long-pill",
     "live-text",
-    "live-text-minimal",
     "live-text-box",
 ];
 
 /// Display labels matching `STYLE_VALUES` position for position.
-pub(crate) const STYLE_LABELS: [&str; 10] = [
+pub(crate) const STYLE_LABELS: [&str; 9] = [
     "Badge",
     "Minimal",
     "Pill",
@@ -936,18 +939,151 @@ pub(crate) const STYLE_LABELS: [&str; 10] = [
     "Half Circle",
     "Long Pill",
     "Live Text (glass)",
-    "Live Text (minimal)",
     "Live Text (box)",
 ];
 
-/// Display labels for `OverlayConfig::live_waveform`: the plain pulsing dot
-/// first, the live multi-bar waveform second. Every non-caption style's
-/// recording animation reacts to the microphone either way - the waveform
-/// styles follow the live level sample by sample, the simple-pulse styles
-/// follow its envelope - so this only picks the busier glyph, not whether the
-/// overlay is voice-reactive. The live-text caption styles never draw a
-/// waveform and ignore this toggle.
-pub(crate) const WAVEFORM_LABELS: [&str; 2] = ["Simple pulse", "Live microphone waveform"];
+/// One overlay look: the style's resting shape (`Plain`), its voice-reactive
+/// waveform (`Waveform`), or its live streaming text (`LiveText`). Which looks a
+/// style offers depends on the style (see [`look_options`]); the overlay clamps
+/// a configured value to what the style offers (see [`resolved_look`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Look {
+    Plain,
+    Waveform,
+    LiveText,
+}
+
+/// The `(value, label)` options a style offers, in display order, for the two
+/// configuration UIs and the config-clamping path. An empty slice means the
+/// style has no look options - it just draws its own shape (the blob). The
+/// round styles take plain or waveform; the wide styles take waveform or
+/// live-text; the box takes live-text only. This is the single owner of which
+/// combinations exist, so the settings screens can never offer a nonsensical
+/// pair.
+pub(crate) fn look_options(style: Style) -> &'static [(&'static str, &'static str)] {
+    match style {
+        Style::Badge | Style::Minimal | Style::Pill | Style::HalfCircle | Style::Border => {
+            &[("plain", "Plain"), ("waveform", "Waveform")]
+        }
+        Style::LongPill | Style::LiveText => {
+            &[("waveform", "Waveform"), ("live-text", "Live text")]
+        }
+        Style::LiveTextBox => &[("live-text", "Live text")],
+        Style::Blob => &[],
+    }
+}
+
+/// The `OverlayConfig::waveform_shape` values the shape row cycles through:
+/// uniform bars, or the long pill's continuous squiggly line.
+pub(crate) const SHAPE_VALUES: [&str; 2] = ["bars", "squiggle"];
+
+/// The display labels for [`SHAPE_VALUES`], in the same order, for the settings
+/// screens' shape steppers.
+pub(crate) const SHAPE_LABELS: [&str; 2] = ["Bars", "Squiggly line"];
+
+/// Whether the style offers the waveform-shape choice - the wide styles whose
+/// waveform has room for either glyph. The round styles and the live-text look
+/// ignore it.
+pub(crate) fn offers_shape(style: Style) -> bool {
+    matches!(style, Style::Pill | Style::LongPill | Style::LiveText)
+}
+
+/// The `(value, label)` look options for a configured style name, for the two
+/// configuration UIs.
+pub(crate) fn style_look_options(style_name: &str) -> &'static [(&'static str, &'static str)] {
+    look_options(style_for(style_name))
+}
+
+/// Whether a style-name + look pair shows the waveform-shape row: the style
+/// offers the shape and its resolved look is the waveform. The configuration
+/// UIs use this so the row only appears where it means something.
+pub(crate) fn shows_shape_choice(style_name: &str, look: &str) -> bool {
+    let style = style_for(style_name);
+    offers_shape(style) && resolved_look(style, look) == Look::Waveform
+}
+
+/// The display label of a configured look value, falling back to `Waveform`.
+pub(crate) fn look_label(value: &str) -> &'static str {
+    match value {
+        "plain" => "Plain",
+        "live-text" => "Live text",
+        _ => "Waveform",
+    }
+}
+
+/// The display label of a configured waveform-shape value, falling back to
+/// `Bars`.
+pub(crate) fn shape_label(value: &str) -> &'static str {
+    match value {
+        "squiggle" => "Squiggly line",
+        _ => "Bars",
+    }
+}
+
+/// Parses a configured look value, defaulting to `Waveform`.
+fn look_for(name: &str) -> Look {
+    match name {
+        "plain" => Look::Plain,
+        "live-text" => Look::LiveText,
+        _ => Look::Waveform,
+    }
+}
+
+/// The configured string value of a look.
+fn look_value(look: Look) -> &'static str {
+    match look {
+        Look::Plain => "plain",
+        Look::Waveform => "waveform",
+        Look::LiveText => "live-text",
+    }
+}
+
+/// The style's first offered look, or `Plain` for a style with no options (the
+/// blob, which ignores it anyway).
+fn first_look(style: Style) -> Look {
+    match look_options(style).first() {
+        Some(("plain", _)) => Look::Plain,
+        Some(("waveform", _)) => Look::Waveform,
+        Some(("live-text", _)) => Look::LiveText,
+        _ => Look::Plain,
+    }
+}
+
+/// Clamps `wanted` to a look the style offers, falling back to the style's
+/// first option. Keeps a stored value from ever conflicting with the style.
+fn resolve_look(style: Style, wanted: Look) -> Look {
+    let value = look_value(wanted);
+    if look_options(style)
+        .iter()
+        .any(|(option, _)| *option == value)
+    {
+        wanted
+    } else {
+        first_look(style)
+    }
+}
+
+/// The look the overlay actually paints for a configured value.
+fn resolved_look(style: Style, configured: &str) -> Look {
+    resolve_look(style, look_for(configured))
+}
+
+/// One waveform glyph: uniform bars, or the long pill's continuous squiggly
+/// line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaveformShape {
+    Bars,
+    Squiggle,
+}
+
+/// Parses a configured waveform-shape value, defaulting to `Bars`.
+fn shape_for(name: &str) -> WaveformShape {
+    if name == "squiggle" {
+        WaveformShape::Squiggle
+    } else {
+        WaveformShape::Bars
+    }
+}
 
 fn anchor_for(position: &str) -> Anchor {
     match position {
@@ -962,14 +1098,15 @@ fn anchor_for(position: &str) -> Anchor {
     }
 }
 
-/// The `overlay.live_waveform` look for `Phase::Recording`: a small
-/// multi-bar waveform in place of the single pulsing dot. The bars come from
-/// [`LevelHistory`], which the actor fills from the recording path's published
-/// microphone level (see [`crate::audio::publish_level`]), so the shape follows
-/// the voice: loud speech reaches up the available height, quiet stretches sit
-/// as tiny dots, and the newest sample is the right-most bar. Shared by every
-/// `Style` - each passes its own available width/height/color so the same
-/// motion reads correctly whether it sits inside a round badge or a wide pill.
+/// The `waveform` look's bars for `Phase::Recording`: a small multi-bar
+/// waveform whose bars are all one uniform width with rounded (`fill_capsule`)
+/// ends, as the captain asked. The bars come from [`LevelHistory`], which the
+/// actor fills from the recording path's published microphone level (see
+/// [`crate::audio::publish_level`]), so the shape follows the voice: loud
+/// speech reaches up the available height, quiet stretches sit as tiny dots,
+/// and the newest sample is the right-most bar. Shared by every `Style` - each
+/// passes its own available width/height/color so the same motion reads
+/// correctly whether it sits inside a round badge or a wide pill.
 fn paint_live_waveform(
     canvas: &mut Canvas,
     cx: f32,
@@ -983,7 +1120,8 @@ fn paint_live_waveform(
     /// fit the available width at a given style size.
     const BAR_PITCH: f32 = 3.0;
     /// Fraction of the pitch the bar itself fills, leaving a gap between bars.
-    const BAR_WIDTH_FRACTION: f32 = 0.55;
+    /// Every bar uses this same fraction, so their widths stay uniform.
+    const BAR_WIDTH_FRACTION: f32 = 0.62;
 
     let count = ((available_width / BAR_PITCH).round() as usize).clamp(6, LEVEL_HISTORY);
     let pitch = available_width / count as f32;
@@ -992,7 +1130,8 @@ fn paint_live_waveform(
     for i in 0..count {
         let level = levels.waveform_sample(count, i);
         let height = (max_bar_height * bar_height_fraction(level)).max(bar_width);
-        fill_centered_bar(canvas, x, cy, bar_width, height, rgb);
+        // A vertical capsule: rounded caps at the bar's top and bottom.
+        fill_capsule(canvas, x, cy, bar_width / 2.0, height / 2.0, rgb, 1.0);
         x += pitch;
     }
 }
@@ -1595,17 +1734,14 @@ pub(crate) enum Style {
     Border,
     HalfCircle,
     LongPill,
-    /// The streaming caption, glass variant (the default): a content-sized dark
-    /// glass card holding a leading phase chip and one line of the live partial
-    /// transcript, or the listening pad until words arrive. It is shown only
-    /// when the user picks it, and it is the only family that paints live text.
+    /// The streaming caption, glass variant: a content-sized dark glass card
+    /// holding a leading phase chip and one line of the live partial transcript,
+    /// or the listening pad until words arrive. It takes the waveform or the
+    /// live-text look.
     LiveText,
-    /// The streaming caption, minimal variant: the same single-line card with a
-    /// single leading phase dot instead of the full chip.
-    LiveTextMinimal,
-    /// The streaming caption, box variant: the same content sizing but a
-    /// wrapping card that grows a line per wrapped row and scrolls internally
-    /// past its cap, for long passages.
+    /// The streaming caption, box variant: a wrapped card that grows with its
+    /// lines and scrolls internally, for long passages. It takes the live-text
+    /// look only.
     LiveTextBox,
 }
 
@@ -1622,18 +1758,25 @@ fn resolved_style(configured: &str) -> Style {
 /// variant if the caller picked one, else the glass default.
 fn caption_variant(configured: Style) -> Style {
     match configured {
-        Style::LiveTextMinimal => Style::LiveTextMinimal,
         Style::LiveTextBox => Style::LiveTextBox,
         _ => Style::LiveText,
     }
 }
 
-/// Whether `style` is one of the `live-text` caption variants.
+/// Whether `style` is one of the `live-text` caption variants. Used by the
+/// offline tests that treat the caption family specially.
+#[cfg(test)]
 fn is_caption_style(style: Style) -> bool {
-    matches!(
-        style,
-        Style::LiveText | Style::LiveTextMinimal | Style::LiveTextBox
-    )
+    matches!(style, Style::LiveText | Style::LiveTextBox)
+}
+
+/// Whether a style's surface hugs its content, given its resolved `look`. The
+/// box always hugs the wrapped lines it stacks below its chip row; the glass
+/// caption hugs only in its `live-text` look, keeping the wide fixed surface
+/// for its `waveform` look. Shared by the runtime layer sizing and the offline
+/// preview renderer so the two never disagree.
+fn content_sized_caption(style: Style, look: Look) -> bool {
+    style == Style::LiveTextBox || (style == Style::LiveText && look == Look::LiveText)
 }
 
 /// The vertical centre of the scrolling box's leading chip row (and so the row
@@ -1732,19 +1875,10 @@ fn caption_surface_size(
             boxed_surface_height(phase, live_text),
         );
     }
-    let minimal = style == Style::LiveTextMinimal;
     let captured = caption_captured(phase, live_text);
     let recording = phase == Some(Phase::Recording);
     // The text/pad origin, matching paint_live_text's single-line layout.
-    let origin = if minimal {
-        if captured.is_some() || !recording {
-            LIVE_TEXT_PADDING + 7.0 + 16.0
-        } else {
-            LIVE_TEXT_PADDING + 6.0
-        }
-    } else {
-        LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_CHIP_GAP
-    };
+    let origin = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS * 2.0 + LIVE_TEXT_CHIP_GAP;
     let content = match captured {
         Some(text) => {
             let line = text::caption_line(&text.committed, &text.tentative);
@@ -1771,7 +1905,7 @@ fn caption_surface_size(
 
 /// Parses `OverlayConfig::style`, falling back to `Badge` for an unrecognized
 /// value - the same tolerant-fallback shape `anchor_for` uses for `position`.
-fn style_for(name: &str) -> Style {
+pub(crate) fn style_for(name: &str) -> Style {
     match name {
         "minimal" => Style::Minimal,
         "pill" => Style::Pill,
@@ -1780,7 +1914,6 @@ fn style_for(name: &str) -> Style {
         "half-circle" => Style::HalfCircle,
         "long-pill" => Style::LongPill,
         "live-text" => Style::LiveText,
-        "live-text-minimal" => Style::LiveTextMinimal,
         "live-text-box" => Style::LiveTextBox,
         _ => Style::Badge,
     }
@@ -1819,7 +1952,7 @@ fn surface_size_for(style: Style) -> (u32, u32) {
         Style::Border => BORDER_PREVIEW,
         Style::HalfCircle => HALF_CIRCLE_SURFACE,
         Style::LongPill => LONG_PILL_SURFACE,
-        Style::LiveText | Style::LiveTextMinimal => LIVE_TEXT_SURFACE,
+        Style::LiveText => LIVE_TEXT_SURFACE,
         Style::LiveTextBox => LIVE_TEXT_BOX_SURFACE,
     }
 }
@@ -1964,30 +2097,35 @@ struct OverlayFrame<'a> {
     live_text: Option<&'a LiveText>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint(
     canvas: &mut Canvas,
     phase: Option<Phase>,
     t: f32,
     breath: f32,
-    live_waveform: bool,
+    look: Look,
+    shape: WaveformShape,
     style: Style,
     frame: OverlayFrame<'_>,
 ) {
     let OverlayFrame { levels, live_text } = frame;
     canvas.pixels.fill(0);
     let Some(phase) = phase else { return };
+    // Clamp the look to one the style offers, so no caller can ask a style for
+    // a look it cannot paint.
+    let look = resolve_look(style, look);
     match style {
-        Style::Badge => paint_badge(canvas, phase, t, live_waveform, levels),
-        Style::Minimal => paint_minimal(canvas, phase, t, live_waveform, levels),
-        Style::Pill => paint_pill(canvas, phase, t, live_waveform, levels),
-        // The blob carries its reaction in its own body, never a bar
-        // waveform, so it ignores `live_waveform`.
+        Style::Badge => paint_badge(canvas, phase, t, look, levels),
+        Style::Minimal => paint_minimal(canvas, phase, t, look, levels),
+        Style::Pill => paint_pill(canvas, phase, t, look, shape, levels),
+        // The blob carries its reaction in its own body, never a waveform or
+        // live text, so it has no look options and ignores them.
         Style::Blob => paint_blob(canvas, phase, t, breath, levels),
-        Style::Border => paint_border(canvas, phase, t, live_waveform, levels),
-        Style::HalfCircle => paint_half_circle(canvas, phase, t, live_waveform, levels),
-        Style::LongPill => paint_long_pill(canvas, phase, t, levels),
-        Style::LiveText | Style::LiveTextMinimal | Style::LiveTextBox => {
-            paint_live_text(canvas, phase, t, live_text, style)
+        Style::Border => paint_border(canvas, phase, t, look, levels),
+        Style::HalfCircle => paint_half_circle(canvas, phase, t, look, levels),
+        Style::LongPill => paint_long_pill(canvas, phase, t, look, shape, levels, live_text),
+        Style::LiveText | Style::LiveTextBox => {
+            paint_live_text(canvas, phase, t, look, shape, live_text, levels, style)
         }
     }
 }
@@ -2004,21 +2142,14 @@ fn recording_level(levels: &LevelHistory) -> f32 {
     level_fraction(levels.recent_peak(5))
 }
 
-fn paint_badge(
-    canvas: &mut Canvas,
-    phase: Phase,
-    t: f32,
-    live_waveform: bool,
-    levels: &LevelHistory,
-) {
+fn paint_badge(canvas: &mut Canvas, phase: Phase, t: f32, look: Look, levels: &LevelHistory) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let disc_radius = canvas.width.min(canvas.height) as f32 * 0.42;
     let color = phase_color(phase);
-    let lf = recording_level(levels);
 
     match phase {
-        Phase::Recording if live_waveform => {
+        Phase::Recording if look == Look::Waveform => {
             fill_circle(canvas, cx, cy, disc_radius, color);
             // The bars are centred in the disc; the bounding box's half
             // diagonal (~0.81 * disc_radius) stays inside the circle.
@@ -2033,17 +2164,9 @@ fn paint_badge(
             );
         }
         Phase::Recording => {
+            // The plain look: just the badge on its own, no inner glyph or
+            // pulse, as the captain asked.
             fill_circle(canvas, cx, cy, disc_radius, color);
-            let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
-            // The inner dot's size follows the voice: a small calm marker at
-            // silence, the original pulsing dot at full speech level.
-            fill_circle(
-                canvas,
-                cx,
-                cy,
-                disc_radius * (0.22 + 0.20 * lf * (0.8 + 0.2 * pulse)),
-                GLYPH_COLOR,
-            );
         }
         Phase::Transcribing => {
             fill_circle(canvas, cx, cy, disc_radius, color);
@@ -2112,19 +2235,12 @@ fn paint_badge(
 /// A thin outline ring with a small centered, phase-colored glyph - the
 /// lowest-visual-weight style, with no filled background to rest a
 /// contrasting white glyph against.
-fn paint_minimal(
-    canvas: &mut Canvas,
-    phase: Phase,
-    t: f32,
-    live_waveform: bool,
-    levels: &LevelHistory,
-) {
+fn paint_minimal(canvas: &mut Canvas, phase: Phase, t: f32, look: Look, levels: &LevelHistory) {
     let cx = canvas.width as f32 / 2.0;
     let cy = canvas.height as f32 / 2.0;
     let ring_radius = canvas.width.min(canvas.height) as f32 * 0.34;
     let ring_thickness = ring_radius * 0.14;
     let color = phase_color(phase);
-    let lf = recording_level(levels);
     stroke_arc(
         canvas,
         cx,
@@ -2136,7 +2252,7 @@ fn paint_minimal(
     );
 
     match phase {
-        Phase::Recording if live_waveform => {
+        Phase::Recording if look == Look::Waveform => {
             paint_live_waveform(
                 canvas,
                 cx,
@@ -2148,14 +2264,7 @@ fn paint_minimal(
             );
         }
         Phase::Recording => {
-            let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
-            fill_circle(
-                canvas,
-                cx,
-                cy,
-                ring_radius * (0.20 + 0.20 * lf * (0.8 + 0.2 * pulse)),
-                color,
-            );
+            // The plain look: just the ring, no inner glyph or pulse.
         }
         Phase::Transcribing => {
             let angle = t * std::f32::consts::TAU;
@@ -2221,7 +2330,8 @@ fn paint_pill(
     canvas: &mut Canvas,
     phase: Phase,
     t: f32,
-    live_waveform: bool,
+    look: Look,
+    shape: WaveformShape,
     levels: &LevelHistory,
 ) {
     let cx = canvas.width as f32 / 2.0;
@@ -2229,12 +2339,11 @@ fn paint_pill(
     let half_width = canvas.width as f32 * 0.46;
     let half_height = canvas.height as f32 * 0.42;
     let color = phase_color(phase);
-    let lf = recording_level(levels);
     fill_capsule(canvas, cx, cy, half_width, half_height, color, 1.0);
 
     match phase {
-        Phase::Recording if live_waveform => {
-            paint_live_waveform(
+        Phase::Recording if look == Look::Waveform => match shape {
+            WaveformShape::Bars => paint_live_waveform(
                 canvas,
                 cx,
                 cy,
@@ -2242,17 +2351,20 @@ fn paint_pill(
                 half_height * 1.5,
                 GLYPH_COLOR,
                 levels,
-            );
-        }
-        Phase::Recording => {
-            let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
-            fill_circle(
+            ),
+            WaveformShape::Squiggle => paint_squiggle(
                 canvas,
-                cx,
+                cx - half_width * 0.86,
+                cx + half_width * 0.86,
                 cy,
-                half_height * (0.28 + 0.26 * lf * (0.8 + 0.2 * pulse)),
+                half_height * 0.9,
+                half_height * 0.2,
                 GLYPH_COLOR,
-            );
+                levels,
+            ),
+        },
+        Phase::Recording => {
+            // The plain look: just the capsule, no inner glyph or pulse.
         }
         Phase::Transcribing => {
             let angle = t * std::f32::consts::TAU;
@@ -2321,9 +2433,18 @@ fn paint_pill(
 /// trace is a smooth light-grey line that rolls with the live `LevelHistory`,
 /// and the button is the phase colour made vivid with `bolden` (red with a
 /// white dot while recording, green with a checkmark after success, and the
-/// matching glyph for every other phase). The trace ignores `live_waveform`: it
-/// is this style's whole point.
-fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHistory) {
+/// matching glyph for every other phase). Its waveform look draws either the
+/// squiggle trace or uniform bars; its live-text look streams the caption words
+/// inside the bar; and the phase button stays in both.
+fn paint_long_pill(
+    canvas: &mut Canvas,
+    phase: Phase,
+    t: f32,
+    look: Look,
+    shape: WaveformShape,
+    levels: &LevelHistory,
+    live_text: Option<&LiveText>,
+) {
     let width = canvas.width as f32;
     let height = canvas.height as f32;
     let cy = height / 2.0;
@@ -2410,19 +2531,98 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
         }
     }
 
-    // The trace: a smooth light-grey line from near the bar's left end to just
-    // short of the button, centred on the bar, whose excursions follow the
-    // live level (see `long_pill_trace_sample`).
+    // The content area: from near the bar's left end to just short of the
+    // button. The waveform look draws the trace there; the live-text look
+    // streams the words there.
     let line_start = width * 0.039;
     let line_end = button_cx - button_radius - height * 0.21;
-    let thickness = height * 0.066;
-    let max_excursion = height * 0.27;
+
+    if look == Look::LiveText {
+        let y_top = cy - text::CAPTION_FONT_SIZE * 0.62;
+        match live_text.filter(|text| !text.is_empty()) {
+            Some(live_text) => {
+                let colors = text::CaptionColors {
+                    committed: LIVE_TEXT_COMMITTED,
+                    tentative: LIVE_TEXT_TENTATIVE,
+                    alpha: 1.0,
+                };
+                let line = text::caption_line(&live_text.committed, &live_text.tentative);
+                let line_w = text::line_width(&line);
+                let available = (line_end - line_start).max(40.0);
+                let (x, clip) = if line_w <= available {
+                    (line_start, None)
+                } else {
+                    (line_end - line_w, Some(line_start))
+                };
+                text::draw_line(canvas, x, y_top, &line, &colors, clip);
+                if matches!(phase, Phase::Recording | Phase::Transcribing) {
+                    let caret_x = (x + line_w + 4.0).min(line_end - LIVE_TEXT_CARET_WIDTH);
+                    if caret_x >= line_start {
+                        let pulse = 0.5 + 0.5 * (0.5 + 0.5 * (t * std::f32::consts::TAU).sin());
+                        let color = mix_color(LIVE_TEXT_BACKGROUND_BOTTOM, LIVE_TEXT_CARET, pulse);
+                        fill_centered_bar(
+                            canvas,
+                            caret_x,
+                            cy + 2.0,
+                            LIVE_TEXT_CARET_WIDTH,
+                            LIVE_TEXT_CARET_HEIGHT,
+                            color,
+                        );
+                    }
+                }
+            }
+            None => {
+                // No words yet: the listening pad, the caption's live cue.
+                paint_listening_pad(canvas, line_start + 8.0, cy, t, phase_color(phase));
+            }
+        }
+        return;
+    }
+
+    // The waveform look: either the squiggle trace or uniform bars.
+    match shape {
+        WaveformShape::Squiggle => paint_squiggle(
+            canvas,
+            line_start,
+            line_end,
+            cy,
+            height * 0.27,
+            height * 0.066,
+            LONG_PILL_LINE,
+            levels,
+        ),
+        WaveformShape::Bars => paint_live_waveform(
+            canvas,
+            (line_start + line_end) / 2.0,
+            cy,
+            line_end - line_start,
+            height * 0.34,
+            LONG_PILL_LINE,
+            levels,
+        ),
+    }
+}
+
+/// A continuous squiggly line whose excursions follow the live voice, drawn
+/// from `x_start` to `x_end` centred on `cy`. This is the long pill's signature
+/// trace, shared with the wide styles' `squiggle` waveform shape.
+#[allow(clippy::too_many_arguments)]
+fn paint_squiggle(
+    canvas: &mut Canvas,
+    x_start: f32,
+    x_end: f32,
+    cy: f32,
+    max_excursion: f32,
+    thickness: f32,
+    rgb: (u8, u8, u8),
+    levels: &LevelHistory,
+) {
     let envelope = long_pill_envelope(levels);
-    let span = (line_end - line_start).max(1.0);
+    let span = (x_end - x_start).max(1.0);
     let mut previous: Option<(f32, f32)> = None;
-    let mut x = line_start;
-    while x <= line_end {
-        let position = (x - line_start) / span * (LEVEL_HISTORY - 1) as f32;
+    let mut x = x_start;
+    while x <= x_end {
+        let position = (x - x_start) / span * (LEVEL_HISTORY - 1) as f32;
         let i0 = position.floor() as usize;
         let i1 = (i0 + 1).min(LEVEL_HISTORY - 1);
         let frac = position - i0 as f32;
@@ -2432,13 +2632,7 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
         let point = (x, cy - value * max_excursion);
         if let Some(previous) = previous {
             stroke_line(
-                canvas,
-                previous.0,
-                previous.1,
-                point.0,
-                point.1,
-                thickness,
-                LONG_PILL_LINE,
+                canvas, previous.0, previous.1, point.0, point.1, thickness, rgb,
             );
         }
         previous = Some(point);
@@ -2449,17 +2643,21 @@ fn paint_long_pill(canvas: &mut Canvas, phase: Phase, t: f32, levels: &LevelHist
 /// The `live-text` streaming caption, painted only when one of the `live-text`
 /// styles is configured. Partial text is painted here and nowhere else - it is
 /// never typed, persisted, or shown in the fallback notification chain. The
-/// card is a dark glass panel with a leading phase chip (or a bare dot in the
-/// minimal variant), one line of the frozen `committed` prefix in near-white
-/// and the still-revisable `tentative` tail dimmed, and a soft caret after the
-/// newest word. `style` selects the variant (glass, minimal, or the scrolling
-/// box). Its empty recording state is always the listening pad - the caption
-/// never draws a waveform, so the two never appear together.
+/// card is a dark glass panel with a leading phase chip, one line of the frozen
+/// `committed` prefix in near-white and the still-revisable `tentative` tail
+/// dimmed, and a soft caret after the newest word. `style` selects the variant
+/// (the glass single-line card or the scrolling box). Its empty recording state
+/// is the listening pad. The glass card's `waveform` look draws the same card
+/// with the waveform inside instead of words, so the two never appear together.
+#[allow(clippy::too_many_arguments)]
 fn paint_live_text(
     canvas: &mut Canvas,
     phase: Phase,
     t: f32,
+    look: Look,
+    shape: WaveformShape,
     live_text: Option<&LiveText>,
+    levels: &LevelHistory,
     style: Style,
 ) {
     let width = canvas.width as f32;
@@ -2467,7 +2665,6 @@ fn paint_live_text(
     let cx = width / 2.0;
     let cy = height / 2.0;
     let boxed = style == Style::LiveTextBox;
-    let minimal = style == Style::LiveTextMinimal;
     let half_width = width / 2.0 - LIVE_TEXT_INSET;
     let half_height = height / 2.0 - LIVE_TEXT_INSET;
     let radius = if boxed { 26.0 } else { half_height };
@@ -2483,10 +2680,44 @@ fn paint_live_text(
         LIVE_TEXT_BACKGROUND_OPACITY,
     );
 
-    // The single-line cards centre on the surface; the box stacks from the top
-    // (see `boxed_text_top`) and returns before the caret, so it never reads
-    // `line_center`/`y_top`.
-    let line_center = cy;
+    if look == Look::Waveform {
+        // The glass card's waveform look: the chip still reads the phase, and
+        // the waveform fills the content area where the words would sit.
+        let chip_cx = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS;
+        draw_caption_chip(canvas, chip_cx, cy, LIVE_TEXT_CHIP_RADIUS, phase, t);
+        let content_left = chip_cx + LIVE_TEXT_CHIP_RADIUS + LIVE_TEXT_CHIP_GAP;
+        let content_right = width - LIVE_TEXT_PADDING;
+        match shape {
+            WaveformShape::Bars => paint_live_waveform(
+                canvas,
+                (content_left + content_right) / 2.0,
+                cy,
+                content_right - content_left,
+                height * 0.42,
+                GLYPH_COLOR,
+                levels,
+            ),
+            WaveformShape::Squiggle => paint_squiggle(
+                canvas,
+                content_left,
+                content_right,
+                cy,
+                height * 0.2,
+                height * 0.055,
+                LONG_PILL_LINE,
+                levels,
+            ),
+        }
+        return;
+    }
+
+    // The vertical centre of the first text line (the box stacks from the top,
+    // the single-line cards centre on the surface).
+    let line_center = if boxed {
+        LIVE_TEXT_PADDING + text::CAPTION_LINE_HEIGHT / 2.0
+    } else {
+        cy
+    };
     let y_top = line_center - text::CAPTION_FONT_SIZE * 0.62;
 
     let right = width - LIVE_TEXT_PADDING;
@@ -2508,14 +2739,6 @@ fn paint_live_text(
             t,
         );
         LIVE_TEXT_PADDING
-    } else if minimal {
-        if captured.is_some() || !matches!(phase, Phase::Recording) {
-            let dot_cx = LIVE_TEXT_PADDING + 7.0;
-            fill_circle(canvas, dot_cx, cy, 7.0, bolden(phase_color(phase)));
-            dot_cx + 16.0
-        } else {
-            LIVE_TEXT_PADDING + 6.0
-        }
     } else {
         let chip_cx = LIVE_TEXT_PADDING + LIVE_TEXT_CHIP_RADIUS;
         draw_caption_chip(canvas, chip_cx, cy, LIVE_TEXT_CHIP_RADIUS, phase, t);
@@ -2915,19 +3138,13 @@ fn border_glow(x: f32, y: f32, width: f32, height: f32, pulse: f32) -> f32 {
 /// A phase-coloured glowing frame around the whole screen edge, brightest in the
 /// corners - the `Border` style. Unlike every other style its surface fills the
 /// output, so it paints a border/glow band rather than a centered shape and
-/// leaves the centre transparent. The whole frame breathes on the elapsed-time
-/// fraction, with the breath's amplitude following the live voice level
-/// (`levels`), so the frame pulses with speech and settles calm in silence;
-/// with `live_waveform` a bright highlight also sweeps once around the frame per
-/// cycle, standing in for the "actively capturing" signal the other styles show
-/// as a waveform (see `OverlayConfig::live_waveform`).
-fn paint_border(
-    canvas: &mut Canvas,
-    phase: Phase,
-    t: f32,
-    live_waveform: bool,
-    levels: &LevelHistory,
-) {
+/// leaves the centre transparent. The `waveform` look breathes on the
+/// elapsed-time fraction, with the breath's amplitude following the live voice
+/// level (`levels`), so the frame pulses with speech and settles calm in
+/// silence, and a bright highlight sweeps once around the frame per cycle,
+/// standing in for the "actively capturing" signal the other styles show as a
+/// waveform; the `plain` look is a steady frame.
+fn paint_border(canvas: &mut Canvas, phase: Phase, t: f32, look: Look, levels: &LevelHistory) {
     use std::f32::consts::{PI, TAU};
     let width = canvas.width as f32;
     let height = canvas.height as f32;
@@ -2939,12 +3156,19 @@ fn paint_border(
     let color = bolden(phase_color(phase));
     let lf = recording_level(levels);
     let carrier = 0.5 + 0.5 * (t * TAU).sin();
-    let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
+    // The waveform look breathes with the voice; the plain look is a steady
+    // frame, no pulse or sweep (the captain's "just the border on its own").
+    let waveform = look == Look::Waveform;
+    let pulse = if waveform {
+        0.5 + 0.5 * carrier * (0.3 + 0.7 * lf)
+    } else {
+        1.0
+    };
     let head = t * TAU - PI;
     // The sweep is a recording-only "actively capturing" cue, matching every
-    // other style's `Phase::Recording if live_waveform` branch; the voice
-    // level scales its brightness but never turns it off.
-    let sweeping = live_waveform && matches!(phase, Phase::Recording);
+    // other style's `Phase::Recording if look == Waveform` branch; the voice
+    // level scales its brightness so the highlight follows the microphone.
+    let sweeping = waveform && matches!(phase, Phase::Recording);
     let sweep_strength = 0.85 * (0.5 + 0.5 * lf);
     // Angular half-width of the streaming highlight's bright arc.
     const SWEEP: f32 = 0.55;
@@ -2989,19 +3213,13 @@ fn half_circle_profile(r: f32, radius: f32, glow: f32) -> f32 {
 /// the screen's top edge and its centre is that edge's midpoint, so it reads as
 /// a half-sun rising from the top bezel. It is drawn through the same per-pixel
 /// alpha-blending path every other style uses: a soft solid fill over the
-/// shared phase colour dissolving into a smooth radial glow. The whole dome
-/// breathes on the elapsed-time fraction, with the breath's amplitude following
-/// the live voice level (`levels`), so the dome pulses with speech and settles
-/// calm in silence; with `live_waveform` a bright highlight additionally sweeps
-/// along the arc, standing in for the "actively capturing" signal the badge
-/// styles show as a waveform (see `OverlayConfig::live_waveform`).
-fn paint_half_circle(
-    canvas: &mut Canvas,
-    phase: Phase,
-    t: f32,
-    live_waveform: bool,
-    levels: &LevelHistory,
-) {
+/// shared phase colour dissolving into a smooth radial glow. The `waveform`
+/// look breathes on the elapsed-time fraction, with the breath's amplitude
+/// following the live voice level (`levels`), so the dome pulses with speech
+/// and settles calm in silence, and a bright highlight sweeps along the arc,
+/// standing in for the "actively capturing" signal the badge styles show as a
+/// waveform; the `plain` look is a steady dome.
+fn paint_half_circle(canvas: &mut Canvas, phase: Phase, t: f32, look: Look, levels: &LevelHistory) {
     use std::f32::consts::{PI, TAU};
     let width = canvas.width as f32;
     let height = canvas.height as f32;
@@ -3013,11 +3231,18 @@ fn paint_half_circle(
     // shifts toward white as it dissolves outward.
     let lf = recording_level(levels);
     let carrier = 0.5 + 0.5 * (t * TAU).sin();
-    let pulse = 0.5 + 0.5 * carrier * (0.3 + 0.7 * lf);
+    // The waveform look breathes with the voice; the plain look is a steady
+    // dome, no pulse or sweep (the captain's "just the circle").
+    let waveform = look == Look::Waveform;
+    let pulse = if waveform {
+        0.5 + 0.5 * carrier * (0.3 + 0.7 * lf)
+    } else {
+        1.0
+    };
     // The sweep is a recording-only "actively capturing" cue, matching every
-    // other style's `Phase::Recording if live_waveform` branch; the voice
-    // level scales its brightness but never turns it off.
-    let sweeping = live_waveform && matches!(phase, Phase::Recording);
+    // other style's `Phase::Recording if look == Waveform` branch; the voice
+    // level scales its brightness so the highlight follows the microphone.
+    let sweeping = waveform && matches!(phase, Phase::Recording);
     let sweep_strength = 0.7 * (0.5 + 0.5 * lf);
     // The visible semicircle spans the polar angles `0..PI` (screen-space `y`
     // grows downward), so the highlight sweeps that full range across a cycle.
@@ -3054,7 +3279,7 @@ fn paint_half_circle(
 /// unpremultiplies, since PNG alpha is straight). `style`
 /// and `phase` use the same string values the config and feedback events use
 /// (`badge`/`minimal`/`pill`/`blob`/`border`/`half-circle`/`long-pill`/
-/// `live-text`/`live-text-minimal`/`live-text-box`;
+/// `live-text`/`live-text-box`;
 /// `recording`/`transcribing`/`success`/`no-speech`/`copied`/
 /// `clipboard-fallback`/`submit-failed`/`cancelled`/`error`), and
 /// `None` clears to fully transparent. `levels` is the live microphone history
@@ -3070,10 +3295,13 @@ pub fn render_frame_pixels(
     style: &str,
     phase: Option<&str>,
     t: f32,
-    live_waveform: bool,
+    look: &str,
+    shape: &str,
     levels: &[f32],
 ) -> (u32, u32, Vec<u8>) {
     let style = style_for(style);
+    let look = resolved_look(style, look);
+    let shape = shape_for(shape);
     let phase = phase.map(|name| match name {
         "transcribing" => Phase::Transcribing,
         "success" => Phase::Success,
@@ -3092,7 +3320,7 @@ pub fn render_frame_pixels(
     // The caption families are content-sized (an empty caption or a short
     // phrase renders the pill/box it actually needs); the fixed styles use
     // their representative size.
-    let (width, height) = if is_caption_style(style) {
+    let (width, height) = if content_sized_caption(style, look) {
         caption_surface_size(style, phase, None)
     } else {
         surface_size_for(style)
@@ -3109,7 +3337,8 @@ pub fn render_frame_pixels(
             phase,
             t,
             t,
-            live_waveform,
+            look,
+            shape,
             style,
             OverlayFrame {
                 levels: &history,
@@ -3120,13 +3349,13 @@ pub fn render_frame_pixels(
     (width, height, pixels)
 }
 
-/// Offline renderer for a `live-text` caption variant: paints the card with
+/// Offline renderer for a `live-text` caption: paints the card with
 /// `committed`/`tentative` text (or its listening pad when both are empty) into
 /// a pixel buffer, for the design-preview example and the headless layout
-/// tests. `style` names any caption variant (`live-text`, `live-text-minimal`,
-/// `live-text-box`); an unknown name falls back to the glass variant. `levels`
-/// is accepted for parity with `render_frame_pixels`, but the caption never
-/// draws a waveform, so it does not affect the frame.
+/// tests. `style` names a caption style (`live-text`, `live-text-box`); an
+/// unknown name falls back to the glass variant. `levels` is accepted for
+/// parity with `render_frame_pixels`, but the live-text look never draws a
+/// waveform, so it does not affect the frame.
 pub fn render_live_text_pixels(
     style: &str,
     committed: &str,
@@ -3155,7 +3384,8 @@ pub fn render_live_text_pixels(
             Some(Phase::Recording),
             0.0,
             0.0,
-            true,
+            Look::LiveText,
+            WaveformShape::Bars,
             style,
             OverlayFrame {
                 levels: &history,
@@ -3425,7 +3655,7 @@ mod tests {
         }
     }
 
-    const ALL_STYLES: [Style; 10] = [
+    const ALL_STYLES: [Style; 9] = [
         Style::Badge,
         Style::Minimal,
         Style::Pill,
@@ -3434,7 +3664,6 @@ mod tests {
         Style::HalfCircle,
         Style::LongPill,
         Style::LiveText,
-        Style::LiveTextMinimal,
         Style::LiveTextBox,
     ];
 
@@ -3487,11 +3716,42 @@ mod tests {
         paint_to_pixels_with_live_text(phase, t, breath, live_waveform, style, levels, None)
     }
 
+    /// The bool-taking caption helper the older tests use: `true` is the
+    /// waveform look, `false` the plain one. Styles that offer neither (the
+    /// captions) resolve to their own first look.
     fn paint_to_pixels_with_live_text(
         phase: Option<Phase>,
         t: f32,
         breath: f32,
         live_waveform: bool,
+        style: Style,
+        levels: &LevelHistory,
+        live_text: Option<&LiveText>,
+    ) -> Vec<u8> {
+        let look = if live_waveform {
+            Look::Waveform
+        } else {
+            Look::Plain
+        };
+        paint_to_pixels_with_look(
+            phase,
+            t,
+            breath,
+            look,
+            WaveformShape::Bars,
+            style,
+            levels,
+            live_text,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_to_pixels_with_look(
+        phase: Option<Phase>,
+        t: f32,
+        breath: f32,
+        look: Look,
+        shape: WaveformShape,
         style: Style,
         levels: &LevelHistory,
         live_text: Option<&LiveText>,
@@ -3509,7 +3769,8 @@ mod tests {
                 phase,
                 t,
                 breath,
-                live_waveform,
+                look,
+                shape,
                 style,
                 OverlayFrame { levels, live_text },
             );
@@ -3689,12 +3950,6 @@ mod tests {
             "the single-line height is the chip capsule plus its inset"
         );
 
-        // The minimal variant shares the content sizing and the small floor.
-        let minimal_empty =
-            caption_surface_size(Style::LiveTextMinimal, Some(Phase::Recording), None);
-        assert!(minimal_empty.0 >= LIVE_TEXT_MIN_WIDTH);
-        assert!(minimal_empty.0 < LIVE_TEXT_SURFACE.0);
-
         // The box is content-sized too: an empty one is just the chip row,
         // narrower-fixed and shorter than its ceiling.
         let box_empty = caption_surface_size(Style::LiveTextBox, Some(Phase::Recording), None);
@@ -3758,20 +4013,22 @@ mod tests {
                 "{style:?}: a non-caption style must ignore the live-text snapshot"
             );
         }
-        let caption_without = paint_to_pixels_with_live_text(
+        let caption_without = paint_to_pixels_with_look(
             Some(Phase::Recording),
             0.25,
             0.25,
-            true,
+            Look::LiveText,
+            WaveformShape::Bars,
             Style::LiveText,
             &speaking_history(),
             None,
         );
-        let caption_with = paint_to_pixels_with_live_text(
+        let caption_with = paint_to_pixels_with_look(
             Some(Phase::Recording),
             0.25,
             0.25,
-            true,
+            Look::LiveText,
+            WaveformShape::Bars,
             Style::LiveText,
             &speaking_history(),
             Some(&live),
@@ -3803,11 +4060,12 @@ mod tests {
                 })
                 .count()
         };
-        let empty = paint_to_pixels_with_live_text(
+        let empty = paint_to_pixels_with_look(
             Some(Phase::Recording),
             0.0,
             0.0,
-            true,
+            Look::LiveText,
+            WaveformShape::Bars,
             Style::LiveText,
             &speaking_history(),
             None,
@@ -3831,20 +4089,22 @@ mod tests {
             committed: "today I am testing".to_string(),
             tentative: " local speech".to_string(),
         };
-        let words = paint_to_pixels_with_live_text(
+        let words = paint_to_pixels_with_look(
             Some(Phase::Recording),
             0.25,
             0.25,
-            true,
+            Look::LiveText,
+            WaveformShape::Bars,
             Style::LiveText,
             &speaking_history(),
             Some(&live),
         );
-        let empty = paint_to_pixels_with_live_text(
+        let empty = paint_to_pixels_with_look(
             Some(Phase::Recording),
             0.25,
             0.25,
-            true,
+            Look::LiveText,
+            WaveformShape::Bars,
             Style::LiveText,
             &speaking_history(),
             None,
@@ -3960,7 +4220,7 @@ mod tests {
             committed: "today I am testing local speech".to_string(),
             tentative: " one two three".to_string(),
         };
-        for style in ALL_STYLES.into_iter().filter(|s| is_caption_style(*s)) {
+        for style in ALL_STYLES.into_iter().filter(|s| is_live_text_style(*s)) {
             let with_held = paint_to_pixels_with_live_text(
                 Some(Phase::ConfigError),
                 0.0,
@@ -4222,11 +4482,10 @@ mod tests {
 
     #[test]
     fn blob_long_pill_and_caption_styles_ignore_the_live_waveform_toggle() {
-        for style in [Style::Blob, Style::LongPill].into_iter().chain([
-            Style::LiveText,
-            Style::LiveTextMinimal,
-            Style::LiveTextBox,
-        ]) {
+        for style in [Style::Blob, Style::LongPill]
+            .into_iter()
+            .chain([Style::LiveText, Style::LiveTextBox])
+        {
             let off = paint_to_pixels(Some(Phase::Recording), 0.25, false, style);
             let on = paint_to_pixels(Some(Phase::Recording), 0.25, true, style);
             assert_eq!(
@@ -4633,9 +4892,10 @@ mod tests {
 
     #[test]
     fn border_breathes_across_its_animation_cycle() {
+        // The waveform look breathes with the voice; the plain look is steady.
         let frames: Vec<Vec<u8>> = [0.0, 0.25, 0.5, 0.75]
             .iter()
-            .map(|&t| paint_to_pixels(Some(Phase::Recording), t, false, Style::Border))
+            .map(|&t| paint_to_pixels(Some(Phase::Recording), t, true, Style::Border))
             .collect();
         for pair in frames.windows(2) {
             assert_ne!(
@@ -4769,9 +5029,10 @@ mod tests {
 
     #[test]
     fn half_circle_pulses_across_its_animation_cycle() {
+        // The waveform look pulses with the voice; the plain look is steady.
         let frames: Vec<Vec<u8>> = [0.0, 0.25, 0.5, 0.75]
             .iter()
-            .map(|&t| paint_to_pixels(Some(Phase::Recording), t, false, Style::HalfCircle))
+            .map(|&t| paint_to_pixels(Some(Phase::Recording), t, true, Style::HalfCircle))
             .collect();
         for pair in frames.windows(2) {
             assert_ne!(
@@ -4859,7 +5120,7 @@ mod tests {
                 let proj_x = x.clamp(cx - half_segment, cx + half_segment);
                 (x - proj_x).powi(2) + (y - cy).powi(2) <= cy * cy + 1.0
             }
-            Style::LiveText | Style::LiveTextMinimal => {
+            Style::LiveText => {
                 // A capsule inset from the surface edge; the waveform fallback
                 // and the caption text both stay inside it.
                 let half_height = cy - LIVE_TEXT_INSET;
@@ -4890,13 +5151,15 @@ mod tests {
             let (width, height) = surface_size_for(style);
             let quiet = quiet_history();
             let speaking = speaking_history();
-            let (base, loud) = if is_caption_style(style) {
+            let (base, loud) = if style == Style::LiveTextBox {
+                // The box is live-text only: its listening pad breathes with
+                // time, so compare two times at one level.
                 (
                     paint_to_pixels_with_levels(
                         Some(Phase::Recording),
                         0.0,
                         0.0,
-                        true,
+                        false,
                         style,
                         &quiet,
                     ),
@@ -4904,7 +5167,7 @@ mod tests {
                         Some(Phase::Recording),
                         0.35,
                         0.35,
-                        true,
+                        false,
                         style,
                         &quiet,
                     ),
@@ -5137,34 +5400,34 @@ mod tests {
             .into_iter()
             .filter(|style| !is_caption_style(*style))
         {
-            for live_waveform in [false, true] {
-                let quiet = paint_to_pixels_with_levels(
-                    Some(Phase::Recording),
-                    0.0,
-                    0.0,
-                    live_waveform,
-                    style,
-                    &quiet_history(),
-                );
-                let speaking = paint_to_pixels_with_levels(
-                    Some(Phase::Recording),
-                    0.0,
-                    0.0,
-                    live_waveform,
-                    style,
-                    &speaking_history(),
-                );
-                assert_ne!(
-                    quiet, speaking,
-                    "{style:?} (live_waveform={live_waveform}) should react to the microphone level"
-                );
-                assert!(
-                    response(style, &speaking) > response(style, &quiet),
-                    "{style:?} (live_waveform={live_waveform}): a louder voice should paint a bigger response ({} vs {})",
-                    response(style, &speaking),
-                    response(style, &quiet)
-                );
-            }
+            // Only the waveform look reacts to the microphone; the plain look is
+            // deliberately still, so it is not checked here.
+            let quiet = paint_to_pixels_with_levels(
+                Some(Phase::Recording),
+                0.0,
+                0.0,
+                true,
+                style,
+                &quiet_history(),
+            );
+            let speaking = paint_to_pixels_with_levels(
+                Some(Phase::Recording),
+                0.0,
+                0.0,
+                true,
+                style,
+                &speaking_history(),
+            );
+            assert_ne!(
+                quiet, speaking,
+                "{style:?} (waveform look) should react to the microphone level"
+            );
+            assert!(
+                response(style, &speaking) > response(style, &quiet),
+                "{style:?} (waveform look): a louder voice should paint a bigger response ({} vs {})",
+                response(style, &speaking),
+                response(style, &quiet)
+            );
         }
     }
 
@@ -5239,13 +5502,15 @@ mod tests {
         };
 
         for (label, history) in [("quiet", quiet_history()), ("speaking", speaking_history())] {
-            let pixels = paint_to_pixels_with_levels(
+            let pixels = paint_to_pixels_with_look(
                 Some(Phase::Recording),
                 0.0,
                 0.0,
-                false,
+                Look::Waveform,
+                WaveformShape::Squiggle,
                 Style::LongPill,
                 &history,
+                None,
             );
             let mut min_y = height;
             let mut max_y = 0;

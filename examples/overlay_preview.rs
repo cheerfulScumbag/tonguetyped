@@ -8,11 +8,9 @@
 //! clipboard-fallback/submit-failed/truncated/cancelled/error/waveform) as a
 //! second argument to hold on just that one state for 30s,
 //! e.g. for screenshotting: `cargo run --example overlay_preview -- top-right
-//! recording`. "waveform" holds the Recording phase with
-//! `overlay.live_waveform` enabled, to preview the live microphone waveform
-//! look instead of the default pulsing dot. Pass a style name
+//! recording`. Pass a style name
 //! (badge/minimal/pill/blob/border/half-circle/long-pill/live-text/
-//! live-text-minimal/live-text-box) as a third
+//! live-text-box) as a third
 //! argument to preview one of the other `overlay.style` looks, e.g. `cargo run
 //! --example overlay_preview -- top-right recording blob`. The `border` style
 //! ignores `position`: it is a full-screen frame that hugs every screen edge.
@@ -46,12 +44,13 @@ fn main() {
         .nth(3)
         .unwrap_or_else(|| "badge".to_string());
     let monitor = std::env::args().nth(4).unwrap_or_else(|| "all".to_string());
-    let mut config = OverlayConfig {
+    let config = OverlayConfig {
         enabled: true,
         position,
         monitor,
-        live_waveform: false,
         style,
+        look: "waveform".to_string(),
+        waveform_shape: "bars".to_string(),
     };
 
     if !tonguetyped::overlay::probe_available() {
@@ -82,11 +81,7 @@ fn main() {
 
     if let Some(name) = hold {
         let event = match name.as_str() {
-            "recording" => FeedbackEvent::Recording,
-            "waveform" => {
-                config.live_waveform = true;
-                FeedbackEvent::Recording
-            }
+            "recording" | "waveform" => FeedbackEvent::Recording,
             "transcribing" => FeedbackEvent::Processing,
             "success" => FeedbackEvent::Success,
             "no-speech" => FeedbackEvent::NoSpeech,

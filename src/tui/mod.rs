@@ -356,7 +356,8 @@ struct App {
 /// produced them, so `render_overlay` can tell when it must re-render.
 struct OverlayPreview {
     style: String,
-    live_waveform: bool,
+    look: String,
+    shape: String,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -1719,11 +1720,7 @@ impl App {
                         "enabled, {}, {}, {}",
                         self.config.overlay.position,
                         self.config.overlay.style,
-                        if self.config.overlay.live_waveform {
-                            "live waveform"
-                        } else {
-                            "simple pulse"
-                        }
+                        screens::overlay_look_summary(&self.config)
                     )
                 }
             }
@@ -2155,7 +2152,8 @@ impl App {
             let stage = inner.inner(ratatui::layout::Margin::new(1, 0));
             let lines = self.overlay_preview_lines(
                 &screen.style,
-                screen.live_waveform,
+                &screen.look,
+                &screen.waveform_shape,
                 stage.width,
                 stage.height,
             );
@@ -2175,13 +2173,16 @@ impl App {
     fn overlay_preview_lines(
         &self,
         style: &str,
-        live_waveform: bool,
+        look: &str,
+        shape: &str,
         max_cols: u16,
         max_rows: u16,
     ) -> Vec<Line<'static>> {
         let mut cache = self.overlay_preview.borrow_mut();
         let stale = match cache.as_ref() {
-            Some(preview) => preview.style != style || preview.live_waveform != live_waveform,
+            Some(preview) => {
+                preview.style != style || preview.look != look || preview.shape != shape
+            }
             None => true,
         };
         if stale {
@@ -2189,12 +2190,14 @@ impl App {
                 style,
                 Some("recording"),
                 0.0,
-                live_waveform,
+                look,
+                shape,
                 &[],
             );
             *cache = Some(OverlayPreview {
                 style: style.to_string(),
-                live_waveform,
+                look: look.to_string(),
+                shape: shape.to_string(),
                 width,
                 height,
                 pixels,
@@ -2330,12 +2333,19 @@ fn preview_cell_size(
 /// event-driven redraw; the dashboard caches this in `OverlayPreview`.
 pub(crate) fn overlay_preview_cells(
     style: &str,
-    live_waveform: bool,
+    look: &str,
+    shape: &str,
     max_cols: u16,
     max_rows: u16,
 ) -> Vec<Line<'static>> {
-    let (width, height, pixels) =
-        crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, live_waveform, &[]);
+    let (width, height, pixels) = crate::overlay::render_frame_pixels(
+        style,
+        Some("recording"),
+        0.0,
+        look,
+        shape,
+        &[],
+    );
     let (cols, rows) = preview_cell_size(width, height, max_cols, max_rows);
     preview_lines_from_pixels(width, height, &pixels, cols, rows)
 }
@@ -2663,8 +2673,14 @@ mod tests {
         // opaque disc, so at least one cell carries a foreground colour while
         // the transparency around it stays blank.
         for style in crate::overlay::STYLE_VALUES {
-            let (width, height, pixels) =
-                crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, false, &[]);
+            let (width, height, pixels) = crate::overlay::render_frame_pixels(
+                style,
+                Some("recording"),
+                0.0,
+                "plain",
+                "bars",
+                &[],
+            );
             let (cols, rows) = preview_cell_size(width, height, 24, 8);
             let lines = preview_lines_from_pixels(width, height, &pixels, cols, rows);
             assert_eq!(
@@ -2693,8 +2709,14 @@ mod tests {
         // The preview band is wide and short, so a uniformly fitted raster must
         // still let a wide style render wider than it is tall. The `pill` raster
         // is ~2:1; the old side panel stretched it into a tall blob instead.
-        let (width, height, _) =
-            crate::overlay::render_frame_pixels("pill", Some("recording"), 0.0, false, &[]);
+        let (width, height, _) = crate::overlay::render_frame_pixels(
+            "pill",
+            Some("recording"),
+            0.0,
+            "plain",
+            "bars",
+            &[],
+        );
         let (cols, rows) = preview_cell_size(width, height, 40, 6);
         assert!(
             cols > rows,
@@ -2703,15 +2725,27 @@ mod tests {
 
         // A square raster (`badge`) maps to a physically square region: its cell
         // box is twice as wide as it is tall because a half-block cell is 2:1.
-        let (width, height, _) =
-            crate::overlay::render_frame_pixels("badge", Some("recording"), 0.0, false, &[]);
+        let (width, height, _) = crate::overlay::render_frame_pixels(
+            "badge",
+            Some("recording"),
+            0.0,
+            "plain",
+            "bars",
+            &[],
+        );
         let (cols, rows) = preview_cell_size(width, height, 40, 6);
         assert_eq!(cols, 2 * rows, "a square style must render 2:1 in cells");
 
         // A very wide raster (`long-pill`, 8:1) must still render much wider
         // than it is tall rather than filling the band vertically.
-        let (width, height, _) =
-            crate::overlay::render_frame_pixels("long-pill", Some("recording"), 0.0, false, &[]);
+        let (width, height, _) = crate::overlay::render_frame_pixels(
+            "long-pill",
+            Some("recording"),
+            0.0,
+            "plain",
+            "bars",
+            &[],
+        );
         let (cols, rows) = preview_cell_size(width, height, 40, 6);
         assert!(
             cols > 2 * rows,
