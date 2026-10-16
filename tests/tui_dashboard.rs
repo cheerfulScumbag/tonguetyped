@@ -623,6 +623,51 @@ fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_erro
 }
 
 #[test]
+fn pty_commands_screen_shows_in_flight_feedback_while_a_command_runs() {
+    // The tag must stay short: the daemon stand-in binds a Unix-domain socket
+    // under the sandbox, and the path must fit under SUN_LEN (~108 bytes) even
+    // with Nix's already-long TMPDIR.
+    let sandbox = Sandbox::new("ci");
+
+    // A daemon stand-in that accepts the connection and never answers keeps a
+    // dispatched IPC command pending indefinitely, so the screen can be
+    // observed *while* the command is in flight rather than after it settles.
+    let socket = sandbox.socket_path();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => held.push(stream),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("Settings", Duration::from_secs(5));
+
+    select_command(&mut session, "status");
+    session.send(KEY_ENTER);
+
+    // Dispatching the command must be acknowledged: the Working line replaces
+    // the static legend while the command runs, and the screen stays on
+    // Commands (it has not jumped to the result yet).
+    let in_flight = session.wait_for("Working: Status...", Duration::from_secs(3));
+    assert!(
+        in_flight.contains("Home \u{203a} Commands"),
+        "the in-flight indicator must show on the Commands screen:\n{in_flight}"
+    );
+    assert!(
+        !in_flight.contains("Enter run"),
+        "the static legend should give way to the Working line while a command runs:\n{in_flight}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_daemon_home_item_opens_a_start_stop_restart_screen_instead_of_starting_immediately() {
     let sandbox = Sandbox::new("daemon-screen");
     let mut session = Session::spawn(&sandbox, 100, 32);

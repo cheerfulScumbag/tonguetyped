@@ -1621,10 +1621,14 @@ impl App {
             ),
             chunks[0],
         );
-        frame.render_widget(
-            Paragraph::new("↑/↓ row   Enter run   Esc/\u{232b} back   q quit"),
-            chunks[1],
-        );
+        let footer = match &self.pending {
+            Some(pending) => Line::from(Span::styled(
+                format!("Working: {}...", pending.title),
+                Style::default().fg(Color::Yellow),
+            )),
+            None => Line::from("↑/↓ row   Enter run   Esc/\u{232b} back   q quit"),
+        };
+        frame.render_widget(Paragraph::new(footer), chunks[1]);
     }
 
     fn daemon_running_cached(&self) -> bool {
