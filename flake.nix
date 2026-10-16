@@ -278,6 +278,7 @@
                       model.idle_unload.timeout_minutes = 5;
                       audio.feedback_volume = 0.5;
                       overlay.style = "pill";
+                      overlay.live_waveform = true;
                       text = {
                         spoken_punctuation = true;
                         remove_fillers = true;
@@ -318,7 +319,7 @@
                 .activation == {mode: "toggle", keybind: "Super+O"}
                 and .model == {idle_unload: {timeout_minutes: 5}}
                 and .audio == {feedback_volume: 0.5}
-                and .overlay == {style: "pill", position: "top-left"}
+                and .overlay == {style: "pill", look: "waveform", position: "top-left"}
                 and .text == {
                   spoken_punctuation: true,
                   remove_fillers: true,

@@ -1051,13 +1051,17 @@ pub(crate) fn legacy_waveform_look(style_name: &str, live_waveform: bool) -> &'s
     }
 }
 
-/// The display label of a configured look value, falling back to `Waveform`.
+/// The display label of a configured look value, taken from the same
+/// `(value, label)` pairs the settings step lists use (see [`look_options`]),
+/// so the step lists and the summaries can never drift. Falls back to
+/// `Waveform` for a value no style lists.
 pub(crate) fn look_label(value: &str) -> &'static str {
-    match value {
-        "plain" => "Plain",
-        "live-text" => "Live text",
-        _ => "Waveform",
-    }
+    STYLE_VALUES
+        .iter()
+        .flat_map(|style| style_look_options(style))
+        .find(|(option, _)| *option == value)
+        .map(|(_, label)| *label)
+        .unwrap_or("Waveform")
 }
 
 /// The display label of a configured waveform-shape value, falling back to
@@ -2589,7 +2593,7 @@ fn paint_long_pill(
 
     if look == Look::LiveText {
         let y_top = cy - text::CAPTION_FONT_SIZE * 0.62;
-        match live_text.filter(|text| !text.is_empty()) {
+        match caption_captured(Some(phase), live_text) {
             Some(live_text) => {
                 let colors = text::CaptionColors {
                     committed: LIVE_TEXT_COMMITTED,
@@ -2621,10 +2625,30 @@ fn paint_long_pill(
                     }
                 }
             }
-            None => {
-                // No words yet: the listening pad, the caption's live cue.
-                paint_listening_pad(canvas, line_start + 8.0, cy, t, phase_color(phase));
-            }
+            None => match phase {
+                Phase::Recording => {
+                    // No words yet: the listening pad, the caption's live cue.
+                    paint_listening_pad(canvas, line_start + 8.0, cy, t, phase_color(phase));
+                }
+                _ => {
+                    if let Some(message) = phase_message(phase) {
+                        let colors = text::CaptionColors {
+                            committed: LIVE_TEXT_COMMITTED,
+                            tentative: LIVE_TEXT_COMMITTED,
+                            alpha: 0.9,
+                        };
+                        let line = text::caption_line(message, "");
+                        let line_w = text::line_width(&line);
+                        let available = (line_end - line_start).max(40.0);
+                        let (x, clip) = if line_w <= available {
+                            (line_start, None)
+                        } else {
+                            (line_end - line_w, Some(line_start))
+                        };
+                        text::draw_line(canvas, x, y_top, &line, &colors, clip);
+                    }
+                }
+            },
         }
         return;
     }
@@ -4310,6 +4334,41 @@ mod tests {
                 "{style:?}: the config-error status must replace the held words, not match them"
             );
         }
+    }
+
+    #[test]
+    fn config_error_supersedes_held_live_text_in_the_long_pill_live_text_look() {
+        // The long pill's live-text look is a caption consumer too: the shared
+        // `caption_captured` must suppress held words on a config error exactly
+        // as the glass and box captions do, so the rejected-config status
+        // replaces the previous dictation's words.
+        let held = LiveText {
+            committed: "today I am testing local speech".to_string(),
+            tentative: " one two three".to_string(),
+        };
+        let long_pill = |phase: Option<Phase>, live_text: Option<&LiveText>| {
+            paint_to_pixels_with_look(
+                phase,
+                0.0,
+                0.0,
+                Look::LiveText,
+                WaveformShape::Squiggle,
+                Style::LongPill,
+                &quiet_history(),
+                live_text,
+            )
+        };
+        let with_held = long_pill(Some(Phase::ConfigError), Some(&held));
+        let without_words = long_pill(Some(Phase::ConfigError), None);
+        assert_eq!(
+            with_held, without_words,
+            "held dictation words must not paint over the config-error status"
+        );
+        let held_elsewhere = long_pill(Some(Phase::Success), Some(&held));
+        assert_ne!(
+            with_held, held_elsewhere,
+            "the config-error status must replace the held words, not match them"
+        );
     }
 
     #[test]

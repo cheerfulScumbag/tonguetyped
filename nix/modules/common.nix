@@ -185,6 +185,7 @@ in
               "waveform"
               "live-text"
             ]) "Overlay look: the resting shape, the voice-reactive waveform, or live streaming text.";
+            live_waveform = setting types.bool "Deprecated: use `look = \"waveform\"` (was true) or `look = \"plain\"` (was false) instead. Folded into `look` and removed from the written config.";
             waveform_shape = setting (types.enum [
               "bars"
               "squiggle"
@@ -219,6 +220,9 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    programs.tonguetyped.settings.overlay.look =
+      lib.mkIf (cfg.settings.overlay.live_waveform != null)
+        (lib.mkDefault (if cfg.settings.overlay.live_waveform then "waveform" else "plain"));
     assertions = [
       {
         assertion = !(
