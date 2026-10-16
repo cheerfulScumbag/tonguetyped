@@ -92,16 +92,20 @@ fn every_non_whisper_family_loads_and_transcribes() {
 }
 
 #[test]
-fn smoke_model_entries_are_the_smallest_for_each_family() {
+fn smoke_model_entries_are_the_smallest_offline_for_each_family() {
     // Guards the `SMOKE_MODELS` picks against a catalog change that would make
     // the opt-in run download a larger file than intended: each listed id must
-    // exist, belong to its family, and be that family's smallest entry.
+    // exist, belong to its family, and be that family's smallest entry. This
+    // test transcribes through the offline path, so only the family's
+    // non-streaming entries count: the `parakeet` family now also ships
+    // streaming variants, and a smaller streaming one is not what this test
+    // fetches.
     for (family, id) in SMOKE_MODELS {
         let chosen = tonguetyped::catalog::find(id).unwrap();
         assert_eq!(chosen.info().family, *family);
         let smallest = tonguetyped::catalog::ENTRIES
             .iter()
-            .filter(|entry| entry.info().family == *family)
+            .filter(|entry| entry.info().family == *family && !entry.info().supports_streaming())
             .min_by_key(|entry| entry.size_bytes)
             .unwrap();
         assert_eq!(
