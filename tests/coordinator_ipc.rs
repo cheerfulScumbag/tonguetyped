@@ -26,6 +26,9 @@ struct TestRuntime {
     truncated_transcript: AtomicBool,
     transcription_error: AtomicBool,
     output_error: AtomicBool,
+    block_output: AtomicBool,
+    output_started: AtomicBool,
+    output_gate: (Mutex<bool>, Condvar),
     /// What a successful `output` reports; `None` means `Delivery::Inserted`.
     delivery: Mutex<Option<Delivery>>,
     recording_finalization_ms: AtomicUsize,
@@ -84,6 +87,11 @@ impl TestRuntime {
     fn release_idle_policy(&self) {
         *self.idle_policy_gate.0.lock().unwrap() = true;
         self.idle_policy_gate.1.notify_all();
+    }
+
+    fn release_output(&self) {
+        *self.output_gate.0.lock().unwrap() = true;
+        self.output_gate.1.notify_all();
     }
 
     fn wait_for_idle_policy_start(&self) {
@@ -249,6 +257,13 @@ impl CoordinatorRuntime for TestRuntime {
     }
 
     fn output(&self, text: &str, _config: &Config) -> anyhow::Result<Delivery> {
+        self.output_started.store(true, Ordering::SeqCst);
+        if self.block_output.load(Ordering::SeqCst) {
+            let mut released = self.output_gate.0.lock().unwrap();
+            while !*released {
+                released = self.output_gate.1.wait(released).unwrap();
+            }
+        }
         if self.output_error.load(Ordering::SeqCst) {
             anyhow::bail!("simulated output failure");
         }
@@ -1180,6 +1195,47 @@ async fn shutdown_replies_within_bound_when_transcription_ignores_cancellation()
         start.elapsed() < Duration::from_secs(4),
         "shutdown waited out the whole transcription instead of its bound"
     );
+}
+
+#[tokio::test]
+async fn shutdown_is_bounded_while_output_is_in_flight() {
+    let runtime = Arc::new(TestRuntime::default());
+    runtime.block_output.store(true, Ordering::SeqCst);
+    let coordinator = coordinator(runtime.clone(), 2);
+    let owner_count = Arc::strong_count(&runtime);
+
+    dispatch(&coordinator, Request::Start).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    dispatch(&coordinator, Request::Stop).await;
+    wait_for_flag(&runtime.output_started).await;
+
+    // A shutdown issued while the transcript is still being typed must not wait
+    // on the (here, wedged) output: before this was bounded, `cancel` blocked on
+    // `output_lock`, which the output phase holds for its whole duration, so the
+    // reply - and the client's `stop`/`restart` - never arrived.
+    let start = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch(&coordinator, Request::Shutdown),
+    )
+    .await
+    .expect("shutdown hung on an in-flight output");
+    assert!(matches!(response, Response::Ok));
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "shutdown waited out the whole output instead of its bound"
+    );
+
+    // The output worker is still active, so a forced shutdown must refuse to
+    // release the inference engine rather than race a live worker (and, in
+    // production, the GPU driver during process teardown).
+    assert!(
+        coordinator.shutdown().is_err(),
+        "a shutdown with an active worker must not free the engine"
+    );
+
+    runtime.release_output();
+    wait_for_worker_completion(&runtime, owner_count).await;
 }
 
 #[tokio::test]

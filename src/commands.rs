@@ -11,6 +11,18 @@ use crate::ipc::{self, Request, Response};
 use crate::model::{DownloadManager, DownloadOutcome, ProgressCallback};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+/// How long `stop_daemon_at` waits for the daemon's reply to a `Shutdown`
+/// request before giving up on the reply and falling back to polling for the
+/// socket to disappear. Comfortably exceeds the daemon's own bounded reply
+/// (`daemon::SHUTDOWN_WORKER_TIMEOUT` plus the instant cancel), so it only
+/// fires when the daemon is truly unresponsive - the case that would otherwise
+/// hang `stop`/`restart` on a socket read with no deadline of its own.
+const SHUTDOWN_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long `stop_daemon_at` then polls for the control socket to disappear
+/// after the `Shutdown` request, the authoritative proof the daemon exited.
+const SHUTDOWN_EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Connects to the daemon's control socket, sends one request, and returns
 /// its decoded response. Shared by every IPC-backed CLI command
 /// (`start`/`stop`/`toggle`/`cancel`/`status`/`reload`/`last-result`) and by
@@ -18,7 +30,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 /// one place.
 pub async fn send_ipc(request: Request) -> anyhow::Result<Response> {
     let sock_path = crate::daemon::socket_path()?;
+    send_ipc_at(&sock_path, request).await
+}
 
+/// [`send_ipc`] against an explicit socket path. Split out so a caller can
+/// bound or target a specific socket (`stop_daemon_at` below) without reaching
+/// for the process-wide `daemon::socket_path()`.
+async fn send_ipc_at(sock_path: &std::path::Path, request: Request) -> anyhow::Result<Response> {
     if !sock_path.exists() {
         anyhow::bail!(
             "daemon is not running (no socket at {})",
@@ -26,7 +44,7 @@ pub async fn send_ipc(request: Request) -> anyhow::Result<Response> {
         );
     }
 
-    let stream = tokio::net::UnixStream::connect(&sock_path).await?;
+    let stream = tokio::net::UnixStream::connect(sock_path).await?;
     let (reader, mut writer) = stream.into_split();
 
     let frame = ipc::encode_frame(&request)?;
@@ -99,6 +117,16 @@ pub async fn stop_daemon() -> anyhow::Result<()> {
 }
 
 async fn stop_daemon_at(sock_path: &std::path::Path) -> anyhow::Result<()> {
+    stop_daemon_at_with(sock_path, SHUTDOWN_REPLY_TIMEOUT, SHUTDOWN_EXIT_DEADLINE).await
+}
+
+/// [`stop_daemon_at`] with the two deadlines injected, so a test can exercise a
+/// silent daemon's fall-through path in milliseconds instead of real seconds.
+async fn stop_daemon_at_with(
+    sock_path: &std::path::Path,
+    reply_timeout: std::time::Duration,
+    exit_deadline: std::time::Duration,
+) -> anyhow::Result<()> {
     if !socket_is_alive(sock_path) {
         anyhow::bail!(
             "daemon is not running (no socket at {})",
@@ -106,19 +134,32 @@ async fn stop_daemon_at(sock_path: &std::path::Path) -> anyhow::Result<()> {
         );
     }
 
-    match send_ipc(Request::Shutdown).await {
-        Ok(Response::Ok) => {}
-        Ok(Response::Error { message }) => {
-            anyhow::bail!("daemon refused shutdown request: {message}")
+    // The daemon bounds its own reply (it cancels any in-flight worker, then
+    // waits at most `daemon::SHUTDOWN_WORKER_TIMEOUT` for it), so this is a
+    // generous safety net: without it a daemon that never answers would hang
+    // `stop`/`restart` on the socket read forever. On timeout we do not fail
+    // outright - the socket disappearing is the authoritative proof the daemon
+    // exited - so fall through to the poll below.
+    if let Ok(reply) =
+        tokio::time::timeout(reply_timeout, send_ipc_at(sock_path, Request::Shutdown)).await
+    {
+        match reply {
+            Ok(Response::Ok) => {}
+            Ok(Response::Error { message }) => {
+                anyhow::bail!("daemon refused shutdown request: {message}")
+            }
+            Ok(other) => anyhow::bail!("unexpected daemon response to shutdown: {other:?}"),
+            Err(error) => anyhow::bail!("failed to reach daemon: {error}"),
         }
-        Ok(other) => anyhow::bail!("unexpected daemon response to shutdown: {other:?}"),
-        Err(error) => anyhow::bail!("failed to reach daemon: {error}"),
     }
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + exit_deadline;
     while sock_path.exists() {
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("daemon did not exit within 5s of the shutdown request");
+            anyhow::bail!(
+                "daemon did not exit within {:?} of the shutdown request",
+                exit_deadline
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -677,6 +718,41 @@ mod tests {
         // to `spawn_daemon` instead of bailing out on it.
         assert!(!sock_path.exists());
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A daemon stand-in that accepts the connection and never answers must not
+    /// hang `stop`: the bounded reply wait gives up, and the socket poll's own
+    /// deadline is what ends the call. The deadlines are injected as
+    /// milliseconds so the test proves the fall-through without real waits.
+    #[tokio::test]
+    async fn stop_daemon_gives_up_on_a_silent_daemon_without_hanging() {
+        let root = unique_temp_dir("silent-daemon-stop");
+        std::fs::create_dir_all(&root).unwrap();
+        let sock_path = root.join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+
+        // Hold the accepted connection open without ever writing a reply.
+        let held = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                drop(stream);
+            }
+        });
+
+        let error = stop_daemon_at_with(
+            &sock_path,
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("did not exit within"),
+            "expected the socket-poll deadline to end the wait, got: {error}"
+        );
+
+        drop(held);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
