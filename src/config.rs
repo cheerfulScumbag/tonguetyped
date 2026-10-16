@@ -1135,11 +1135,11 @@ fn migrate_legacy_activation_config(raw: &mut toml::Value) -> bool {
 /// `[overlay] live_waveform` boolean and its older `streaming_indicator` name
 /// into the current `look` string, keeping the caption styles on live text so
 /// they do not turn into a waveform; folds the retired `live-text-minimal`
-/// style onto the surviving glass `live-text` caption; and clamps a stored look
-/// to one the configured style offers, so the settings UIs and the preview
-/// never show a look the style cannot paint. An explicit `look` that the style
-/// offers is never overwritten. Mutates `raw` in place and returns whether a
-/// migration happened.
+/// style onto the surviving glass `live-text` caption with the live-text look;
+/// and clamps a stored look to one the configured style offers, so the settings
+/// UIs and the preview never show a look the style cannot paint. An explicit
+/// `look` that the style offers is never overwritten. Mutates `raw` in place
+/// and returns whether a migration happened.
 fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
     let Some(overlay) = raw
         .as_table_mut()
@@ -1158,9 +1158,10 @@ fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
             "style".to_string(),
             toml::Value::String("live-text".to_string()),
         );
-        overlay
-            .entry("look".to_string())
-            .or_insert_with(|| toml::Value::String("live-text".to_string()));
+        overlay.insert(
+            "look".to_string(),
+            toml::Value::String("live-text".to_string()),
+        );
         migrated = true;
     }
 
@@ -1183,12 +1184,26 @@ fn migrate_legacy_overlay_config(raw: &mut toml::Value) -> bool {
     let style = overlay
         .get("style")
         .and_then(toml::Value::as_str)
-        .unwrap_or("badge");
+        .unwrap_or("badge")
+        .to_string();
+    // A caption style with no explicit look keeps showing live text rather
+    // than falling through to the generic waveform default (the pre-rework
+    // README's documented `style = "live-text"` setting carried no toggle).
+    if overlay.get("look").is_none()
+        && crate::overlay::is_live_text_style(crate::overlay::style_for(&style))
+    {
+        overlay.insert(
+            "look".to_string(),
+            toml::Value::String("live-text".to_string()),
+        );
+        migrated = true;
+    }
+
     let look = overlay
         .get("look")
         .and_then(toml::Value::as_str)
         .unwrap_or("waveform");
-    let clamped = crate::overlay::clamp_look_value(style, look);
+    let clamped = crate::overlay::clamp_look_value(&style, look);
     if clamped != look {
         overlay.insert("look".to_string(), toml::Value::String(clamped));
         migrated = true;
@@ -2089,17 +2104,20 @@ mod tests {
 
     #[test]
     fn legacy_caption_configs_migrate_to_the_live_text_look() {
-        // A live-text caption keeps showing live text when its old waveform
-        // toggle is folded in, instead of turning into a waveform.
-        for style in ["live-text", "live-text-box"] {
-            let mut raw: toml::Value = toml::from_str(&format!(
-                "[overlay]\nstyle = \"{style}\"\nlive_waveform = true\n"
-            ))
-            .unwrap();
-            assert!(migrate_legacy_overlay_config(&mut raw));
+        // A live-text caption keeps showing live text, whether its old waveform
+        // toggle is folded in or the config only named the style (the pre-rework
+        // README's documented setting) and so had no look key.
+        for content in [
+            "[overlay]\nstyle = \"live-text\"\nlive_waveform = true\n",
+            "[overlay]\nstyle = \"live-text-box\"\nlive_waveform = true\n",
+            "[overlay]\nstyle = \"live-text\"\n",
+            "[overlay]\nstyle = \"live-text-box\"\n",
+        ] {
+            let mut raw: toml::Value = toml::from_str(content).unwrap();
+            assert!(migrate_legacy_overlay_config(&mut raw), "{content}");
             let config: Config = raw.try_into().unwrap();
-            assert_eq!(config.overlay.style, style);
-            assert_eq!(config.overlay.look, "live-text", "{style}");
+            assert!(config.overlay.style.starts_with("live-text"), "{content}");
+            assert_eq!(config.overlay.look, "live-text", "{content}");
         }
     }
 
@@ -2107,16 +2125,18 @@ mod tests {
     fn retired_live_text_minimal_migrates_to_the_live_text_caption() {
         // The dropped minimal caption folds onto the surviving glass caption,
         // staying on live text rather than falling through to the badge, with
-        // or without the old waveform boolean still in the file.
+        // or without the old waveform boolean still in the file, and even if a
+        // look was stored beside the retired style.
         for content in [
             "[overlay]\nstyle = \"live-text-minimal\"\nlive_waveform = true\n",
             "[overlay]\nstyle = \"live-text-minimal\"\n",
+            "[overlay]\nstyle = \"live-text-minimal\"\nlook = \"waveform\"\n",
         ] {
             let mut raw: toml::Value = toml::from_str(content).unwrap();
-            assert!(migrate_legacy_overlay_config(&mut raw));
+            assert!(migrate_legacy_overlay_config(&mut raw), "{content}");
             let config: Config = raw.try_into().unwrap();
             assert_eq!(config.overlay.style, "live-text");
-            assert_eq!(config.overlay.look, "live-text");
+            assert_eq!(config.overlay.look, "live-text", "{content}");
         }
     }
 

@@ -6,7 +6,8 @@ use crate::activation::ReconfigureOutcome;
 use crate::audio::{self, level_to_ratio};
 use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
 use crate::overlay::{
-    look_label as overlay_look_label, shape_label as overlay_shape_label,
+    clamp_look_value as overlay_clamp_look_value, look_label as overlay_look_label,
+    shape_label as overlay_shape_label,
     shows_shape_choice as overlay_shows_shape_choice,
     style_look_options as overlay_style_look_options, POSITION_VALUES as OVERLAY_POSITION_VALUES,
     SHAPE_LABELS as OVERLAY_SHAPE_LABELS, SHAPE_VALUES as OVERLAY_SHAPE_VALUES,
@@ -1659,10 +1660,15 @@ impl ConsoleState {
             Line::from(format!(
                 "Overlay:     {}",
                 if self.config.overlay.enabled {
-                    let shape = if overlay_shows_shape_choice(
-                        &self.config.overlay.style,
-                        &self.config.overlay.look,
-                    ) {
+                    let style = &self.config.overlay.style;
+                    let look = if overlay_style_look_options(style).is_empty() {
+                        "no options".to_string()
+                    } else {
+                        let resolved =
+                            overlay_clamp_look_value(style, &self.config.overlay.look);
+                        format!("{} look", overlay_look_label(&resolved).to_lowercase())
+                    };
+                    let shape = if overlay_shows_shape_choice(style, &self.config.overlay.look) {
                         format!(
                             ", {}",
                             overlay_shape_label(&self.config.overlay.waveform_shape).to_lowercase()
@@ -1671,11 +1677,8 @@ impl ConsoleState {
                         String::new()
                     };
                     format!(
-                        "enabled, {}, {} style, {} look{}",
-                        self.config.overlay.position,
-                        self.config.overlay.style,
-                        overlay_look_label(&self.config.overlay.look).to_lowercase(),
-                        shape
+                        "enabled, {}, {} style, {}{}",
+                        self.config.overlay.position, self.config.overlay.style, look, shape
                     )
                 } else {
                     "disabled".to_string()
@@ -1878,6 +1881,44 @@ mod tests {
             state.step,
             StepKind::Confirm,
             "the blob has no look options, so it skips straight to Confirm"
+        );
+    }
+
+    fn rendered_confirm(state: &ConsoleState) -> String {
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| state.render_confirm(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn confirm_summary_shows_no_options_for_the_optionless_blob() {
+        // A style with no look options must not repeat the previous style's
+        // stale look in the Confirm summary.
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.config.overlay.enabled = true;
+        state.config.overlay.style = "blob".to_string();
+        state.config.overlay.look = "live-text".to_string();
+
+        let text = rendered_confirm(&state);
+        assert!(
+            text.contains("blob style, no options"),
+            "the optionless blob must summarize as no options:\n{text}"
+        );
+        assert!(
+            !text.to_lowercase().contains("live text look"),
+            "the summary must not show a look the blob cannot paint:\n{text}"
         );
     }
 
