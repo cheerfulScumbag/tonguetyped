@@ -925,10 +925,11 @@ enum OverlayRow {
 /// either direction (clamped at the ends), the preview follows the pending
 /// values before anything is saved, and `Enter` - or backing out - commits
 /// them. The configuration rows appear only while the pending enable value is
-/// on: the look row follows the chosen style (round styles: plain or waveform;
-/// wide styles: waveform or live text; the box: live text only; the blob:
-/// none), and the waveform-shape row appears only for a wide style whose look
-/// is the waveform, so the screen never offers a nonsensical combination.
+/// on: the look row follows the chosen style when it offers a real choice of
+/// two or more (round styles: plain or waveform; wide styles: waveform or live
+/// text; the box and the blob have at most one look, so they show no look row),
+/// and the waveform-shape row appears only for a wide style whose look is the
+/// waveform, so the screen never offers a nonsensical combination.
 pub(super) struct OverlayScreen {
     /// Row cursor into the current row list (see `row_kinds`).
     pub selected: usize,
@@ -965,7 +966,7 @@ impl OverlayScreen {
         }
         rows.push(OverlayRow::Position);
         rows.push(OverlayRow::Style);
-        if !overlay::style_look_options(&self.style).is_empty() {
+        if overlay::has_look_choice(&self.style) {
             rows.push(OverlayRow::Look);
         }
         if overlay::shows_shape_choice(&self.style, &self.look) {
@@ -1758,6 +1759,18 @@ mod tests {
     }
 
     #[test]
+    fn overlay_look_row_is_hidden_for_the_single_option_box() {
+        let mut config = Config::default();
+        config.overlay.style = "live-text-box".to_string();
+        config.overlay.look = "live-text".to_string();
+        let screen = OverlayScreen::new(&config);
+        assert!(
+            !screen.row_labels().iter().any(|row| *row == "Look"),
+            "the box offers a single look, so no Look row should appear"
+        );
+    }
+
+    #[test]
     fn overlay_look_row_cycles_the_two_badge_looks() {
         let config = Config::default();
         let mut screen = OverlayScreen::new(&config);
@@ -1814,10 +1827,10 @@ mod tests {
         config.overlay.style = "half-circle".to_string();
         config.overlay.look = "waveform".to_string();
         let mut screen = OverlayScreen::new(&config);
-        screen.selected = 3; // Style row
-        screen.apply(&mut config);
-        assert_eq!(config.overlay.style, "long-pill");
-        assert_eq!(config.overlay.waveform_shape, "squiggle");
+        screen.selected = 2; // Style row
+        screen.step(1);
+        assert_eq!(screen.style, "long-pill");
+        assert_eq!(screen.waveform_shape, "squiggle");
     }
 
     #[test]

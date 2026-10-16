@@ -7,8 +7,8 @@ use crate::audio::{self, level_to_ratio};
 use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
 use crate::overlay::{
     clamp_look_value as overlay_clamp_look_value, default_shape as overlay_default_shape,
-    look_label as overlay_look_label, shape_label as overlay_shape_label,
-    shows_shape_choice as overlay_shows_shape_choice,
+    has_look_choice as overlay_has_look_choice, look_label as overlay_look_label,
+    shape_label as overlay_shape_label, shows_shape_choice as overlay_shows_shape_choice,
     style_look_options as overlay_style_look_options, POSITION_VALUES as OVERLAY_POSITION_VALUES,
     SHAPE_LABELS as OVERLAY_SHAPE_LABELS, SHAPE_VALUES as OVERLAY_SHAPE_VALUES,
     STYLE_LABELS as OVERLAY_STYLE_LABELS, STYLE_VALUES as OVERLAY_STYLE_VALUES,
@@ -678,7 +678,7 @@ impl ConsoleState {
         if self.overlay_options_shown() {
             steps.push(OverlayPosition);
             steps.push(OverlayStyle);
-            if self.overlay_look_option_count() > 0 {
+            if overlay_has_look_choice(self.overlay_style_value()) {
                 steps.push(OverlayLook);
             }
             if self.overlay_shape_shown() {
@@ -1898,6 +1898,24 @@ mod tests {
             state.step,
             StepKind::Confirm,
             "the blob has no look options, so it skips straight to Confirm"
+        );
+    }
+
+    #[test]
+    fn a_single_option_box_overlay_skips_the_look_step() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::OverlayStyle;
+        state.overlay_style_selection = OVERLAY_STYLE_VALUES
+            .iter()
+            .position(|value| *value == "live-text-box")
+            .unwrap();
+        state.advance().unwrap();
+        assert_eq!(state.config.overlay.style, "live-text-box");
+        assert_eq!(state.config.overlay.look, "live-text");
+        assert_eq!(
+            state.step,
+            StepKind::Confirm,
+            "the box offers a single look, so it skips straight to Confirm"
         );
     }
 

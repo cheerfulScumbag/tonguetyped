@@ -1004,6 +1004,13 @@ pub(crate) fn style_look_options(style_name: &str) -> &'static [(&'static str, &
     look_options(style_for(style_name))
 }
 
+/// Whether a style offers a real look choice - two or more options. A style
+/// with a single option (the box, live text only) has nothing to choose, so
+/// the settings UIs omit its look row rather than showing a dead choice.
+pub(crate) fn has_look_choice(style_name: &str) -> bool {
+    style_look_options(style_name).len() > 1
+}
+
 /// Whether a style-name + look pair shows the waveform-shape row: the style
 /// offers the shape and its resolved look is the waveform. The configuration
 /// UIs use this so the row only appears where it means something.
