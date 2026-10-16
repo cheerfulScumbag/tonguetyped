@@ -10,11 +10,11 @@
 //! e.g. for screenshotting: `cargo run --example overlay_preview -- top-right
 //! recording`. Pass a style name
 //! (badge/minimal/pill/blob/border/half-circle/long-pill/live-text/
-//! live-text-box) as a third
-//! argument to preview one of the other `overlay.style` looks, e.g. `cargo run
-//! --example overlay_preview -- top-right recording blob`. The `border` style
-//! ignores `position`: it is a full-screen frame that hugs every screen edge.
-//! The
+//! live-text-box) as a third argument to preview one of the other
+//! `overlay.style` styles, e.g. `cargo run --example overlay_preview --
+//! top-right recording blob` (the look is always `waveform` with the `bars`
+//! shape, clamped to what the style offers). The `border` style ignores
+//! `position`: it is a full-screen frame that hugs every screen edge. The
 //! `half-circle` style also ignores `position`: it is a semicircle resting on
 //! the top edge, always at top-centre. The overlay shows on every connected
 //! output by default; pass `overlay.monitor` as a fourth argument

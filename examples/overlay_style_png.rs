@@ -8,9 +8,10 @@
 //! Run with `cargo run --example overlay_style_png -- <output-dir>` (defaults
 //! to `overlay-preview` in the current directory). Every style is written once
 //! per phase; the `blob`, `border`, and `half-circle` styles additionally get
-//! frames across one animation cycle, and every style gets recording frames
-//! over two representative live-microphone level histories (quiet and
-//! speaking), for both the default and live-waveform treatments. The
+//! frames across one animation cycle in both the `plain` and `waveform` looks,
+//! and every style gets recording frames over two representative
+//! live-microphone level histories (quiet and speaking) with the `waveform`
+//! look. The
 //! full-screen `border` frames are written at their representative preview size
 //! rather than a compositor-provided output size.
 
