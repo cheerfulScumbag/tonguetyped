@@ -638,12 +638,11 @@ Four things to know before choosing a streaming model:
   `live-text` look paints words (or the listening pad) and never a waveform;
   every other look paints its own recording animation and never live words.
 - **Most streaming models are English-only, but not all.** The small, fast
-  Moonshine-streaming and English Parakeet ports stream English only; the
-  Voxtral-realtime port streams its own multilingual language set and is tagged
-  `live` (no `(en)`) in `model list`. Pick a
-  Whisper (or another multilingual offline) model when a streaming model does
-  not cover your language; you keep the full transcript, just without live
-  text.
+  Moonshine-streaming models and the English Parakeet port stream English only;
+  the Voxtral-realtime port streams its own multilingual language set and is
+  tagged `live` (no `(en)`) in `model list`. Pick a Whisper (or another
+  multilingual offline) model when a streaming model does not cover your
+  language; you keep the full transcript, just without live text.
 
 Streaming models are recorded through the model's own native stream (nothing is
 re-decoded on a timer), so the feature costs no extra CPU beyond the model

@@ -97,8 +97,8 @@ fn smoke_model_entries_are_the_smallest_offline_for_each_family() {
     // the opt-in run download a larger file than intended: each listed id must
     // exist, belong to its family, and be that family's smallest entry. This
     // test transcribes through the offline path, so only the family's
-    // non-streaming entries count: the `parakeet` family now also ships
-    // streaming variants, and a smaller streaming one is not what this test
+    // non-streaming entries count: the `parakeet` family now also ships a
+    // streaming variant, and a smaller streaming one is not what this test
     // fetches.
     for (family, id) in SMOKE_MODELS {
         let chosen = tonguetyped::catalog::find(id).unwrap();
