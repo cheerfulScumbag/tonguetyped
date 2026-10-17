@@ -284,9 +284,20 @@ The dashboard opens on a settings overview, grouped into four sections -
 with one row each for Model, Inference backend, Translation, Decoding, Text
 processing, Microphone, Activation, Shortcut, Transcript output, Typing backend,
 Transcript folder, History retention, Startup, Overlay, and Media pause. A
-Commands row below them opens a separate screen listing the remaining commands.
-Selecting a settings row opens a screen that edits just that area, with the same
-live microphone preview and shortcut dialog the setup wizard uses.
+Commands row below them opens a separate screen listing the remaining commands,
+where Up/Down selects a command and Enter runs it. Selecting a settings row
+opens a screen that edits just that area, with the same live microphone preview
+and shortcut dialog the setup wizard uses.
+
+The value steppers and choice lists share one navigation grammar: Up/Down
+moves between rows, Left/Right changes the highlighted choice in either
+direction, Enter saves, and Esc (or Backspace) goes back, committing the
+highlighted value on the way out. Free-text rows keep Left/Right for the cursor
+and Backspace for deleting, with Esc as the way back. The Overlay screen
+previews the highlighted style, look, waveform shape, and position as you step
+them, so a choice is visible before Enter or backing out saves it. The setup
+wizard walks the same settings one step at a time with the same Overlay preview:
+Enter advances and Esc (or Backspace on its list steps) goes back.
 
 ### Commands
 
@@ -611,8 +622,8 @@ live decode runs the way Handy does it. Whether the words are *shown* is your
 call: choose a live-capable style's `live-text` look (see "Overlay" above) to
 see them. `tonguetyped model list` marks the streaming models with a `live` tag
 under **STREAMING** (or `live (en)` for the English-only ones), and the
-dashboard's model screen tags them `LIVE`; the rest of the catalog produces no
-live text and shows only the recording indicator.
+dashboard's model screen marks them `live` in its LIVE column; the rest of the
+catalog produces no live text and shows only the recording indicator.
 
 Four things to know before choosing a streaming model:
 
