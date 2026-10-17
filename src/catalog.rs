@@ -578,45 +578,6 @@ pub const ENTRIES: &[CatalogModel] = &[
         sha256: "a8bf3de2b393bd14ead5a858c3748d5e3b07a20fdeabdd3b498fba4f463fa929",
     },
     CatalogModel {
-        id: "nemotron-speech-streaming-en-0.6b-q4_k_m",
-        variant: "nemotron-speech-streaming-en-0.6b",
-        display_name: "nemotron-speech-streaming-en-0.6b",
-        quant: "Q4_K_M",
-        upstream_repo: "nvidia/nemotron-speech-streaming-en-0.6b",
-        license_spdx: "nvidia-open-model-license",
-        hf_repo: "handy-computer/nemotron-speech-streaming-en-0.6b-gguf",
-        revision: "7df420cc3fb915a3b334560dac712af44fc41ef5",
-        filename: "nemotron-speech-streaming-en-0.6b-Q4_K_M.gguf",
-        size_bytes: 475436032,
-        sha256: "dc959ca31499b114e395c44eb4f0778968f20e5cfb03305a08a39925b2da8e1e",
-    },
-    CatalogModel {
-        id: "nemotron-3.5-asr-streaming-0.6b-q4_k_m",
-        variant: "nemotron-3.5-asr-streaming-0.6b",
-        display_name: "nemotron-3.5-asr-streaming-0.6b",
-        quant: "Q4_K_M",
-        upstream_repo: "nvidia/nemotron-3.5-asr-streaming-0.6b",
-        license_spdx: "openmdw-1.1",
-        hf_repo: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
-        revision: "53ce288f69326b415aeef030cfcb02a08a8096dd",
-        filename: "nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
-        size_bytes: 495831520,
-        sha256: "41c99fa5fb6f3d35f68e79adc3e755eca2232a8d921178bd647b71194792b8fd",
-    },
-    CatalogModel {
-        id: "multitalker-parakeet-streaming-0.6b-v1-q4_k_m",
-        variant: "multitalker-parakeet-streaming-0.6b-v1",
-        display_name: "multitalker-parakeet-streaming-0.6b-v1",
-        quant: "Q4_K_M",
-        upstream_repo: "nvidia/multitalker-parakeet-streaming-0.6b-v1",
-        license_spdx: "nvidia-open-model-license",
-        hf_repo: "handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf",
-        revision: "e9671411e593f17994f37540ac061e6b5dfe043b",
-        filename: "bundle/multitalker-parakeet-streaming-0.6b-v1-Q4_K_M.gguf",
-        size_bytes: 617132160,
-        sha256: "d24307ac22e9e691c146a7e2339891638a44a8492a765e4b6c11cff8960cd998",
-    },
-    CatalogModel {
         id: "voxtral-mini-4b-realtime-2602-q4_k_m",
         variant: "voxtral-mini-4b-realtime-2602",
         display_name: "voxtral-mini-4b-realtime-2602",
@@ -1608,15 +1569,6 @@ const VOXTRAL_REALTIME_LANGUAGES: &[&str] = &[
     "en", "fr", "es", "de", "ru", "zh", "ja", "it", "pt", "nl", "ar", "hi", "ko",
 ];
 
-/// The 32 language-locales `nemotron-3.5-asr-streaming-0.6b` advertises, in the
-/// BCP-47 spellings its transcribe.cpp catalog record lists.
-const NEMOTRON_35_LANGUAGES: &[&str] = &[
-    "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT", "pt-BR", "pt-PT", "nl-NL",
-    "de-DE", "tr-TR", "ru-RU", "ar-AR", "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA", "pl-PL",
-    "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI", "hr-HR", "sk-SK", "zh-CN", "hu-HU",
-    "ro-RO", "et-EE",
-];
-
 /// Capability data for every transcribe.cpp variant the catalog draws from,
 /// so the UI can label each entry with its family and language coverage and
 /// config validation can read each family's single-buffer limit. The
@@ -1670,27 +1622,6 @@ pub const VARIANTS: &[VariantInfo] = &[
     VariantInfo {
         variant: "moonshine-streaming-tiny",
         family: "moonshine_streaming",
-        languages: ENGLISH_LANGUAGES,
-        long_form: LongForm::Unbounded,
-        streaming: true,
-    },
-    VariantInfo {
-        variant: "multitalker-parakeet-streaming-0.6b-v1",
-        family: "parakeet",
-        languages: ENGLISH_LANGUAGES,
-        long_form: LongForm::Unbounded,
-        streaming: true,
-    },
-    VariantInfo {
-        variant: "nemotron-3.5-asr-streaming-0.6b",
-        family: "parakeet",
-        languages: NEMOTRON_35_LANGUAGES,
-        long_form: LongForm::Unbounded,
-        streaming: true,
-    },
-    VariantInfo {
-        variant: "nemotron-speech-streaming-en-0.6b",
-        family: "parakeet",
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
         streaming: true,
@@ -1819,16 +1750,7 @@ pub fn find(id: &str) -> Option<&'static CatalogModel> {
 /// entry.
 pub fn entry_for_path(path: &std::path::Path) -> Option<&'static CatalogModel> {
     let filename = path.file_name().and_then(|name| name.to_str())?;
-    // Compare basenames, not the stored `filename` verbatim: an entry whose
-    // file lives in a repo subdirectory (the multitalker bundle) keeps that
-    // prefix in `filename` so `download_url` resolves, while the installed file
-    // is matched by its trailing component alone.
-    ENTRIES.iter().find(|entry| {
-        std::path::Path::new(entry.filename)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(filename)
-    })
+    ENTRIES.iter().find(|entry| entry.filename == filename)
 }
 
 /// Local path a catalog model is (or would be) installed at.
@@ -1972,9 +1894,6 @@ mod tests {
             "moonshine-streaming-small-q8_0",
             "moonshine-streaming-medium-q8_0",
             "parakeet-unified-en-0.6b-q4_k_m",
-            "nemotron-speech-streaming-en-0.6b-q4_k_m",
-            "nemotron-3.5-asr-streaming-0.6b-q4_k_m",
-            "multitalker-parakeet-streaming-0.6b-v1-q4_k_m",
             "voxtral-mini-4b-realtime-2602-q4_k_m",
         ] {
             let info = find(id).expect(id).info();
@@ -1984,30 +1903,29 @@ mod tests {
 
     #[test]
     fn streaming_models_report_their_real_language_coverage() {
-        // Streaming is not English-only: the multilingual ports carry their
+        // Streaming is not English-only: the multilingual port carries its
         // real language set, so the UI's "(en)" streaming note stays honest.
         for id in [
             "moonshine-streaming-tiny-q8_0",
             "moonshine-streaming-small-q8_0",
             "moonshine-streaming-medium-q8_0",
             "parakeet-unified-en-0.6b-q4_k_m",
-            "nemotron-speech-streaming-en-0.6b-q4_k_m",
-            "multitalker-parakeet-streaming-0.6b-v1-q4_k_m",
         ] {
             let info = find(id).expect(id).info();
             assert!(info.is_english_only(), "{id} is English-only");
         }
-        for (id, summary) in [
-            ("nemotron-3.5-asr-streaming-0.6b-q4_k_m", "32 languages"),
-            ("voxtral-mini-4b-realtime-2602-q4_k_m", "13 languages"),
-        ] {
-            let info = find(id).expect(id).info();
-            assert!(
-                !info.is_english_only(),
-                "{id} is multilingual and must not be tagged English-only"
-            );
-            assert_eq!(info.language_summary(), summary, "{id}");
-        }
+        let voxtral = find("voxtral-mini-4b-realtime-2602-q4_k_m")
+            .expect("voxtral-mini-4b-realtime-2602-q4_k_m")
+            .info();
+        assert!(
+            !voxtral.is_english_only(),
+            "voxtral-mini-4b-realtime-2602 must not be tagged English-only"
+        );
+        assert_eq!(
+            voxtral.language_summary(),
+            "13 languages",
+            "voxtral-mini-4b-realtime-2602"
+        );
     }
 
     #[test]

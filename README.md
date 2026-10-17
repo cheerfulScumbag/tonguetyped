@@ -638,12 +638,11 @@ Four things to know before choosing a streaming model:
   `live-text` look paints words (or the listening pad) and never a waveform;
   every other look paints its own recording animation and never live words.
 - **Most streaming models are English-only, but not all.** The small, fast
-  Moonshine-streaming and English Parakeet ports stream English only; the
-  multilingual Parakeet-family and Voxtral-realtime ports stream their own
-  language sets and are tagged `live` (no `(en)`) in `model list`. Pick a
-  Whisper (or another multilingual offline) model when a streaming model does
-  not cover your language; you keep the full transcript, just without live
-  text.
+  Moonshine-streaming models and the English Parakeet port stream English only;
+  the Voxtral-realtime port streams its own multilingual language set and is
+  tagged `live` (no `(en)`) in `model list`. Pick a Whisper (or another
+  multilingual offline) model when a streaming model does not cover your
+  language; you keep the full transcript, just without live text.
 
 Streaming models are recorded through the model's own native stream (nothing is
 re-decoded on a timer), so the feature costs no extra CPU beyond the model
@@ -810,7 +809,7 @@ substitutes a different model or family.
 **A curated catalog.** `src/catalog.rs` tracks reviewed GGUF models from the
 offline families this project has checked against its VAD-then-single-buffer
 pipeline (whisper, parakeet, moonshine, canary, and cohere), plus the streaming
-ports that feed live text (Moonshine-streaming, several Parakeet variants, and
+ports that feed live text (Moonshine-streaming, Parakeet-unified, and
 Voxtral-realtime; see "Live text" above), all published by
 [handy-computer](https://huggingface.co/handy-computer). Each entry is pinned to
 a commit with an expected byte size and SHA-256, and `tonguetyped model list`
