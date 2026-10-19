@@ -79,7 +79,7 @@ rec {
     Name=TongueTyped
     Comment=Local speech-to-text dictation
     Exec=${exec}
-    Icon=io.github.cheerfulScumbag.tonguetyped
+    Icon=audio-input-microphone
     Terminal=false
     StartupNotify=false
     NoDisplay=true

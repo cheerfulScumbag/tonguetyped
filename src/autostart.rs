@@ -62,17 +62,21 @@ fn apply_dispatch(
 }
 
 fn request_background_autostart(enabled: bool) -> anyhow::Result<()> {
-    crate::activation::portal_runtime().block_on(async {
-        let request = ashpd::desktop::background::Background::request()
-            .reason(AUTOSTART_REASON)
-            .auto_start(enabled)
-            .command(AUTOSTART_COMMAND)
-            .dbus_activatable(false)
-            .send()
-            .await?;
-        let response = request.response()?;
-        portal_result(enabled, response.auto_start())
+    std::thread::spawn(move || {
+        crate::activation::portal_runtime().block_on(async {
+            let request = ashpd::desktop::background::Background::request()
+                .reason(AUTOSTART_REASON)
+                .auto_start(enabled)
+                .command(AUTOSTART_COMMAND)
+                .dbus_activatable(false)
+                .send()
+                .await?;
+            let response = request.response()?;
+            portal_result(enabled, response.auto_start())
+        })
     })
+    .join()
+    .map_err(|_| anyhow::anyhow!("autostart portal request thread panicked"))?
 }
 
 fn portal_result(requested: bool, reported: bool) -> anyhow::Result<()> {
