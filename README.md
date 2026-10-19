@@ -672,11 +672,11 @@ ceiling, about 24 s), its text is committed and a fresh stream starts on the
 audio that follows, keeping the live text flowing for a long dictation. Each
 segment boundary is placed in a pause where the audio has one, and the finished
 segments are joined with a single space, so nothing at the seam is dropped or
-duplicated. The unbounded streaming ports (Parakeet, Voxtral-realtime) advertise
-no model cap, but each live segment is still bounded by the decode window
-(`transcription.chunk_seconds`, 30 s by default), so they roll over the same
-way; set `chunk_seconds = 0` to run a single stream to the end of the recording
-instead.
+duplicated. The unbounded streaming ports (Parakeet, Nemotron 3.5,
+Voxtral-realtime) advertise no model cap, but each live segment is still bounded
+by the decode window (`transcription.chunk_seconds`, 30 s by default), so they
+roll over the same way; set `chunk_seconds = 0` to run a single stream to the end
+of the recording instead.
 
 ### Long recordings and file transcription
 
