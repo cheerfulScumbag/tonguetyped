@@ -442,9 +442,9 @@ fn milliseconds_to_samples(milliseconds: i64) -> usize {
 ///
 /// - `transcription.chunk_seconds`, when chunking is enabled (`> 0`);
 /// - the catalog family bound, so an over-length buffer is never submitted even
-///   with chunking off: a hard input cap as-is (canary, cohere) or half a soft
-///   output window (moonshine), since the documented soft ceiling assumes ~4
-///   output tokens/s while English decodes nearer 6;
+///   with chunking off: a hard input cap as-is (canary, cohere, qwen3_asr) or
+///   half a soft output window (moonshine), since the documented soft ceiling
+///   assumes ~4 output tokens/s while English decodes nearer 6;
 /// - the loaded model's own advertised `max_audio_ms`, halved for the same
 ///   output-budget headroom - the model-aware bound. Read from the GGUF at load
 ///   rather than assuming one family's number for every model, and applied to
@@ -702,10 +702,10 @@ pub struct InferenceEngine {
     cancel: CancelToken,
     /// The loaded model's input-length contract, recovered from the catalog by
     /// `model_path` and combined with the session's own advertised ceiling in
-    /// `decode_window_samples`. A hard-capped family (canary, cohere) is
-    /// decoded in windows at most its cap and any model that advertises a
-    /// limit at most half it, so no call can exceed the limit even when
-    /// `transcription.chunk_seconds` is `0`.
+    /// `decode_window_samples`. A hard-capped family (canary, cohere,
+    /// qwen3_asr) is decoded in windows at most its cap and any model that
+    /// advertises a limit at most half it, so no call can exceed the limit even
+    /// when `transcription.chunk_seconds` is `0`.
     long_form: crate::catalog::LongForm,
 }
 
@@ -1087,6 +1087,22 @@ mod tests {
                 language: Some("en".to_string()),
                 ..Default::default()
             }
+        );
+    }
+
+    #[test]
+    fn a_non_whisper_model_still_receives_the_configured_language() {
+        let config = crate::config::TranscriptionConfig {
+            language: "de".to_string(),
+            ..Default::default()
+        };
+        let support = DecodeSupport {
+            whisper_options: false,
+            translate: false,
+        };
+        assert_eq!(
+            run_options(&config, support).language,
+            Some("de".to_string())
         );
     }
 

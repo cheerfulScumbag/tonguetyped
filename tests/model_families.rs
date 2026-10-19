@@ -1,11 +1,12 @@
 //! Per-family load/inference smoke test.
 //!
-//! The catalog spans whisper, parakeet, moonshine, canary, and cohere, but
-//! every other test exercises it with an empty placeholder file instead of a
-//! real GGUF. Nothing else would catch a family that the pinned transcribe-cpp
-//! binding cannot load and run through the same `InferenceEngine` the daemon
-//! uses, so this test loads the smallest quantization of one variant per
-//! non-whisper family and transcribes a one-second clip.
+//! The catalog spans whisper, parakeet, moonshine, canary, cohere, and
+//! qwen3_asr, but every other test exercises it with an empty placeholder file
+//! instead of a real GGUF. Nothing else would catch a family that the pinned
+//! transcribe-cpp binding cannot load and run through the same
+//! `InferenceEngine` the daemon uses, so this test loads the smallest
+//! quantization of one variant per non-whisper family and transcribes a
+//! one-second clip.
 //!
 //! Each model is hundreds of megabytes, so the test stays off unless
 //! `TONGUETYPED_SMOKE_MODELS=1` is set and huggingface.co is reachable. Without
@@ -21,6 +22,7 @@ const SMOKE_MODELS: &[(&str, &str)] = &[
     ("moonshine", "moonshine-base-q8_0"),
     ("canary", "canary-1b-v2-q4_k_m"),
     ("cohere_asr", "cohere-transcribe-03-2026-q4_k_m"),
+    ("qwen3_asr", "qwen3-asr-1.7b-q4_k_m"),
 ];
 
 fn smoke_enabled() -> bool {
