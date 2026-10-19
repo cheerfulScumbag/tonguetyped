@@ -89,13 +89,23 @@ jobs:
             --set-metadata "version = \"${version}\"" \
             -o "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64-${{ matrix.variant }}.rpm"
           cp target/release/tonguetyped "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64-${{ matrix.variant }}"
+      - name: Check out release bundling helper
+        # The checked-out tag can predate the bundling helper, so take it from
+        # the revision this workflow file came from. An existing tag rerun then
+        # still has the helper available.
+        if: matrix.variant == 'gpu-vulkan'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-src
       - name: Bundle shell completions, man pages, and app icon
         # build.rs writes the completions and man pages to target/release/dist
         # during the release build; the same files are already inside the .deb
-        # and .rpm above. The app icon comes from data/. One bundle is enough -
-        # it is identical for every backend.
+        # and .rpm above. The app icon is copied by the helper when the source
+        # tree carries it. One bundle is enough - it is identical for every
+        # backend.
         if: matrix.variant == 'gpu-vulkan'
-        run: bash scripts/bundle-release.sh "$RELEASE_TAG" target/release/dist release-assets
+        run: bash workflow-src/scripts/bundle-release.sh "$RELEASE_TAG" target/release/dist release-assets
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux-${{ matrix.variant }}

@@ -12,12 +12,15 @@ trap 'rm -rf "${stage}"' EXIT
 
 mkdir -p \
   "${stage}/${bundle}/completions" \
-  "${stage}/${bundle}/man" \
-  "${stage}/${bundle}/icons/hicolor/scalable/apps"
+  "${stage}/${bundle}/man"
 cp "${dist}/completions/"* "${stage}/${bundle}/completions/"
 cp "${dist}/man/"*.1 "${stage}/${bundle}/man/"
-cp "${repo_root}/data/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg" \
-  "${stage}/${bundle}/icons/hicolor/scalable/apps/"
+
+icon="${repo_root}/data/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg"
+if [ -f "${icon}" ]; then
+  mkdir -p "${stage}/${bundle}/icons/hicolor/scalable/apps"
+  cp "${icon}" "${stage}/${bundle}/icons/hicolor/scalable/apps/"
+fi
 
 mkdir -p "${output}"
 tar -C "${stage}" -czf "${output}/${bundle}.tar.gz" "${bundle}"
