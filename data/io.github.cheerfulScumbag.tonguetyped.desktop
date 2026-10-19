@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TongueTyped
+GenericName=Dictation
+Comment=Local speech-to-text dictation
+Exec=tonguetyped
+Icon=audio-input-microphone
+Terminal=true
+StartupNotify=false
+Categories=Utility;Accessibility;
+Keywords=dictation;speech-to-text;voice;transcription;

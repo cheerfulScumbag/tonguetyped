@@ -1,0 +1,140 @@
+# LOCAL TEST MANIFEST - NOT FOR FLATHUB SUBMISSION.
+#
+# This manifest verifies that the app builds and runs inside a Flatpak. It
+# uses a local `dir` source, Microsoft's prebuilt ONNX Runtime archive, and it
+# installs no AppStream metainfo, icon, or screenshots: Flathub requires all of
+# those, and it requires a human maintainer to author the submitted manifest.
+# See ../flatpak/README.md.
+id: io.github.cheerfulScumbag.tonguetyped
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm22
+command: tonguetyped
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.freedesktop.Notifications
+  # Test-only: lets the local test build pause/resume MPRIS players. The
+  # submission permission is decided in the separate Flathub task.
+  - --talk-name=org.mpris.MediaPlayer2.*
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm22/lib
+  env:
+    LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
+    CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+modules:
+  - name: SPIRV-Headers
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DSPIRV_HEADERS_SKIP_EXAMPLES=ON
+    sources:
+      - type: archive
+        url: https://github.com/KhronosGroup/SPIRV-Headers/archive/refs/tags/vulkan-sdk-1.4.357.0.tar.gz
+        sha256: 4d703067a7e06331ccb37bdfed3f9b7879cc61969a2689ae95c95db34a47ff07
+
+  - name: wl-clipboard
+    buildsystem: meson
+    config-opts:
+      - -Dfishcompletiondir=no
+    sources:
+      - type: archive
+        url: https://github.com/bugaevc/wl-clipboard/archive/refs/tags/v2.2.1.tar.gz
+        sha256: 6eb8081207fb5581d1d82c4bcd9587205a31a3d47bea3ebeb7f41aa1143783eb
+        strip-components: 1
+
+  - name: wtype
+    buildsystem: meson
+    sources:
+      - type: archive
+        url: https://github.com/atx/wtype/archive/refs/tags/v0.4.tar.gz
+        sha256: da91786d828b6a6e29b884bc510473939eda052658ebef87d7bdeafa6a8746f9
+        strip-components: 1
+
+  - name: libXmu
+    buildsystem: autotools
+    sources:
+      - type: archive
+        url: https://www.x.org/releases/individual/lib/libXmu-1.2.1.tar.xz
+        sha256: fcb27793248a39e5fcc5b9c4aec40cc0734b3ca76aac3d7d1c264e7f7e14e8b2
+        strip-components: 1
+
+  - name: xclip
+    buildsystem: autotools
+    sources:
+      - type: archive
+        url: https://github.com/astrand/xclip/archive/refs/tags/0.13.tar.gz
+        sha256: ca5b8804e3c910a66423a882d79bf3c9450b875ac8528791fb60ec9de667f758
+        strip-components: 1
+
+  - name: xdotool
+    buildsystem: simple
+    build-commands:
+      - make -j${FLATPAK_BUILDER_N_JOBS}
+      - make install PREFIX=/app
+    sources:
+      - type: archive
+        url: https://github.com/jordansissel/xdotool/archive/refs/tags/v4.20260303.1.tar.gz
+        sha256: c1f971a384da588eb99ca0755fc4300316d49c1e612537e3f1de52215e104fa3
+        strip-components: 1
+
+  # Prebuilt ONNX Runtime for the local test build only. Flathub's current
+  # policy requires dependencies to build from source; the submission policy
+  # decision for ONNX Runtime is still open.
+  - name: onnxruntime
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib /app/include
+      - cp -a lib/* /app/lib/
+      - cp -a include/* /app/include/
+    sources:
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-x64-1.24.1.tgz
+        sha256: 9142552248b735920f9390027e4512a2cacf8946a1ffcbe9071a5c210531026f
+        strip-components: 1
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-aarch64-1.24.1.tgz
+        sha256: 0f56edd68f7602df790b68b874a46b115add037e88385c6c842bb763b39b9f89
+        strip-components: 1
+
+  - name: tonguetyped
+    buildsystem: simple
+    build-options:
+      env:
+        ORT_LIB_LOCATION: /app/lib
+        ORT_PREFER_DYNAMIC_LINK: '1'
+        CMAKE_PREFIX_PATH: /app
+        CARGO_HOME: /run/build/tonguetyped/cargo
+    build-commands:
+      - cargo build --release --offline --features gpu-vulkan
+      - install -Dm755 target/release/tonguetyped /app/bin/tonguetyped
+      - install -Dm644 data/io.github.cheerfulScumbag.tonguetyped.desktop /app/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
+      - install -Dm644 target/release/dist/completions/tonguetyped.bash /app/share/bash-completion/completions/tonguetyped
+      - install -Dm644 target/release/dist/completions/_tonguetyped /app/share/zsh/site-functions/_tonguetyped
+      - install -Dm644 target/release/dist/completions/tonguetyped.fish /app/share/fish/vendor_completions.d/tonguetyped.fish
+      - install -d /app/share/man/man1
+      - install -m644 target/release/dist/man/*.1 /app/share/man/man1/
+      - install -Dm644 LICENSE /app/share/licenses/$FLATPAK_ID/tonguetyped/LICENSE
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .flatpak
+          - .flatpak-builder
+          - .opencode
+          - target
+          - flatpak/.repo
+          - flatpak/.state
+          - flatpak/.build
+      - cargo-sources.json

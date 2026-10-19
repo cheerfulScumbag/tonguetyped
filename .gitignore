@@ -3,4 +3,8 @@
 /CLAUDE.md
 /.superdesign/
 /data/*
-!/data/tonguetyped.desktop
+!/data/io.github.cheerfulScumbag.tonguetyped.desktop
+!/data/tonguetyped-daemon.desktop
+/flatpak/.repo
+/flatpak/.state
+/flatpak/.build

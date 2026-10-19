@@ -111,7 +111,7 @@
               ORT_PREFER_DYNAMIC_LINK = "1";
 
               postInstall = ''
-                install -Dm644 data/tonguetyped.desktop \
+                install -Dm644 data/io.github.cheerfulScumbag.tonguetyped.desktop \
                   $out/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
 
                 # build.rs renders these during the release build. Locate them

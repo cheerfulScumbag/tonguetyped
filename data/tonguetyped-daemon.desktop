@@ -6,4 +6,5 @@ Exec=tonguetyped daemon
 Icon=audio-input-microphone
 Terminal=false
 StartupNotify=false
+NoDisplay=true
 Categories=Utility;Accessibility;

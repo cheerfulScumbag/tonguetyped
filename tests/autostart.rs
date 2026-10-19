@@ -28,7 +28,7 @@ fn autostart_lifecycle_updates_config_and_desktop_entry() {
     assert!(run(&["autostart", "enable"]).status.success());
     assert_eq!(
         std::fs::read_to_string(&entry).unwrap(),
-        include_str!("../data/tonguetyped.desktop")
+        include_str!("../data/tonguetyped-daemon.desktop")
     );
     let config = std::fs::read_to_string(config_home.join("tonguetyped/config.toml")).unwrap();
     assert!(toml::from_str::<Config>(&config).unwrap().startup.autostart);
@@ -37,7 +37,7 @@ fn autostart_lifecycle_updates_config_and_desktop_entry() {
     assert!(run(&["autostart", "enable"]).status.success());
     assert_eq!(
         std::fs::read_to_string(&entry).unwrap(),
-        include_str!("../data/tonguetyped.desktop")
+        include_str!("../data/tonguetyped-daemon.desktop")
     );
 
     assert!(run(&["autostart", "disable"]).status.success());
@@ -75,7 +75,7 @@ fn disable_removes_entry_without_rewriting_invalid_config() {
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::fs::write(&config_path, invalid_config).unwrap();
-        std::fs::write(&entry, include_bytes!("../data/tonguetyped.desktop")).unwrap();
+        std::fs::write(&entry, include_bytes!("../data/tonguetyped-daemon.desktop")).unwrap();
 
         let output = Command::new(binary)
             .args(["autostart", "disable"])
