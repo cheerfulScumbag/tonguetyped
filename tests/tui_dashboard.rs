@@ -449,6 +449,11 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
         "the Overlay row should summarize the real config:\n{screen}"
     );
     assert!(
+        screen.contains("Transcript folder  disabled (history off)")
+            && screen.contains("History retention  history off"),
+        "a fresh install must show transcript saving as off:\n{screen}"
+    );
+    assert!(
         screen.contains("Daemon:"),
         "missing status strip:\n{screen}"
     );
@@ -937,7 +942,25 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    select_setting(&mut session, "Transcript folder");
+    // Saving transcripts is opt-in, so turn it on from the Transcript output
+    // screen before the folder is edited. The history row sits after the four
+    // method rows for the default "keep in TongueTyped" method.
+    select_setting(&mut session, "Transcript output");
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output", Duration::from_secs(3));
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    session.send(KEY_RIGHT);
+    session.wait_for("[x] history and folder", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
+    session.wait_for("> Transcript folder", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
     let opened = session.wait_for("Folder", Duration::from_secs(3));
@@ -956,6 +979,7 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
     assert!(saved.contains(target), "{saved}");
 
     let config = sandbox.config_contents();
+    assert!(config.contains("enabled = true"), "{config}");
     assert!(
         config.contains(&format!("transcript_folder = \"{target}\"")),
         "{config}"
@@ -1207,7 +1231,25 @@ fn pty_history_retention_setting_persists_both_limits() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    select_setting(&mut session, "History retention");
+    // Retention is only editable while saving transcripts is on. Enable it
+    // from the Transcript output screen's history row.
+    select_setting(&mut session, "Transcript output");
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output", Duration::from_secs(3));
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    session.send(KEY_RIGHT);
+    session.wait_for("[x] history and folder", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
+    session.wait_for("> History retention", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
     let opened = session.wait_for("Maximum entries", Duration::from_secs(3));
@@ -1705,8 +1747,10 @@ const TRANSCRIPT_PHRASE: &str = "alpha bravo charlie delta echo foxtrot golf hot
 /// already-long TMPDIR.
 fn open_last_result(tag: &str, transcript: &str) -> (Sandbox, Daemon, Session) {
     let sandbox = Sandbox::new(tag);
-    sandbox
-        .write_config("[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n");
+    sandbox.write_config(
+        "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n\
+         [history]\nenabled = true\n",
+    );
     sandbox.seed_history(transcript);
     let daemon = start_daemon(&sandbox);
 

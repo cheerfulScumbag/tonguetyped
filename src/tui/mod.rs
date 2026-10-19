@@ -1156,6 +1156,12 @@ impl App {
             self.commit_and_leave_settings();
             return;
         }
+        if matches!(&self.screen, Screen::TextFields(screen) if screen.disabled) {
+            // The history fields are hidden while keeping transcripts is off.
+            // Escape already left above; every other key is inert so a hidden
+            // field can never change.
+            return;
+        }
         if key.code == KeyCode::Enter {
             let result = match &self.screen {
                 Screen::TextFields(screen) => screen.apply(&mut self.config),
@@ -1697,7 +1703,13 @@ impl App {
             }
             SettingId::TypingBackend => self.config.output.typing_backend.clone(),
             SettingId::TranscriptFolder => self.config.history.folder_summary(),
-            SettingId::HistoryRetention => self.config.history.retention_summary(),
+            SettingId::HistoryRetention => {
+                if self.config.history.enabled {
+                    self.config.history.retention_summary()
+                } else {
+                    "history off".to_string()
+                }
+            }
             SettingId::Startup => {
                 if self.config.startup.autostart {
                     "start when you sign in".to_string()
@@ -2220,7 +2232,7 @@ impl App {
             screen.list_widget(chunks[0].width.saturating_sub(2) as usize),
             chunks[0],
         );
-        frame.render_widget(Paragraph::new(screen.hint), chunks[1]);
+        frame.render_widget(Paragraph::new(screen.hint_line()), chunks[1]);
         frame.render_widget(
             Paragraph::new(screen.result_line(&format!("{} saved.", screen.title))),
             chunks[2],

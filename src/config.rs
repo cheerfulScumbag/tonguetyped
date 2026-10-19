@@ -778,7 +778,12 @@ impl TextConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryConfig {
-    #[serde(default = "default_true")]
+    /// Whether finished transcripts are kept at all: the history database and
+    /// the transcript-folder export are both gated on this. Off by default, so
+    /// a fresh install only types the text and writes nothing to disk. An
+    /// existing configuration that says `enabled = true` keeps saving until
+    /// the user turns it off.
+    #[serde(default = "default_false")]
     pub enabled: bool,
     /// How many transcript rows the history database keeps. `0` means no
     /// entry-count limit. Paired with `max_age_days`: pruning on write drops
@@ -807,7 +812,7 @@ pub struct HistoryConfig {
 impl Default for HistoryConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             max_entries: default_max_entries(),
             max_age_days: default_max_age_days(),
             transcript_folder: default_transcript_folder(),
@@ -1467,7 +1472,26 @@ mod tests {
         assert_eq!(config.model.idle_unload.policy, IdleUnloadPolicy::AfterIdle);
         assert_eq!(config.history.max_entries, 100);
         assert_eq!(config.history.max_age_days, 30);
+        assert!(
+            !config.history.enabled,
+            "saving transcripts must be opt-in, and a fresh install is off"
+        );
         assert!(config.history.transcript_folder.is_empty());
+    }
+
+    #[test]
+    fn history_defaults_off_but_an_existing_enabled_config_stays_on() {
+        let parsed: Config = toml::from_str("[history]\nenabled = true\n").unwrap();
+        assert!(
+            parsed.history.enabled,
+            "an explicit enabled = true must never be silently turned off"
+        );
+
+        let missing: Config = toml::from_str("[history]\nmax_entries = 7\n").unwrap();
+        assert!(
+            !missing.history.enabled,
+            "a config without the flag gets the new off default"
+        );
     }
 
     #[test]

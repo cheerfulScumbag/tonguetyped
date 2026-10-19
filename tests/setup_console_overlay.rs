@@ -167,9 +167,9 @@ const KEY_BACKSPACE: &[u8] = b"\x7f";
 
 /// Advances through the setup console's early steps (Model, Inference
 /// backend, Translation, Decoding, Text processing, Text passes, Microphone,
-/// Activation, Shortcut, Output, Startup, History retention, Transcript
-/// folder) with Enter, accepting every default, until the Overlay step is
-/// reached.
+/// Activation, Shortcut, Output, Startup, Transcript history) with Enter,
+/// accepting every default (transcript history off, so its retention and
+/// folder steps are skipped), until the Overlay step is reached.
 fn advance_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
     session.send(KEY_ENTER); // Model -> Inference backend
@@ -200,11 +200,9 @@ fn advance_from_microphone_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Transcript output", Duration::from_secs(5));
     session.send(KEY_ENTER); // Output -> Startup
     session.wait_for("Startup", Duration::from_secs(5));
-    session.send(KEY_ENTER); // Startup -> History retention
-    session.wait_for("History retention", Duration::from_secs(5));
-    session.send(KEY_ENTER); // History retention -> Transcript folder
-    session.wait_for("Transcript folder", Duration::from_secs(5));
-    session.send(KEY_ENTER); // Transcript folder -> Overlay
+    session.send(KEY_ENTER); // Startup -> Transcript history
+    session.wait_for("Transcript history", Duration::from_secs(5));
+    session.send(KEY_ENTER); // Transcript history (off) -> Overlay
     session.wait_for("Step", Duration::from_secs(5));
 }
 
@@ -343,6 +341,13 @@ fn pty_history_retention_and_transcript_folder_steps_persist_their_inputs() {
     session.wait_for("Transcript output", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Startup
     session.wait_for("Startup", Duration::from_secs(5));
+    session.send(KEY_ENTER); // -> Transcript history
+    let history = session.wait_for("Transcript history", Duration::from_secs(5));
+    assert!(
+        history.contains("> Off") && history.contains("Save transcript history"),
+        "saving transcripts must default off while offering the opt-in:\n{history}"
+    );
+    session.send(KEY_DOWN); // Off -> Save transcript history
     session.send(KEY_ENTER); // -> History retention
 
     let retention = session.wait_for("History retention", Duration::from_secs(5));
