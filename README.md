@@ -111,10 +111,10 @@ nix profile install github:cheerfulScumbag/tonguetyped#gpu-rocm
 ```
 
 From a local checkout, use `nix profile install .` instead of the flake URL. The
-package ships the `tonguetyped` binary, its bash/zsh/fish shell completions and
-man pages, and the `io.github.cheerfulScumbag.tonguetyped.desktop` entry, and
-wraps the binary with the `wtype`, `dotool`, `wl-clipboard`, `xclip`, and
-`canberra-gtk-play` helpers it needs.
+package ships the `tonguetyped` binary, its bash/zsh/fish shell completions,
+man pages, the app icon, and the `io.github.cheerfulScumbag.tonguetyped.desktop`
+entry, and wraps the binary with the `wtype`, `dotool`, `wl-clipboard`, `xclip`,
+and `canberra-gtk-play` helpers it needs.
 
 ### NixOS and home-manager modules
 

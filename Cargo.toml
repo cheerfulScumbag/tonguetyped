@@ -28,9 +28,9 @@ suggests = "xclip"
 section = "utils"
 priority = "optional"
 # `$auto` keeps the binary in /usr/bin and the readme under /usr/share/doc;
-# the rest are the shell completions and man pages build.rs writes into
-# `target/<profile>/dist/` (the directory cargo-deb remaps `target/release/`
-# to). Every variant inherits this list.
+# the rest are the app icon plus the shell completions and man pages build.rs
+# writes into `target/<profile>/dist/` (the directory cargo-deb remaps
+# `target/release/` to). Every variant inherits this list.
 assets = [
     "$auto",
     ["data/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg", "usr/share/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg", "644"],
