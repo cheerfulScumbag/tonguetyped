@@ -5,6 +5,7 @@
 /data/*
 !/data/io.github.cheerfulScumbag.tonguetyped.desktop
 !/data/tonguetyped-daemon.desktop
+!/data/icons/
 /flatpak/.repo
 /flatpak/.state
 /flatpak/.build

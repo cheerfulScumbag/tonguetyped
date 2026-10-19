@@ -2,8 +2,9 @@
 #
 # This manifest verifies that the app builds and runs inside a Flatpak. It
 # uses a local `dir` source, Microsoft's prebuilt ONNX Runtime archive, and it
-# installs no AppStream metainfo, icon, or screenshots: Flathub requires all of
-# those, and it requires a human maintainer to author the submitted manifest.
+# installs the app icon for that local build. It installs no AppStream
+# metainfo or screenshots: Flathub requires all of those, and it requires a
+# human maintainer to author the submitted manifest.
 # See ../flatpak/README.md.
 id: io.github.cheerfulScumbag.tonguetyped
 runtime: org.freedesktop.Platform
@@ -119,6 +120,7 @@ modules:
       - cargo build --release --offline --features gpu-vulkan
       - install -Dm755 target/release/tonguetyped /app/bin/tonguetyped
       - install -Dm644 data/io.github.cheerfulScumbag.tonguetyped.desktop /app/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg /app/share/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg
       - install -Dm644 target/release/dist/completions/tonguetyped.bash /app/share/bash-completion/completions/tonguetyped
       - install -Dm644 target/release/dist/completions/_tonguetyped /app/share/zsh/site-functions/_tonguetyped
       - install -Dm644 target/release/dist/completions/tonguetyped.fish /app/share/fish/vendor_completions.d/tonguetyped.fish
