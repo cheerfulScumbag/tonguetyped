@@ -54,6 +54,11 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     ) {
         tracing::warn!("{warning}");
     }
+    if config.history.enabled {
+        tracing::warn!(
+            "saving transcripts is on; turn it off in Transcript output > Save transcript history"
+        );
+    }
 
     let coordinator = Arc::new(Coordinator::new(config)?);
     spawn_config_watcher(coordinator.clone());

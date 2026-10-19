@@ -1596,6 +1596,12 @@ impl App {
             self.settings_panel_widget(chunks[2].width.saturating_sub(2) as usize),
             chunks[2],
         );
+        if self.config.history.enabled {
+            frame.render_widget(
+                Paragraph::new(Self::history_notice_line()).wrap(Wrap { trim: true }),
+                chunks[3],
+            );
+        }
 
         let footer = match &self.pending {
             Some(pending) => Line::from(Span::styled(
@@ -1605,6 +1611,16 @@ impl App {
             None => Line::from("↑/↓ move   Enter/→ open   q quit"),
         };
         frame.render_widget(Paragraph::new(footer), chunks[4]);
+    }
+
+    /// Shown on the home screen while transcripts are being saved, so an
+    /// upgraded configuration that kept `enabled = true` says where the new
+    /// opt-out lives instead of silently continuing to fill the folder.
+    fn history_notice_line() -> Line<'static> {
+        Line::from(Span::styled(
+            "Saving transcripts is on. Turn it off in Transcript output > Save transcript history.",
+            Style::default().fg(Color::Yellow),
+        ))
     }
 
     /// The dedicated Commands screen, reached from the Settings panel's
@@ -1687,7 +1703,7 @@ impl App {
             SettingId::Shortcut => activation::keybind_display(&self.config.activation.keybind),
             SettingId::TranscriptOutput => {
                 let method = match self.config.output.method {
-                    OutputMethod::None => "keep in TongueTyped",
+                    OutputMethod::None => "do not deliver",
                     OutputMethod::Type => "type into the focused application",
                     OutputMethod::Clipboard => "copy to the clipboard",
                     OutputMethod::Paste => "paste into the focused application",

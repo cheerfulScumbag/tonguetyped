@@ -136,7 +136,7 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
     // (weston): no backend can type, so the setup must refuse it with the
     // install warning, naming dotool (wtype cannot work without a wlroots
     // virtual-keyboard protocol and the native libei backend is KDE/GNOME
-    // only), re-prompt, then accept 1 (keep in TongueTyped) and finish.
+    // only), re-prompt, then accept 1 (Do not deliver) and finish.
     let output = run_setup(
         &root,
         &answers(&["", "", "", "2", "1", "", "", "", "", "", "", ""]),
@@ -151,8 +151,7 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stdout.contains("Keep transcripts in TongueTyped")
-            && stdout.contains("Type into the focused application"),
+        stdout.contains("Do not deliver") && stdout.contains("Type into the focused application"),
         "both transcript output choices must be listed even with no helper:\n{stdout}"
     );
     assert!(
@@ -268,7 +267,7 @@ fn setup_refuses_the_clipboard_without_wl_copy_and_says_what_to_install() {
     std::fs::create_dir_all(&bin).unwrap();
 
     // Answer 3 (clipboard) with no wl-copy on PATH: refused with the remedy,
-    // then 1 (keep in TongueTyped) is accepted.
+    // then 1 (Do not deliver) is accepted.
     let output = run_setup(
         &root,
         &answers(&["", "", "", "3", "1", "", "", "", "", "", "", ""]),
@@ -328,12 +327,13 @@ fn setup_clears_a_configured_command_and_replacements_with_none() {
     )
     .unwrap();
 
-    // Model, microphone, activation, transcript output, then 'none' at the
+    // Model, microphone, activation, then "Do not deliver" at transcript
+    // output (the default is type when a helper is available). 'none' at the
     // Replacements and Cleanup command prompts clears both; the empty timeout
     // answer keeps 7; startup and the final confirm take their defaults.
     let output = run_setup(
         &root,
-        &answers(&["", "", "", "", "none", "", "", "none", "", "", ""]),
+        &answers(&["", "", "", "1", "none", "", "", "none", "", "", ""]),
         None,
         "KDE",
     );
@@ -405,7 +405,7 @@ fn successful_write_leaves_only_the_complete_destination() {
 
     let output = run_setup(
         &root,
-        &answers(&["", "", "", "", "", "", "", "", "", "", ""]),
+        &answers(&["", "", "", "1", "", "", "", "", "", "", ""]),
         None,
         "KDE",
     );

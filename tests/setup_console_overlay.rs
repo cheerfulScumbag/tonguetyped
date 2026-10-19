@@ -168,8 +168,9 @@ const KEY_BACKSPACE: &[u8] = b"\x7f";
 /// Advances through the setup console's early steps (Model, Inference
 /// backend, Translation, Decoding, Text processing, Text passes, Microphone,
 /// Activation, Shortcut, Output, Startup, Transcript history) with Enter,
-/// accepting every default (transcript history off, so its retention and
-/// folder steps are skipped), until the Overlay step is reached.
+/// choosing "Do not deliver" at Output so the typing-specific steps are
+/// skipped, and taking the defaults elsewhere (transcript history off, so its
+/// retention and folder steps are skipped), until the Overlay step is reached.
 fn advance_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Speech model", Duration::from_secs(10));
     session.send(KEY_ENTER); // Model -> Inference backend
@@ -198,6 +199,7 @@ fn advance_from_microphone_to_overlay_enabled(session: &mut Session) {
     session.wait_for("Shortcut", Duration::from_secs(5));
     session.send(KEY_ENTER); // Shortcut -> Output
     session.wait_for("Transcript output", Duration::from_secs(5));
+    session.send(KEY_UP); // choose "Do not deliver" even if the default is type
     session.send(KEY_ENTER); // Output -> Startup
     session.wait_for("Startup", Duration::from_secs(5));
     session.send(KEY_ENTER); // Startup -> Transcript history
@@ -339,6 +341,7 @@ fn pty_history_retention_and_transcript_folder_steps_persist_their_inputs() {
     session.wait_for("Shortcut", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Transcript output
     session.wait_for("Transcript output", Duration::from_secs(5));
+    session.send(KEY_UP); // choose "Do not deliver" even if the default is type
     session.send(KEY_ENTER); // -> Startup
     session.wait_for("Startup", Duration::from_secs(5));
     session.send(KEY_ENTER); // -> Transcript history

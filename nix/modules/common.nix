@@ -156,7 +156,7 @@ in
             enabled = setting types.bool "Save transcripts in the local history database and write the transcript folder. Off by default.";
             max_entries = setting types.ints.unsigned "Entries to keep. 0 means no limit.";
             max_age_days = setting types.ints.unsigned "Days to keep entries. 0 means no limit.";
-            transcript_folder = setting types.str "Also write each transcript to this folder while transcripts are kept. Empty disables it.";
+            transcript_folder = setting types.str "Also write each transcript to this folder while history is enabled. Empty disables it.";
           };
           overlay = section "The `[overlay]` table." {
             enabled = setting types.bool "Show the on-screen recording overlay.";

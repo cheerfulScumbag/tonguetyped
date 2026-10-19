@@ -476,6 +476,21 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
 }
 
 #[test]
+fn pty_home_notice_points_an_upgraded_history_setting_at_the_opt_out() {
+    let sandbox = Sandbox::new("history-notice");
+    sandbox.write_config("[history]\nenabled = true\n");
+    let session = Session::spawn(&sandbox, 100, 40);
+
+    let home = session.wait_for("Saving transcripts is on", Duration::from_secs(5));
+    assert!(
+        home.contains("Transcript output > Save transcript history"),
+        "the notice must say where the opt-out lives:\n{home}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_home_selection_walks_the_settings_then_opens_the_commands_screen() {
     let sandbox = Sandbox::new("cross-panel-nav");
     let mut session = Session::spawn(&sandbox, 100, 40);
@@ -944,7 +959,7 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
 
     // Saving transcripts is opt-in, so turn it on from the Transcript output
     // screen before the folder is edited. The history row sits after the four
-    // method rows for the default "keep in TongueTyped" method.
+    // method rows for the default "Do not deliver" method.
     select_setting(&mut session, "Transcript output");
     session.send(KEY_ENTER);
     session.wait_for("Transcript output", Duration::from_secs(3));
@@ -953,7 +968,7 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
     }
     session.wait_for("Save transcript history", Duration::from_secs(3));
     session.send(KEY_RIGHT);
-    session.wait_for("[x] history and folder", Duration::from_secs(3));
+    session.wait_for("[x] history only", Duration::from_secs(3));
     session.send(KEY_ENTER);
     session.wait_for("Transcript output saved.", Duration::from_secs(3));
     session.send(KEY_ESC);
@@ -1241,7 +1256,7 @@ fn pty_history_retention_setting_persists_both_limits() {
     }
     session.wait_for("Save transcript history", Duration::from_secs(3));
     session.send(KEY_RIGHT);
-    session.wait_for("[x] history and folder", Duration::from_secs(3));
+    session.wait_for("[x] history only", Duration::from_secs(3));
     session.send(KEY_ENTER);
     session.wait_for("Transcript output saved.", Duration::from_secs(3));
     session.send(KEY_ESC);
@@ -1403,7 +1418,7 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     session.send(KEY_ENTER);
     let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
     assert!(
-        screen.contains("Keep transcripts in TongueTyped"),
+        screen.contains("Do not deliver"),
         "both choices must be listed:\n{screen}"
     );
     assert!(
@@ -1552,7 +1567,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     // naming what to install.
     let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
     assert!(
-        screen.contains("Keep transcripts in TongueTyped"),
+        screen.contains("Do not deliver"),
         "the type choice must not be dropped silently:\n{screen}"
     );
     session.send(KEY_DOWN);

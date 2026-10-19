@@ -815,13 +815,30 @@ impl OutputScreen {
         rows.push(format!(
             "  {:<22} {}",
             "Save transcript history",
-            if config.history.enabled {
-                "[x] history and folder"
-            } else {
-                "[ ] type the text only"
-            }
+            Self::history_value(config)
         ));
         rows
+    }
+
+    /// The history toggle's value. While saving is off it names what the
+    /// selected output method actually does with the transcript; while it is
+    /// on it names the saved destinations, claiming the folder only when one
+    /// is configured.
+    fn history_value(config: &Config) -> &'static str {
+        if config.history.enabled {
+            if config.history.transcript_folder.trim().is_empty() {
+                "[x] history only"
+            } else {
+                "[x] history and folder"
+            }
+        } else {
+            match config.output.method {
+                OutputMethod::None => "[ ] do not deliver",
+                OutputMethod::Type => "[ ] type the text only",
+                OutputMethod::Clipboard => "[ ] copy to clipboard only",
+                OutputMethod::Paste => "[ ] paste the text only",
+            }
+        }
     }
 
     pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
@@ -1878,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn output_screen_resets_the_backend_when_output_returns_to_keep() {
+    fn output_screen_resets_the_backend_when_output_returns_to_no_delivery() {
         let capabilities = test_capabilities();
         let mut config = Config::default();
         config.output.method = OutputMethod::Type;
@@ -1897,7 +1914,7 @@ mod tests {
         assert_eq!(
             screen.labels,
             vec![
-                "Keep transcripts in TongueTyped".to_string(),
+                "Do not deliver".to_string(),
                 "Type into the focused application".to_string(),
                 "Copy to the clipboard".to_string(),
                 "Paste into the focused application".to_string(),
@@ -2051,8 +2068,7 @@ mod tests {
         screen.selected = 4;
         let rows = screen.rows(&config);
         assert!(
-            rows[4].contains("Save transcript history")
-                && rows[4].contains("[ ] type the text only"),
+            rows[4].contains("Save transcript history") && rows[4].contains("[ ] do not deliver"),
             "{rows:?}"
         );
 
@@ -2061,9 +2077,26 @@ mod tests {
         assert!(!config.history.enabled);
         assert!(screen.step(1, &mut config));
         assert!(config.history.enabled);
+        assert!(screen.rows(&config)[4].contains("[x] history only"));
+        config.history.transcript_folder = "/tmp/dictations".to_string();
         assert!(screen.rows(&config)[4].contains("[x] history and folder"));
         screen.step(-1, &mut config);
         assert!(!config.history.enabled);
+
+        // While off, the value names what the selected method does.
+        for (method, value) in [
+            (OutputMethod::Clipboard, "[ ] copy to clipboard only"),
+            (OutputMethod::Type, "[ ] type the text only"),
+            (OutputMethod::Paste, "[ ] paste the text only"),
+        ] {
+            config.output.method = method;
+            let history_row = OutputScreen::history_row(&config);
+            assert!(
+                screen.rows(&config)[history_row].contains(value),
+                "{method}: {:?}",
+                screen.rows(&config)
+            );
+        }
     }
 
     #[test]

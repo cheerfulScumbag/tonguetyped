@@ -234,7 +234,7 @@ impl ConsoleState {
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = capabilities.output_labels();
-        let output_selection = capabilities.output_index(config.output.method);
+        let output_selection = capabilities.setup_output_index(&config);
         let paste_keys_selection = PasteKeys::ALL
             .iter()
             .position(|keys| *keys == config.output.paste_keys)
@@ -1658,7 +1658,7 @@ impl ConsoleState {
     }
 
     fn render_confirm(&self, frame: &mut Frame, area: Rect) {
-        let lines = vec![
+        let mut lines = vec![
             Line::from(format!("Model:       {}", self.config.model.active_model)),
             Line::from(format!(
                 "Backend:     {}",
@@ -1730,9 +1730,14 @@ impl ConsoleState {
                     "disabled".to_string()
                 }
             )),
-            Line::from(""),
-            Line::from("Write this configuration?"),
         ];
+        if self.config.history.enabled {
+            lines.push(Line::from(
+                "             Turn it off in Transcript output > Save transcript history.",
+            ));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Write this configuration?"));
         frame.render_widget(
             Paragraph::new(lines).block(
                 Block::default()
@@ -2072,6 +2077,38 @@ mod tests {
         state.output_selection = 0;
         state.advance().unwrap();
         assert_eq!(state.step, StepKind::Startup);
+    }
+
+    #[test]
+    fn output_step_defaults_to_type_when_saving_transcripts_is_off() {
+        let capabilities = Capabilities {
+            typing_backends: vec!["wtype".to_string()],
+            ..no_mic_capabilities()
+        };
+        let state = ConsoleState::new(Config::default(), capabilities);
+        assert!(
+            !state.config.history.enabled,
+            "the fresh default must leave saving off"
+        );
+        assert_eq!(
+            state.output_selection, 1,
+            "off-by-default history must not leave the primary path delivering nothing"
+        );
+    }
+
+    #[test]
+    fn output_step_keeps_the_saved_no_delivery_choice_when_history_is_on() {
+        let capabilities = Capabilities {
+            typing_backends: vec!["wtype".to_string()],
+            ..no_mic_capabilities()
+        };
+        let mut config = Config::default();
+        config.history.enabled = true;
+        let state = ConsoleState::new(config, capabilities);
+        assert_eq!(
+            state.output_selection, 0,
+            "history already keeps the transcript, so the saved choice wins"
+        );
     }
 
     #[test]

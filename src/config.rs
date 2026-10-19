@@ -213,13 +213,16 @@ impl Default for OutputConfig {
     }
 }
 
-/// Where a finished transcript goes. Every method also records it in history
-/// and `last-result`; `type` and `paste` fall back to leaving it on the
-/// clipboard when the typing helper fails, so a transcript is never lost.
+/// Where a finished transcript goes. The transcript is also saved to the
+/// history database and transcript folder only when
+/// [`HistoryConfig::enabled`] is on; the in-memory `last-result` always tracks
+/// the current daemon session. `type` and `paste` fall back to leaving the
+/// transcript on the clipboard when the typing helper fails, so a transcript
+/// is never lost.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputMethod {
-    /// Keep the transcript in TongueTyped only.
+    /// Do not deliver the transcript anywhere.
     #[default]
     None,
     /// Type the transcript into the focused application.

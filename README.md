@@ -500,16 +500,21 @@ feedback_volume = 0.7
 
 ### Transcript output
 
-`output.method` defaults to `none`, so a fresh install transcribes and stores
-but types nothing - a safe default while you test. Pick another method in the
-dashboard's **Transcript output** screen or in `tonguetyped setup`:
+The configuration file defaults `output.method` to `none`, which delivers
+nothing. `tonguetyped setup` opens on `type` when saving transcripts is off and
+a typing helper is available, so a fresh install types into the focused
+application. Pick a method in the dashboard's **Transcript output** screen or
+in `tonguetyped setup`:
 
 | `output.method` | What happens to the transcript |
 | --- | --- |
-| `none` | Kept in TongueTyped only (history and `last-result`) |
+| `none` | Do not deliver it; it stays only in the in-memory `last-result` for the current daemon session |
 | `type` | Typed into the focused application |
 | `clipboard` | Copied to the clipboard; nothing is typed |
 | `paste` | Copied to the clipboard, then pasted with `output.paste_keys` |
+
+No method writes to the history database or transcript folder unless
+**Save transcript history** is on.
 
 `output.paste_keys` is `"ctrl-v"` (most applications) or `"shift-insert"`
 (terminals, which bind Ctrl+V to something else). `output.auto_submit` presses
@@ -533,7 +538,8 @@ database or transcript files. Turn on **Save transcript history** on the
 dashboard's **Transcript output** screen or in `tonguetyped setup` to keep
 transcripts. While it is off, the retention and transcript-folder settings are
 disabled. An existing configuration that already has `enabled = true` keeps
-saving until you turn it off; nothing flips it for you.
+saving until you turn it off; upgrading leaves it on, and the dashboard shows a
+notice naming **Transcript output > Save transcript history** while it is.
 
 When history is enabled, transcripts are stored in
 `$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Two
