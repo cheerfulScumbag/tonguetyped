@@ -21,6 +21,9 @@ finish-args:
   - --socket=pulseaudio
   - --device=dri
   - --talk-name=org.freedesktop.Notifications
+  # Test-only: lets the local test build pause/resume MPRIS players. The
+  # submission permission is decided in the separate Flathub task.
+  - --talk-name=org.mpris.MediaPlayer2.*
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
   prepend-ld-library-path: /usr/lib/sdk/llvm22/lib
@@ -131,4 +134,7 @@ modules:
           - .flatpak-builder
           - .opencode
           - target
+          - flatpak/.repo
+          - flatpak/.state
+          - flatpak/.build
       - cargo-sources.json
