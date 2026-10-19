@@ -195,7 +195,16 @@ impl ModelScreen {
             Span::styled("Streaming ", label),
             Span::raw(streaming),
         ]);
-        Paragraph::new(vec![heading, note, streaming_note]).block(
+        let mut lines = vec![heading, note, streaming_note];
+        if !row.info.accepts_language_hint() {
+            lines.push(Line::from(vec![
+                Span::styled("Language ", label),
+                Span::raw(
+                    "auto-detect only; a configured transcription.language is ignored for this model",
+                ),
+            ]));
+        }
+        Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Selected model"),
@@ -2442,5 +2451,18 @@ mod tests {
         assert!(text.contains("Moonshine"), "{text}");
         assert!(text.contains("English"), "{text}");
         assert!(text.contains("about 48s"), "{text}");
+    }
+
+    #[test]
+    fn model_detail_notes_qwen3_asr_auto_detect_only() {
+        let mut config = Config::default();
+        config.model.active_model = "qwen3-asr-1.7b-q4_k_m".to_string();
+        let screen = ModelScreen::new(&config, choices());
+        let text = rendered_widget(screen.selected_detail_widget(), 120, 6);
+        assert!(text.contains("Qwen3 ASR"), "{text}");
+        assert!(text.contains("30 languages"), "{text}");
+        assert!(text.contains("5218s per call"), "{text}");
+        assert!(text.contains("auto-detect only"), "{text}");
+        assert!(text.contains("no live text"), "{text}");
     }
 }

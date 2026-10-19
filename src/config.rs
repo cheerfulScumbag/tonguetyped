@@ -293,9 +293,10 @@ pub struct TranscriptionConfig {
     /// split lands in a pause rather than through a word. `0` disables
     /// chunking, so a model with no input ceiling decodes the whole buffer in
     /// one call; a model that advertises an audio limit is still bounded
-    /// regardless - a hard input cap (canary, cohere) to its cap, or a model
-    /// whose cap is on its output (moonshine) to half the `max_audio_ms` it
-    /// advertises - so this setting only ever narrows the model's own bound.
+    /// regardless - a hard input cap (canary, cohere, qwen3_asr) to its cap, or
+    /// a model whose cap is on its output (moonshine) to half the
+    /// `max_audio_ms` it advertises - so this setting only ever narrows the
+    /// model's own bound.
     #[serde(default = "default_chunk_seconds")]
     pub chunk_seconds: u64,
     /// Text the Whisper decoder reads as if it came just before the
@@ -1331,8 +1332,9 @@ impl Config {
         {
             anyhow::bail!("max_recording_seconds is too large");
         }
-        // A family that rejects over-length input (canary, cohere) is bounded
-        // to its cap by the engine on every call, including the file path with
+        // A family that rejects over-length input (canary, cohere, qwen3_asr)
+        // is bounded to its cap by the engine on every call, including the file
+        // path with
         // chunking off; this check additionally keeps the configured live
         // recording limit within the cap. With chunking on that limit is
         // `chunk_seconds`, otherwise `max_recording_seconds`. Every catalog
@@ -1832,9 +1834,13 @@ mod tests {
     fn hard_capped_models_activate_under_the_default_config() {
         // `select_model` saves the config, which validates it, so a user with
         // the default config (600 s recording limit, 30 s chunk window) must be
-        // able to activate canary or cohere: chunking keeps every call at 30 s,
-        // well within the 400 s cap.
-        for id in ["canary-1b-v2-f16", "cohere-transcribe-03-2026-f16"] {
+        // able to activate a hard-capped model: chunking keeps every call at
+        // 30 s, well within the family cap.
+        for id in [
+            "canary-1b-v2-f16",
+            "cohere-transcribe-03-2026-f16",
+            "qwen3-asr-1.7b-q4_k_m",
+        ] {
             let mut config = Config::default();
             config.model.active_model = id.to_string();
             assert_eq!(config.transcription.max_recording_seconds, 600);
@@ -1871,6 +1877,27 @@ mod tests {
         config.model.active_model = "parakeet-tdt-0.6b-v2-f16".to_string();
         config.transcription.max_recording_seconds = 500;
         config.transcription.chunk_seconds = 0;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn qwen3_asr_uses_its_derived_decoder_context_cap() {
+        // 5,218 s is the engine's max_audio_ms from the 65,536-token decoder
+        // context (minus the prompt overhead and generation reserve) at 10 ms
+        // per audio token, not a rounded guess.
+        let mut config = Config::default();
+        config.model.active_model = "qwen3-asr-1.7b-q4_k_m".to_string();
+        config.transcription.chunk_seconds = 0;
+        config.transcription.max_recording_seconds = 5218;
+        config.validate().unwrap();
+
+        config.transcription.max_recording_seconds = 5219;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("accepts at most 5218s"), "{error}");
+        assert!(error.contains("qwen3-asr-1.7b-q4_k_m"), "{error}");
+
+        // Chunking bounds each call, so the recording limit may exceed the cap.
+        config.transcription.chunk_seconds = 30;
         config.validate().unwrap();
     }
 

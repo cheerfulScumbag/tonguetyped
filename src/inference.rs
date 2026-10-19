@@ -348,6 +348,11 @@ pub(crate) struct DecodeSupport {
     pub whisper_options: bool,
     /// Can translate into English (multilingual Whisper, not `.en`).
     pub translate: bool,
+    /// Accepts a caller-supplied language hint. Qwen3-ASR only supports
+    /// auto-detect: any non-null hint returns
+    /// `TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE`, so `run_options` leaves the
+    /// language unset for that family.
+    pub language_hint: bool,
 }
 
 impl DecodeSupport {
@@ -355,6 +360,9 @@ impl DecodeSupport {
         DecodeSupport {
             whisper_options: model.supports(transcribe_cpp::Feature::InitialPrompt),
             translate: model.capabilities().supports_translate,
+            // The loaded model's own architecture, not the catalog entry, so a
+            // hand-placed Qwen3-ASR file is still driven through auto-detect.
+            language_hint: model.arch() != "qwen3_asr",
         }
     }
 
@@ -365,6 +373,12 @@ impl DecodeSupport {
         if config.translate && !self.translate {
             tracing::warn!(
                 "transcription.translate is set but this model cannot translate; transcribing instead"
+            );
+            warned = true;
+        }
+        if config.language != "auto" && !self.language_hint {
+            tracing::warn!(
+                "transcription.language is set but this model auto-detects the language; using auto-detect"
             );
             warned = true;
         }
@@ -410,7 +424,7 @@ pub(crate) fn run_options(
         .then_some(transcribe_cpp::RunExtension::Whisper(whisper));
     transcribe_cpp::RunOptions {
         task,
-        language: (language != "auto").then(|| language.to_string()),
+        language: (support.language_hint && language != "auto").then(|| language.to_string()),
         family,
         ..Default::default()
     }
@@ -442,9 +456,9 @@ fn milliseconds_to_samples(milliseconds: i64) -> usize {
 ///
 /// - `transcription.chunk_seconds`, when chunking is enabled (`> 0`);
 /// - the catalog family bound, so an over-length buffer is never submitted even
-///   with chunking off: a hard input cap as-is (canary, cohere) or half a soft
-///   output window (moonshine), since the documented soft ceiling assumes ~4
-///   output tokens/s while English decodes nearer 6;
+///   with chunking off: a hard input cap as-is (canary, cohere, qwen3_asr) or
+///   half a soft output window (moonshine), since the documented soft ceiling
+///   assumes ~4 output tokens/s while English decodes nearer 6;
 /// - the loaded model's own advertised `max_audio_ms`, halved for the same
 ///   output-budget headroom - the model-aware bound. Read from the GGUF at load
 ///   rather than assuming one family's number for every model, and applied to
@@ -702,10 +716,10 @@ pub struct InferenceEngine {
     cancel: CancelToken,
     /// The loaded model's input-length contract, recovered from the catalog by
     /// `model_path` and combined with the session's own advertised ceiling in
-    /// `decode_window_samples`. A hard-capped family (canary, cohere) is
-    /// decoded in windows at most its cap and any model that advertises a
-    /// limit at most half it, so no call can exceed the limit even when
-    /// `transcription.chunk_seconds` is `0`.
+    /// `decode_window_samples`. A hard-capped family (canary, cohere,
+    /// qwen3_asr) is decoded in windows at most its cap and any model that
+    /// advertises a limit at most half it, so no call can exceed the limit even
+    /// when `transcription.chunk_seconds` is `0`.
     long_form: crate::catalog::LongForm,
 }
 
@@ -1062,6 +1076,7 @@ mod tests {
     const WHISPER: DecodeSupport = DecodeSupport {
         whisper_options: true,
         translate: true,
+        language_hint: true,
     };
 
     #[test]
@@ -1087,6 +1102,35 @@ mod tests {
                 language: Some("en".to_string()),
                 ..Default::default()
             }
+        );
+    }
+
+    #[test]
+    fn a_model_that_only_auto_detects_drops_a_configured_language() {
+        // Qwen3-ASR rejects any non-null language hint, even one from its
+        // advertised list, so a configured `transcription.language` must reach
+        // the engine as auto-detect instead of failing the run.
+        let qwen = DecodeSupport {
+            whisper_options: false,
+            translate: false,
+            language_hint: false,
+        };
+        for language in ["en", "de", "zh"] {
+            let config = crate::config::TranscriptionConfig {
+                language: language.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(
+                run_options(&config, qwen).language,
+                None,
+                "{language} must not be sent as a hint"
+            );
+        }
+
+        // Auto-detect is the default and stays the same unset field.
+        assert_eq!(
+            run_options(&crate::config::TranscriptionConfig::default(), qwen).language,
+            None
         );
     }
 
@@ -1162,6 +1206,7 @@ mod tests {
         let english_only = DecodeSupport {
             whisper_options: true,
             translate: false,
+            language_hint: true,
         };
         let options = run_options(&config, english_only);
         assert_eq!(options.task, transcribe_cpp::Task::Transcribe);
@@ -1171,6 +1216,7 @@ mod tests {
         let other_family = DecodeSupport {
             whisper_options: false,
             translate: false,
+            language_hint: true,
         };
         assert_eq!(
             run_options(&config, other_family),

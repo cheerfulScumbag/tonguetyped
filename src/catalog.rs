@@ -5,9 +5,9 @@
 //! verification process). It covers the offline, text-producing families this
 //! project's VAD-then-single-buffer pipeline has been checked against
 //! (`src/coordinator.rs` filters the recording with Silero VAD and hands the
-//! engine one buffer): whisper, parakeet, moonshine, canary, and cohere. Each
-//! entry's family, language coverage, and long-form behavior live in
-//! `VARIANTS`, keyed by the transcribe.cpp `variant` slug.
+//! engine one buffer): whisper, parakeet, moonshine, canary, cohere, and
+//! qwen3_asr. Each entry's family, language coverage, and long-form behavior
+//! live in `VARIANTS`, keyed by the transcribe.cpp `variant` slug.
 //!
 //! Families are admitted only after their output and chunking semantics have
 //! been checked against that single-buffer pipeline. Each family falls into
@@ -21,8 +21,9 @@
 //!   chunking into shorter windows ([`LongForm::SoftWindow`]); if a single run
 //!   still hits the budget, the partial transcript is kept and reported as cut
 //!   short (`src/inference.rs`) rather than the dictation failing.
-//! - canary and cohere reject input past their encoder table (about 400
-//!   seconds) before decoding ([`LongForm::HardCap`]), so
+//! - canary, cohere, and qwen3_asr reject input past their decoder context
+//!   window or encoder table (about 400 seconds for canary/cohere, about 87
+//!   minutes for qwen3_asr) before decoding ([`LongForm::HardCap`]), so
 //!   `InferenceEngine::transcribe` always splits a model that advertises a
 //!   limit into windows within it - even when `chunk_seconds` is `0` - and
 //!   [`crate::config::Config::validate`] additionally refuses a config whose
@@ -58,7 +59,7 @@ pub enum LongForm {
     /// transcript is kept.
     SoftWindow { window_seconds: u32 },
     /// Input longer than `cap_seconds` is rejected before decoding (canary,
-    /// cohere). The pipeline must not submit a longer buffer.
+    /// cohere, qwen3_asr). The pipeline must not submit a longer buffer.
     HardCap { cap_seconds: u32 },
 }
 
@@ -107,6 +108,7 @@ impl VariantInfo {
             "moonshine_streaming" => "Moonshine Streaming",
             "canary" => "Canary",
             "cohere_asr" => "Cohere",
+            "qwen3_asr" => "Qwen3 ASR",
             "voxtral_realtime" => "Voxtral Realtime",
             other => other,
         }
@@ -128,6 +130,14 @@ impl VariantInfo {
     /// port is not mislabelled English-only.
     pub fn is_english_only(&self) -> bool {
         self.languages == ["en"]
+    }
+
+    /// Whether the engine accepts a caller-supplied language hint. Qwen3-ASR
+    /// supports auto-detect only: any non-null hint, including one of its
+    /// advertised languages, returns `TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE`, so
+    /// the run options must leave `language` unset for this family.
+    pub fn accepts_language_hint(&self) -> bool {
+        self.family != "qwen3_asr"
     }
 }
 
@@ -589,6 +599,32 @@ pub const ENTRIES: &[CatalogModel] = &[
         filename: "nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
         size_bytes: 495831520,
         sha256: "41c99fa5fb6f3d35f68e79adc3e755eca2232a8d921178bd647b71194792b8fd",
+    },
+    CatalogModel {
+        id: "qwen3-asr-1.7b-q4_k_m",
+        variant: "qwen3-asr-1.7b",
+        display_name: "qwen3-asr-1.7b",
+        quant: "Q4_K_M",
+        upstream_repo: "Qwen/Qwen3-ASR-1.7B",
+        license_spdx: "apache-2.0",
+        hf_repo: "handy-computer/Qwen3-ASR-1.7B-gguf",
+        revision: "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f",
+        filename: "Qwen3-ASR-1.7B-Q4_K_M.gguf",
+        size_bytes: 1319830496,
+        sha256: "b7afe3674f653fa84f712ed2440353c6e7cf7f93697fef76b05a26538b24844e",
+    },
+    CatalogModel {
+        id: "qwen3-asr-1.7b-q8_0",
+        variant: "qwen3-asr-1.7b",
+        display_name: "qwen3-asr-1.7b",
+        quant: "Q8_0",
+        upstream_repo: "Qwen/Qwen3-ASR-1.7B",
+        license_spdx: "apache-2.0",
+        hf_repo: "handy-computer/Qwen3-ASR-1.7B-gguf",
+        revision: "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f",
+        filename: "Qwen3-ASR-1.7B-Q8_0.gguf",
+        size_bytes: 2185030624,
+        sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
     },
     CatalogModel {
         id: "voxtral-mini-4b-realtime-2602-q4_k_m",
@@ -1591,6 +1627,14 @@ const NEMOTRON_35_LANGUAGES: &[&str] = &[
     "ro-RO", "et-EE",
 ];
 
+/// The 30 language codes `qwen3-asr-1.7b` advertises, in the order its
+/// transcribe.cpp catalog record lists them. The engine auto-detects among
+/// them; it accepts no explicit language hint.
+const QWEN3_ASR_LANGUAGES: &[&str] = &[
+    "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th", "vi", "ja",
+    "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el", "ro", "hu", "mk",
+];
+
 /// Capability data for every transcribe.cpp variant the catalog draws from,
 /// so the UI can label each entry with its family and language coverage and
 /// config validation can read each family's single-buffer limit. The
@@ -1668,6 +1712,18 @@ pub const VARIANTS: &[VariantInfo] = &[
         languages: ENGLISH_LANGUAGES,
         long_form: LongForm::Unbounded,
         streaming: true,
+    },
+    // qwen3_asr's cap is the engine's real `max_audio_ms`: its 65,536-token
+    // decoder context minus the 48-token prompt overhead and 256-token
+    // generation reserve, at 10 ms per audio token (three stride-2 encoder
+    // convs, 160-sample hop at 16 kHz):
+    //   (65536 - 48 - 256) * 8 * 160 * 1000 / 16000 = 5,218,560 ms.
+    VariantInfo {
+        variant: "qwen3-asr-1.7b",
+        family: "qwen3_asr",
+        languages: QWEN3_ASR_LANGUAGES,
+        long_form: LongForm::HardCap { cap_seconds: 5218 },
+        streaming: false,
     },
     VariantInfo {
         variant: "voxtral-mini-4b-realtime-2602",
@@ -1902,6 +1958,7 @@ mod tests {
             ("moonshine-base", "moonshine"),
             ("canary-1b-v2", "canary"),
             ("cohere-transcribe-03-2026", "cohere_asr"),
+            ("qwen3-asr-1.7b", "qwen3_asr"),
         ] {
             let info = variant_info(variant).unwrap();
             assert_eq!(info.family, family);
@@ -1969,6 +2026,8 @@ mod tests {
             "parakeet-tdt-0.6b-v2-q4_k_m",
             "canary-1b-v2-q4_k_m",
             "cohere-transcribe-03-2026-q4_k_m",
+            "qwen3-asr-1.7b-q4_k_m",
+            "qwen3-asr-1.7b-q8_0",
         ] {
             assert!(
                 !find(id).expect(id).info().supports_streaming(),
@@ -2031,16 +2090,65 @@ mod tests {
                 .language_summary(),
             "14 languages"
         );
+        assert_eq!(
+            variant_info("qwen3-asr-1.7b").unwrap().language_summary(),
+            "30 languages"
+        );
     }
 
     #[test]
-    fn hard_cap_families_are_canary_and_cohere_only() {
+    fn qwen3_asr_entries_are_pinned_capped_and_auto_detect_only() {
+        for (id, quant, filename, size_bytes, sha256) in [
+            (
+                "qwen3-asr-1.7b-q4_k_m",
+                "Q4_K_M",
+                "Qwen3-ASR-1.7B-Q4_K_M.gguf",
+                1_319_830_496_u64,
+                "b7afe3674f653fa84f712ed2440353c6e7cf7f93697fef76b05a26538b24844e",
+            ),
+            (
+                "qwen3-asr-1.7b-q8_0",
+                "Q8_0",
+                "Qwen3-ASR-1.7B-Q8_0.gguf",
+                2_185_030_624_u64,
+                "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+            ),
+        ] {
+            let entry = find(id).expect(id);
+            assert_eq!(entry.variant, "qwen3-asr-1.7b");
+            assert_eq!(entry.quant, quant);
+            assert_eq!(entry.hf_repo, "handy-computer/Qwen3-ASR-1.7B-gguf");
+            assert_eq!(entry.revision, "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f");
+            assert_eq!(entry.filename, filename);
+            assert_eq!(entry.size_bytes, size_bytes);
+            assert_eq!(entry.sha256, sha256);
+
+            let info = entry.info();
+            assert_eq!(info.family, "qwen3_asr");
+            assert_eq!(info.family_label(), "Qwen3 ASR");
+            assert_eq!(info.languages.len(), 30);
+            assert_eq!(info.long_form, LongForm::HardCap { cap_seconds: 5218 });
+            assert!(!info.supports_streaming(), "{id} is offline-only");
+            assert!(
+                !info.accepts_language_hint(),
+                "{id} must use the engine's auto-detect path"
+            );
+        }
+
+        let info = variant_info("qwen3-asr-1.7b").unwrap();
+        assert!(info.languages.contains(&"zh"));
+        assert!(info.languages.contains(&"en"));
+        assert!(info.languages.contains(&"mk"));
+    }
+
+    #[test]
+    fn hard_cap_families_are_canary_cohere_and_qwen3_asr() {
         for info in VARIANTS {
             match info.long_form {
                 LongForm::HardCap { cap_seconds } => {
                     assert!(cap_seconds > 0);
                     assert!(
-                        matches!(info.family, "canary" | "cohere_asr"),
+                        matches!(info.family, "canary" | "cohere_asr" | "qwen3_asr"),
                         "{} unexpectedly hard-caps input",
                         info.variant
                     );
