@@ -348,11 +348,6 @@ pub(crate) struct DecodeSupport {
     pub whisper_options: bool,
     /// Can translate into English (multilingual Whisper, not `.en`).
     pub translate: bool,
-    /// Accepts a caller-supplied language hint. Qwen3-ASR only supports
-    /// auto-detect: any non-null hint returns
-    /// `TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE`, so `run_options` leaves the
-    /// language unset for that family.
-    pub language_hint: bool,
 }
 
 impl DecodeSupport {
@@ -360,9 +355,6 @@ impl DecodeSupport {
         DecodeSupport {
             whisper_options: model.supports(transcribe_cpp::Feature::InitialPrompt),
             translate: model.capabilities().supports_translate,
-            // The loaded model's own architecture, not the catalog entry, so a
-            // hand-placed Qwen3-ASR file is still driven through auto-detect.
-            language_hint: model.arch() != "qwen3_asr",
         }
     }
 
@@ -373,12 +365,6 @@ impl DecodeSupport {
         if config.translate && !self.translate {
             tracing::warn!(
                 "transcription.translate is set but this model cannot translate; transcribing instead"
-            );
-            warned = true;
-        }
-        if config.language != "auto" && !self.language_hint {
-            tracing::warn!(
-                "transcription.language is set but this model auto-detects the language; using auto-detect"
             );
             warned = true;
         }
@@ -424,7 +410,7 @@ pub(crate) fn run_options(
         .then_some(transcribe_cpp::RunExtension::Whisper(whisper));
     transcribe_cpp::RunOptions {
         task,
-        language: (support.language_hint && language != "auto").then(|| language.to_string()),
+        language: (language != "auto").then(|| language.to_string()),
         family,
         ..Default::default()
     }
@@ -1076,7 +1062,6 @@ mod tests {
     const WHISPER: DecodeSupport = DecodeSupport {
         whisper_options: true,
         translate: true,
-        language_hint: true,
     };
 
     #[test]
@@ -1106,31 +1091,18 @@ mod tests {
     }
 
     #[test]
-    fn a_model_that_only_auto_detects_drops_a_configured_language() {
-        // Qwen3-ASR rejects any non-null language hint, even one from its
-        // advertised list, so a configured `transcription.language` must reach
-        // the engine as auto-detect instead of failing the run.
-        let qwen = DecodeSupport {
+    fn a_non_whisper_model_still_receives_the_configured_language() {
+        let config = crate::config::TranscriptionConfig {
+            language: "de".to_string(),
+            ..Default::default()
+        };
+        let support = DecodeSupport {
             whisper_options: false,
             translate: false,
-            language_hint: false,
         };
-        for language in ["en", "de", "zh"] {
-            let config = crate::config::TranscriptionConfig {
-                language: language.to_string(),
-                ..Default::default()
-            };
-            assert_eq!(
-                run_options(&config, qwen).language,
-                None,
-                "{language} must not be sent as a hint"
-            );
-        }
-
-        // Auto-detect is the default and stays the same unset field.
         assert_eq!(
-            run_options(&crate::config::TranscriptionConfig::default(), qwen).language,
-            None
+            run_options(&config, support).language,
+            Some("de".to_string())
         );
     }
 
@@ -1206,7 +1178,6 @@ mod tests {
         let english_only = DecodeSupport {
             whisper_options: true,
             translate: false,
-            language_hint: true,
         };
         let options = run_options(&config, english_only);
         assert_eq!(options.task, transcribe_cpp::Task::Transcribe);
@@ -1216,7 +1187,6 @@ mod tests {
         let other_family = DecodeSupport {
             whisper_options: false,
             translate: false,
-            language_hint: true,
         };
         assert_eq!(
             run_options(&config, other_family),

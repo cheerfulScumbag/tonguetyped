@@ -131,14 +131,6 @@ impl VariantInfo {
     pub fn is_english_only(&self) -> bool {
         self.languages == ["en"]
     }
-
-    /// Whether the engine accepts a caller-supplied language hint. Qwen3-ASR
-    /// supports auto-detect only: any non-null hint, including one of its
-    /// advertised languages, returns `TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE`, so
-    /// the run options must leave `language` unset for this family.
-    pub fn accepts_language_hint(&self) -> bool {
-        self.family != "qwen3_asr"
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1628,8 +1620,7 @@ const NEMOTRON_35_LANGUAGES: &[&str] = &[
 ];
 
 /// The 30 language codes `qwen3-asr-1.7b` advertises, in the order its
-/// transcribe.cpp catalog record lists them. The engine auto-detects among
-/// them; it accepts no explicit language hint.
+/// transcribe.cpp catalog record lists them.
 const QWEN3_ASR_LANGUAGES: &[&str] = &[
     "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th", "vi", "ja",
     "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el", "ro", "hu", "mk",
@@ -2097,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen3_asr_entries_are_pinned_capped_and_auto_detect_only() {
+    fn qwen3_asr_entries_are_pinned_and_capped() {
         for (id, quant, filename, size_bytes, sha256) in [
             (
                 "qwen3-asr-1.7b-q4_k_m",
@@ -2129,10 +2120,6 @@ mod tests {
             assert_eq!(info.languages.len(), 30);
             assert_eq!(info.long_form, LongForm::HardCap { cap_seconds: 5218 });
             assert!(!info.supports_streaming(), "{id} is offline-only");
-            assert!(
-                !info.accepts_language_hint(),
-                "{id} must use the engine's auto-detect path"
-            );
         }
 
         let info = variant_info("qwen3-asr-1.7b").unwrap();

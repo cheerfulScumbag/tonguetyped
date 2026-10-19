@@ -616,12 +616,6 @@ corrupt download is deleted, not kept. The active model lives in
 `model.active_model` and is used by every backend alike - there is no separate
 CPU or GPU model.
 
-Qwen3-ASR auto-detects the spoken language across its 30 languages and accepts
-no explicit language hint: `transcription.language` is ignored for it and the
-engine runs in auto-detect mode (the model screen says so, and the daemon logs
-the dropped hint once per load). Every other catalog model takes the configured
-hint as before.
-
 ### Live text (streaming models)
 
 Some models transcribe *as you speak*: while a recording is running their words
