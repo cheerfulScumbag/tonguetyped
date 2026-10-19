@@ -113,6 +113,8 @@
               postInstall = ''
                 install -Dm644 data/io.github.cheerfulScumbag.tonguetyped.desktop \
                   $out/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
+                install -Dm644 data/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg \
+                  $out/share/icons/hicolor/scalable/apps/io.github.cheerfulScumbag.tonguetyped.svg
 
                 # build.rs renders these during the release build. Locate them
                 # rather than hardcoding a path: buildRustPackage passes
@@ -149,6 +151,14 @@
                 runHook preInstallCheck
                 test -x $out/bin/tonguetyped
                 desktop-file-validate $out/share/applications/io.github.cheerfulScumbag.tonguetyped.desktop
+
+                # Every installed desktop entry must point at the app-ID icon,
+                # and that icon must resolve inside the hicolor theme.
+                for entry in $out/share/applications/*.desktop; do
+                  icon="$(sed -n 's/^Icon=//p' "$entry")"
+                  test "$icon" = io.github.cheerfulScumbag.tonguetyped
+                  test -f "$out/share/icons/hicolor/scalable/apps/$icon.svg"
+                done
                 runHook postInstallCheck
               '';
             }

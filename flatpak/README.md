@@ -7,8 +7,9 @@ into one: Flathub's Generative AI policy requires a human maintainer to author
 the submitted manifest and its pull request, and the ONNX Runtime source-build
 policy decision is still open.
 
-The build intentionally leaves out AppStream metainfo, the app icon, and
-screenshots. Those need real product assets and are required before submission.
+The build installs the app icon so local desktop integration works, but it
+intentionally leaves out AppStream metainfo and screenshots. Those still need
+real product assets and are required before submission.
 
 ## Prerequisites
 

@@ -111,10 +111,10 @@ nix profile install github:cheerfulScumbag/tonguetyped#gpu-rocm
 ```
 
 From a local checkout, use `nix profile install .` instead of the flake URL. The
-package ships the `tonguetyped` binary, its bash/zsh/fish shell completions and
-man pages, and the `io.github.cheerfulScumbag.tonguetyped.desktop` entry, and
-wraps the binary with the `wtype`, `dotool`, `wl-clipboard`, `xclip`, and
-`canberra-gtk-play` helpers it needs.
+package ships the `tonguetyped` binary, its bash/zsh/fish shell completions,
+man pages, the app icon, and the `io.github.cheerfulScumbag.tonguetyped.desktop`
+entry, and wraps the binary with the `wtype`, `dotool`, `wl-clipboard`, `xclip`,
+and `canberra-gtk-play` helpers it needs.
 
 ### NixOS and home-manager modules
 
@@ -183,8 +183,9 @@ paru -S tonguetyped-bin   # or: yay -S tonguetyped-bin
 ```
 
 `tonguetyped-bin` repackages the prebuilt Vulkan Linux binary (CPU fallback
-included), its shell completions and man pages, and depends on `wtype`,
-`dotool`, `wl-clipboard`, and `xdotool`, so typing works out of the box.
+included), its shell completions, man pages, and app icon, and depends on
+`wtype`, `dotool`, `wl-clipboard`, and `xdotool`, so typing works out of the
+box.
 
 ### Debian / Ubuntu (.deb)
 
@@ -201,7 +202,7 @@ sudo apt install ./tonguetyped-gpu-vulkan_*.deb   # or -gpu-cuda / -gpu-rocm
 
 The variants replace one another, so installing a different one swaps the
 backend. Every `.deb` installs the `tonguetyped` binary plus its bash, zsh, and
-fish shell completions and man pages.
+fish shell completions, man pages, and app icon.
 
 The `.deb` recommends `wtype` and `wl-clipboard`. Debian does not package
 `dotool`, but KDE and GNOME Wayland still type out of the box through the
@@ -211,7 +212,8 @@ built-in `libei` backend (see [platform notes](#platform-notes)).
 
 The same GPU-backend builds ship as RPMs: `tonguetyped-gpu-vulkan`,
 `tonguetyped-gpu-cuda`, and `tonguetyped-gpu-rocm`, each also carrying the CPU
-fallback and the shell completions and man pages. Install the one for your GPU:
+fallback, the shell completions and man pages, and the app icon. Install the
+one for your GPU:
 
 ```sh
 sudo dnf install ./tonguetyped-gpu-vulkan-*.rpm   # or -gpu-cuda / -gpu-rocm
@@ -226,8 +228,8 @@ The release also attaches plain binaries for anyone installing by hand:
 `tonguetyped-<tag>-linux-x86_64-gpu-<backend>` for the three x86_64 backends and
 `tonguetyped-<tag>-linux-aarch64-cpu` for 64-bit ARM (CPU-only, with its own
 `.deb` and `.rpm`). A `tonguetyped-<tag>-completions-and-man.tar.gz` bundle
-carries the shell completions and man pages for install methods that want them
-separately.
+carries the shell completions, man pages, and app icon for install methods that
+want them separately.
 
 ### Verifying a download
 
