@@ -578,6 +578,19 @@ pub const ENTRIES: &[CatalogModel] = &[
         sha256: "a8bf3de2b393bd14ead5a858c3748d5e3b07a20fdeabdd3b498fba4f463fa929",
     },
     CatalogModel {
+        id: "nemotron-3.5-asr-streaming-0.6b-q4_k_m",
+        variant: "nemotron-3.5-asr-streaming-0.6b",
+        display_name: "nemotron-3.5-asr-streaming-0.6b",
+        quant: "Q4_K_M",
+        upstream_repo: "nvidia/nemotron-3.5-asr-streaming-0.6b",
+        license_spdx: "openmdw-1.1",
+        hf_repo: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+        revision: "53ce288f69326b415aeef030cfcb02a08a8096dd",
+        filename: "nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
+        size_bytes: 495831520,
+        sha256: "41c99fa5fb6f3d35f68e79adc3e755eca2232a8d921178bd647b71194792b8fd",
+    },
+    CatalogModel {
         id: "voxtral-mini-4b-realtime-2602-q4_k_m",
         variant: "voxtral-mini-4b-realtime-2602",
         display_name: "voxtral-mini-4b-realtime-2602",
@@ -1569,6 +1582,15 @@ const VOXTRAL_REALTIME_LANGUAGES: &[&str] = &[
     "en", "fr", "es", "de", "ru", "zh", "ja", "it", "pt", "nl", "ar", "hi", "ko",
 ];
 
+/// The 32 language-locales `nemotron-3.5-asr-streaming-0.6b` advertises, in the
+/// BCP-47 spellings its transcribe.cpp catalog record lists.
+const NEMOTRON_35_LANGUAGES: &[&str] = &[
+    "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT", "pt-BR", "pt-PT", "nl-NL",
+    "de-DE", "tr-TR", "ru-RU", "ar-AR", "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA", "pl-PL",
+    "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI", "hr-HR", "sk-SK", "zh-CN", "hu-HU",
+    "ro-RO", "et-EE",
+];
+
 /// Capability data for every transcribe.cpp variant the catalog draws from,
 /// so the UI can label each entry with its family and language coverage and
 /// config validation can read each family's single-buffer limit. The
@@ -1623,6 +1645,13 @@ pub const VARIANTS: &[VariantInfo] = &[
         variant: "moonshine-streaming-tiny",
         family: "moonshine_streaming",
         languages: ENGLISH_LANGUAGES,
+        long_form: LongForm::Unbounded,
+        streaming: true,
+    },
+    VariantInfo {
+        variant: "nemotron-3.5-asr-streaming-0.6b",
+        family: "parakeet",
+        languages: NEMOTRON_35_LANGUAGES,
         long_form: LongForm::Unbounded,
         streaming: true,
     },
@@ -1894,6 +1923,7 @@ mod tests {
             "moonshine-streaming-small-q8_0",
             "moonshine-streaming-medium-q8_0",
             "parakeet-unified-en-0.6b-q4_k_m",
+            "nemotron-3.5-asr-streaming-0.6b-q4_k_m",
             "voxtral-mini-4b-realtime-2602-q4_k_m",
         ] {
             let info = find(id).expect(id).info();
@@ -1903,8 +1933,8 @@ mod tests {
 
     #[test]
     fn streaming_models_report_their_real_language_coverage() {
-        // Streaming is not English-only: the multilingual port carries its
-        // real language set, so the UI's "(en)" streaming note stays honest.
+        // Streaming is not English-only: the multilingual ports carry their
+        // real language sets, so the UI's "(en)" streaming note stays honest.
         for id in [
             "moonshine-streaming-tiny-q8_0",
             "moonshine-streaming-small-q8_0",
@@ -1914,18 +1944,17 @@ mod tests {
             let info = find(id).expect(id).info();
             assert!(info.is_english_only(), "{id} is English-only");
         }
-        let voxtral = find("voxtral-mini-4b-realtime-2602-q4_k_m")
-            .expect("voxtral-mini-4b-realtime-2602-q4_k_m")
-            .info();
-        assert!(
-            !voxtral.is_english_only(),
-            "voxtral-mini-4b-realtime-2602 must not be tagged English-only"
-        );
-        assert_eq!(
-            voxtral.language_summary(),
-            "13 languages",
-            "voxtral-mini-4b-realtime-2602"
-        );
+        for (id, summary) in [
+            ("nemotron-3.5-asr-streaming-0.6b-q4_k_m", "32 languages"),
+            ("voxtral-mini-4b-realtime-2602-q4_k_m", "13 languages"),
+        ] {
+            let info = find(id).expect(id).info();
+            assert!(
+                !info.is_english_only(),
+                "{id} is multilingual and must not be tagged English-only"
+            );
+            assert_eq!(info.language_summary(), summary, "{id}");
+        }
     }
 
     #[test]
