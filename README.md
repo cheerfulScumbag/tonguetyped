@@ -508,7 +508,7 @@ in `tonguetyped setup`:
 
 | `output.method` | What happens to the transcript |
 | --- | --- |
-| `none` | Do not deliver it; it stays only in the in-memory `last-result` for the current daemon session |
+| `none` | Do not deliver it; with saving off it stays only in the in-memory `last-result` for the current daemon session |
 | `type` | Typed into the focused application |
 | `clipboard` | Copied to the clipboard; nothing is typed |
 | `paste` | Copied to the clipboard, then pasted with `output.paste_keys` |
@@ -612,8 +612,9 @@ it is skipped for `auto` and every other language, so it can never delete a real
 word in a non-English dictation. The optional `post_process_command` runs last
 with the transcript on its stdin and the cleaned text on its stdout (a local LLM
 cleanup pipe, a `sed` script, ...); any error or a timeout past
-`post_process_timeout_seconds` falls back to the text without it. History and
-the transcript-folder export record exactly the processed text that was output.
+`post_process_timeout_seconds` falls back to the text without it. When history
+is enabled, the database and the transcript-folder export record exactly the
+processed text that was output.
 
 ### Models
 
