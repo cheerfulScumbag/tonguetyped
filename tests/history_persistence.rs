@@ -171,6 +171,7 @@ fn base_config(folder: &Path) -> Config {
 /// With saving off (the fresh default), a completed dictation writes neither a
 /// history row nor a transcript file, even when a folder is configured.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn completed_dictation_writes_nothing_when_history_is_off() {
     let data_root = unique_dir("off-data");
     let folder = unique_dir("off-root").join("nested/dictations");
@@ -208,6 +209,7 @@ async fn completed_dictation_writes_nothing_when_history_is_off() {
 /// With saving on, the same completed dictation writes both the history row and
 /// the transcript file.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn completed_dictation_writes_both_when_history_is_on() {
     let data_root = unique_dir("on-data");
     let folder = unique_dir("on-root").join("nested/dictations");
