@@ -234,17 +234,21 @@ async fn coordinator_applies_retention_and_exports_transcripts_to_a_folder() {
         "the just-dictated row must remain: {rows:?}"
     );
 
-    // Scenario C: a folder set on its own must write nothing. With keeping
-    // transcripts off, the folder is inert - no file lands, no folder is even
-    // created, and no database appears - proving the export is gated on the
-    // keep-transcripts option rather than on the folder being set. The folder
-    // does not exist yet, as when a user types a fresh path.
+    // Scenario C: a fresh default config must write nothing. Saving transcripts
+    // is opt-in, so a folder set while the default (off) applies is inert - no
+    // file lands, no folder is even created, and no database appears - proving
+    // the export is gated on the keep-transcripts option rather than on the
+    // folder being set. The folder does not exist yet, as when a user types a
+    // fresh path.
     let folder = unique_dir("export-root").join("nested/dictations");
     let export_data_root = unique_dir("export-data");
     isolate_data_dir(&export_data_root);
     let runtime = Arc::new(StubRuntime::new("keep this text"));
     let mut config = Config::default();
-    config.history.enabled = false;
+    assert!(
+        !config.history.enabled,
+        "a fresh config must not save transcripts by default"
+    );
     config.history.transcript_folder = folder.to_string_lossy().into_owned();
     config.transcription.max_recording_seconds = 5;
     let coordinator = Arc::new(Coordinator::with_runtime(config, runtime).unwrap());

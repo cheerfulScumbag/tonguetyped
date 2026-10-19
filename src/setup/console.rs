@@ -41,6 +41,9 @@ const LOGO_HEIGHT: u16 = 8;
 const ACTIVATION_LABELS: [&str; 2] = crate::config::ACTIVATION_MODE_LABELS;
 const STARTUP_LABELS: [&str; 2] = crate::config::STARTUP_LABELS;
 const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
+/// The transcript-history choice: off (the default) or saving both the local
+/// database and the transcript-folder export.
+const HISTORY_ENABLED_LABELS: [&str; 2] = ["Off", "Save transcript history"];
 
 /// The Overlay steps' preview band height in rows, including its border and
 /// title - the same modest band the dashboard uses, so the two read as one UI.
@@ -73,6 +76,7 @@ enum StepKind {
     OutputPasteKeys,
     OutputSubmit,
     Startup,
+    HistoryEnabled,
     HistoryRetention,
     TranscriptFolder,
     OverlayEnabled,
@@ -147,6 +151,7 @@ struct ConsoleState {
     paste_keys_selection: usize,
     submit_selection: usize,
     startup_selection: usize,
+    history_enabled_selection: usize,
     retention_fields: Vec<TextField>,
     retention_field: usize,
     folder_field: TextField,
@@ -229,7 +234,7 @@ impl ConsoleState {
         let mic_selection = capabilities.microphone_index(&config.audio.microphone);
         let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
         let output_labels = capabilities.output_labels();
-        let output_selection = capabilities.output_index(config.output.method);
+        let output_selection = capabilities.setup_output_index(&config);
         let paste_keys_selection = PasteKeys::ALL
             .iter()
             .position(|keys| *keys == config.output.paste_keys)
@@ -241,6 +246,7 @@ impl ConsoleState {
             .position(|backend| backend == &config.output.typing_backend)
             .unwrap_or(0);
         let startup_selection = usize::from(config.startup.autostart);
+        let history_enabled_selection = usize::from(config.history.enabled);
         let retention_fields = vec![
             TextField::new(config.history.max_entries.to_string()),
             TextField::new(config.history.max_age_days.to_string()),
@@ -293,6 +299,7 @@ impl ConsoleState {
             paste_keys_selection,
             submit_selection,
             startup_selection,
+            history_enabled_selection,
             retention_fields,
             retention_field,
             folder_field,
@@ -554,6 +561,7 @@ impl ConsoleState {
             StepKind::OutputPasteKeys => PasteKeys::ALL.len(),
             StepKind::OutputSubmit => AUTO_SUBMIT_LABELS.len(),
             StepKind::Startup => STARTUP_LABELS.len(),
+            StepKind::HistoryEnabled => HISTORY_ENABLED_LABELS.len(),
             StepKind::TextPasses => TEXT_PASS_LABELS.len(),
             StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
             StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
@@ -582,6 +590,7 @@ impl ConsoleState {
             StepKind::OutputPasteKeys => &mut self.paste_keys_selection,
             StepKind::OutputSubmit => &mut self.submit_selection,
             StepKind::Startup => &mut self.startup_selection,
+            StepKind::HistoryEnabled => &mut self.history_enabled_selection,
             StepKind::TextPasses => &mut self.text_pass_selection,
             StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
             StepKind::OverlayPosition => &mut self.overlay_position_selection,
@@ -676,8 +685,11 @@ impl ConsoleState {
             steps.push(OutputSubmit);
         }
         steps.push(Startup);
-        steps.push(HistoryRetention);
-        steps.push(TranscriptFolder);
+        steps.push(HistoryEnabled);
+        if self.history_enabled_selection == 1 {
+            steps.push(HistoryRetention);
+            steps.push(TranscriptFolder);
+        }
         steps.push(OverlayEnabled);
         if self.overlay_options_shown() {
             steps.push(OverlayPosition);
@@ -813,6 +825,9 @@ impl ConsoleState {
             StepKind::Startup => {
                 self.config.startup.autostart = self.startup_selection == 1;
                 self.config.validate()?;
+            }
+            StepKind::HistoryEnabled => {
+                self.config.history.enabled = self.history_enabled_selection == 1;
             }
             StepKind::HistoryRetention => {
                 let entries = match self.retention_fields[0].value().trim().parse::<u64>() {
@@ -1008,6 +1023,7 @@ impl ConsoleState {
             StepKind::OutputPasteKeys => "Paste keys",
             StepKind::OutputSubmit => "After the text",
             StepKind::Startup => "Startup",
+            StepKind::HistoryEnabled => "Transcript history",
             StepKind::HistoryRetention => "History retention",
             StepKind::TranscriptFolder => "Transcript folder",
             StepKind::OverlayEnabled => "Overlay",
@@ -1197,6 +1213,15 @@ impl ConsoleState {
                 list_paragraph(
                     &STARTUP_LABELS.map(String::from),
                     self.startup_selection,
+                    self.step_title(),
+                    area.height,
+                ),
+                area,
+            ),
+            StepKind::HistoryEnabled => frame.render_widget(
+                list_paragraph(
+                    &HISTORY_ENABLED_LABELS.map(String::from),
+                    self.history_enabled_selection,
                     self.step_title(),
                     area.height,
                 ),
@@ -1633,7 +1658,7 @@ impl ConsoleState {
     }
 
     fn render_confirm(&self, frame: &mut Frame, area: Rect) {
-        let lines = vec![
+        let mut lines = vec![
             Line::from(format!("Model:       {}", self.config.model.active_model)),
             Line::from(format!(
                 "Backend:     {}",
@@ -1658,14 +1683,19 @@ impl ConsoleState {
                 crate::activation::keybind_display(&self.config.activation.keybind)
             )),
             Line::from(format!("Output:      {}", output_summary(&self.config))),
-            Line::from(format!(
-                "Retention:   {}",
-                self.config.history.retention_summary()
-            )),
-            Line::from(format!(
-                "Folder:      {}",
-                self.config.history.folder_summary()
-            )),
+            Line::from(if self.config.history.enabled {
+                format!(
+                    "History:     on, {}{}",
+                    self.config.history.retention_summary(),
+                    if self.config.history.transcript_folder.trim().is_empty() {
+                        ", no transcript folder".to_string()
+                    } else {
+                        format!(", folder {}", self.config.history.transcript_folder)
+                    }
+                )
+            } else {
+                "History:     off (no database or transcript folder)".to_string()
+            }),
             Line::from(format!(
                 "Autostart:   {}",
                 if self.config.startup.autostart {
@@ -1700,9 +1730,14 @@ impl ConsoleState {
                     "disabled".to_string()
                 }
             )),
-            Line::from(""),
-            Line::from("Write this configuration?"),
         ];
+        if self.config.history.enabled {
+            lines.push(Line::from(
+                "             Turn it off in Transcript output > Save transcript history.",
+            ));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Write this configuration?"));
         frame.render_widget(
             Paragraph::new(lines).block(
                 Block::default()
@@ -2042,6 +2077,38 @@ mod tests {
         state.output_selection = 0;
         state.advance().unwrap();
         assert_eq!(state.step, StepKind::Startup);
+    }
+
+    #[test]
+    fn output_step_defaults_to_type_when_saving_transcripts_is_off() {
+        let capabilities = Capabilities {
+            typing_backends: vec!["wtype".to_string()],
+            ..no_mic_capabilities()
+        };
+        let state = ConsoleState::new(Config::default(), capabilities);
+        assert!(
+            !state.config.history.enabled,
+            "the fresh default must leave saving off"
+        );
+        assert_eq!(
+            state.output_selection, 1,
+            "off-by-default history must not leave the primary path delivering nothing"
+        );
+    }
+
+    #[test]
+    fn output_step_keeps_the_saved_no_delivery_choice_when_history_is_on() {
+        let capabilities = Capabilities {
+            typing_backends: vec!["wtype".to_string()],
+            ..no_mic_capabilities()
+        };
+        let mut config = Config::default();
+        config.history.enabled = true;
+        let state = ConsoleState::new(config, capabilities);
+        assert_eq!(
+            state.output_selection, 0,
+            "history already keeps the transcript, so the saved choice wins"
+        );
     }
 
     #[test]

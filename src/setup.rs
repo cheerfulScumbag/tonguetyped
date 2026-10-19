@@ -325,13 +325,27 @@ impl Capabilities {
             .unwrap_or(0)
     }
 
+    /// Where the configuration UIs open their output-method list. Saving
+    /// transcripts is off by default, so a fresh config's `none` would deliver
+    /// nothing; in that case the wizard defaults to `type`, the primary
+    /// dictation path. A saved method that works here still wins, and
+    /// `output_index` falls back to `none` when typing cannot work.
+    pub(crate) fn setup_output_index(&self, config: &Config) -> usize {
+        let method = if !config.history.enabled && config.output.method == OutputMethod::None {
+            OutputMethod::Type
+        } else {
+            config.output.method
+        };
+        self.output_index(method)
+    }
+
     /// The transcript-output choices, in `OUTPUT_METHODS` order. Every choice
     /// is always listed - the screens explain an unavailable one via
     /// `output_method_problem` rather than silently dropping it - but only a
     /// choice without a problem can be applied.
     pub(crate) fn output_labels(&self) -> Vec<String> {
         vec![
-            "Keep transcripts in TongueTyped".to_string(),
+            "Do not deliver".to_string(),
             "Type into the focused application".to_string(),
             "Copy to the clipboard".to_string(),
             "Paste into the focused application".to_string(),
@@ -536,7 +550,7 @@ fn configure(
     for warning in warnings {
         writeln!(output, "{warning}")?;
     }
-    let output_default = capabilities.output_index(config.output.method);
+    let output_default = capabilities.setup_output_index(&config);
     // A method that cannot work here is refused with the warning naming its
     // remedy rather than silently saved into a configuration that can never
     // deliver a transcript.

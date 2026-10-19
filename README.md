@@ -40,15 +40,17 @@ an interactive dashboard for every setting.
   app through `wtype`, `dotool`, `enigo`, or a built-in native `libei` session -
   whichever actually works on your compositor. When typing fails, the transcript
   is left on the clipboard.
-- **Dictate into files.** Point `transcript_folder` at a directory and, while
-  keeping transcripts is on, every finished transcript is also written there as
-  a plain-text file, independent of the focused app or the clipboard.
+- **Optionally dictate into files.** Turn on **Save transcript history**, point
+  `transcript_folder` at a directory, and every finished transcript is also
+  written there as a plain-text file, independent of the focused app or the
+  clipboard. Off by default.
 - **Unobtrusive feedback.** A click-through overlay shows recording,
   transcribing, success, and failure - nine styles, on any number of screens.
 - **Terminal-native control.** Script it, or use the dashboard. Every command is
   a plain subcommand over a local Unix socket.
-- **Your transcripts stay yours.** History is a local SQLite database with
-  retention you control, plus an optional plain-text export folder.
+- **Your transcripts stay yours.** Saving is opt-in: history is a local SQLite
+  database with retention you control, plus an optional plain-text export
+  folder.
 
 ---
 
@@ -287,7 +289,8 @@ Transcript folder, History retention, Startup, Overlay, and Media pause. A
 Commands row below them opens a separate screen listing the remaining commands,
 where Up/Down selects a command and Enter runs it. Selecting a settings row
 opens a screen that edits just that area, with the same live microphone preview
-and shortcut dialog the setup wizard uses.
+and shortcut dialog the setup wizard uses. The **Transcript output** screen also
+holds the **Save transcript history** toggle, which is off by default.
 
 The value steppers and choice lists share one navigation grammar: Up/Down
 moves between rows, Left/Right changes the highlighted choice in either
@@ -497,16 +500,21 @@ feedback_volume = 0.7
 
 ### Transcript output
 
-`output.method` defaults to `none`, so a fresh install transcribes and stores
-but types nothing - a safe default while you test. Pick another method in the
-dashboard's **Transcript output** screen or in `tonguetyped setup`:
+The configuration file defaults `output.method` to `none`, which delivers
+nothing. `tonguetyped setup` opens on `type` when saving transcripts is off and
+a typing helper is available, so a fresh install types into the focused
+application. Pick a method in the dashboard's **Transcript output** screen or
+in `tonguetyped setup`:
 
 | `output.method` | What happens to the transcript |
 | --- | --- |
-| `none` | Kept in TongueTyped only (history and `last-result`) |
+| `none` | Do not deliver it; with saving off it stays only in the in-memory `last-result` for the current daemon session |
 | `type` | Typed into the focused application |
 | `clipboard` | Copied to the clipboard; nothing is typed |
 | `paste` | Copied to the clipboard, then pasted with `output.paste_keys` |
+
+No method writes to the history database or transcript folder unless
+**Save transcript history** is on.
 
 `output.paste_keys` is `"ctrl-v"` (most applications) or `"shift-insert"`
 (terminals, which bind Ctrl+V to something else). `output.auto_submit` presses
@@ -524,13 +532,22 @@ sends a test line through the configured method and says where it went.
 
 ### History and the transcript folder
 
+Saving transcripts is opt-in. A fresh install leaves `history.enabled` off, so
+dictation only types the text into the focused application and writes no
+database or transcript files. Turn on **Save transcript history** on the
+dashboard's **Transcript output** screen or in `tonguetyped setup` to keep
+transcripts. While it is off, the retention and transcript-folder settings are
+disabled. An existing configuration that already has `enabled = true` keeps
+saving until you turn it off; upgrading leaves it on, and the dashboard shows a
+notice naming **Transcript output > Save transcript history** while it is.
+
 When history is enabled, transcripts are stored in
 `$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Two
 retention limits are applied on every write, independently of the output method:
 
 ```toml
 [history]
-enabled = true
+enabled = false           # true saves the database and the transcript folder
 max_entries = 100          # 0 = no entry limit
 max_age_days = 30          # 0 = no age limit
 transcript_folder = ""     # e.g. "/home/you/Documents/tonguetyped"
@@ -595,8 +612,9 @@ it is skipped for `auto` and every other language, so it can never delete a real
 word in a non-English dictation. The optional `post_process_command` runs last
 with the transcript on its stdin and the cleaned text on its stdout (a local LLM
 cleanup pipe, a `sed` script, ...); any error or a timeout past
-`post_process_timeout_seconds` falls back to the text without it. History and
-the transcript-folder export record exactly the processed text that was output.
+`post_process_timeout_seconds` falls back to the text without it. When history
+is enabled, the database and the transcript-folder export record exactly the
+processed text that was output.
 
 ### Models
 

@@ -683,8 +683,10 @@ impl ShortcutScreen {
 }
 
 /// Transcript output: the four methods, then - for the methods that insert
-/// text - Enter-after and, for `paste`, the paste keys. Like the Overlay
-/// screen, the option rows change only on `←`/`→`; `Enter` only saves.
+/// text - Enter-after, for `paste` the paste keys, and always the
+/// "Save transcript history" toggle that gates the database and folder export.
+/// Like the Overlay screen, the option rows change only on `←`/`→`; `Enter`
+/// only saves.
 pub(super) struct OutputScreen {
     pub labels: Vec<String>,
     pub selected: usize,
@@ -706,12 +708,18 @@ impl OutputScreen {
         }
     }
 
+    /// The row after the method-specific options that toggles saving
+    /// transcripts to the history database and transcript folder. It is always
+    /// present, so the opt-in is reachable from the output screen regardless
+    /// of the chosen method.
+    fn history_row(config: &Config) -> usize {
+        OUTPUT_METHODS.len()
+            + usize::from(config.output.method.inserts_text())
+            + usize::from(config.output.method == OutputMethod::Paste)
+    }
+
     fn row_count(config: &Config) -> usize {
-        match config.output.method {
-            OutputMethod::Paste => Self::PASTE_KEYS_ROW + 1,
-            OutputMethod::Type => Self::SUBMIT_ROW + 1,
-            OutputMethod::None | OutputMethod::Clipboard => OUTPUT_METHODS.len(),
-        }
+        Self::history_row(config) + 1
     }
 
     pub(super) fn move_selection(&mut self, delta: i32, config: &Config) {
@@ -719,12 +727,15 @@ impl OutputScreen {
         self.selected = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
     }
 
-    /// Steps the highlighted option row: "after text" flips and the paste keys
-    /// step both ways, clamped at the ends (the `←`/`→` step the captain asked
-    /// for, replacing `Enter`'s forward-only cycle). Method rows have no inline
-    /// value, so this returns `false` and the caller moves the highlight
-    /// instead.
+    /// Steps the highlighted option row: "after text" flips, the paste keys
+    /// step both ways, and the history row toggles saving transcripts. The
+    /// method rows have no inline value, so this returns `false` and the
+    /// caller moves the highlight instead.
     pub(super) fn step(&mut self, delta: i32, config: &mut Config) -> bool {
+        if self.selected == Self::history_row(config) {
+            config.history.enabled = !config.history.enabled;
+            return true;
+        }
         match self.selected {
             Self::SUBMIT_ROW => {
                 config.output.auto_submit = !config.output.auto_submit;
@@ -801,7 +812,33 @@ impl OutputScreen {
                 .unwrap_or(0)];
             rows.push(format!("  {:<14}{keys}", "Paste keys"));
         }
+        rows.push(format!(
+            "  {:<22} {}",
+            "Save transcript history",
+            Self::history_value(config)
+        ));
         rows
+    }
+
+    /// The history toggle's value. While saving is off it names what the
+    /// selected output method actually does with the transcript; while it is
+    /// on it names the saved destinations, claiming the folder only when one
+    /// is configured.
+    fn history_value(config: &Config) -> &'static str {
+        if config.history.enabled {
+            if config.history.transcript_folder.trim().is_empty() {
+                "[x] history only"
+            } else {
+                "[x] history and folder"
+            }
+        } else {
+            match config.output.method {
+                OutputMethod::None => "[ ] do not deliver",
+                OutputMethod::Type => "[ ] type the text only",
+                OutputMethod::Clipboard => "[ ] copy to clipboard only",
+                OutputMethod::Paste => "[ ] paste the text only",
+            }
+        }
     }
 
     pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
@@ -813,6 +850,9 @@ impl OutputScreen {
             .position(|keys| *keys == config.output.paste_keys)
             .unwrap_or(0);
         let key_value = key_options.get(key_index).copied().unwrap_or("");
+        let history_row = Self::history_row(config);
+        let paste_row =
+            (config.output.method == OutputMethod::Paste).then_some(history_row.saturating_sub(1));
         let lines: Vec<Line> = rows
             .iter()
             .enumerate()
@@ -820,7 +860,7 @@ impl OutputScreen {
                 let is_selected = index == self.selected;
                 let marker = if is_selected { "> " } else { "  " };
                 let mut spans = Vec::new();
-                if index == Self::PASTE_KEYS_ROW {
+                if Some(index) == paste_row {
                     spans.push(Span::styled(
                         format!("{marker}  {:<14}", "Paste keys"),
                         selection_style(is_selected),
@@ -1115,6 +1155,9 @@ pub(super) struct TextFieldsScreen {
     pub placeholders: Vec<String>,
     pub selected: usize,
     pub result: Option<Result<(), String>>,
+    /// True for the history screens while keeping transcripts is off: the
+    /// fields are hidden and no edit is applied until the toggle is on.
+    pub disabled: bool,
     apply: fn(&TextFieldsScreen, &mut Config) -> Result<(), String>,
 }
 
@@ -1138,6 +1181,7 @@ impl TextFieldsScreen {
             placeholders: Vec::new(),
             selected: 0,
             result: None,
+            disabled: !config.history.enabled,
             apply: apply_history_retention,
         }
     }
@@ -1156,6 +1200,7 @@ impl TextFieldsScreen {
             placeholders: Vec::new(),
             selected: 0,
             result: None,
+            disabled: !config.history.enabled,
             apply: apply_transcript_folder,
         }
     }
@@ -1182,6 +1227,7 @@ impl TextFieldsScreen {
             placeholders: crate::config::TranscriptionConfig::decoding_form_placeholders(),
             selected: 0,
             result: None,
+            disabled: false,
             apply: apply_decoding,
         }
     }
@@ -1199,10 +1245,24 @@ impl TextFieldsScreen {
     }
 
     pub(super) fn apply(&self, config: &mut Config) -> Result<(), String> {
+        if self.disabled {
+            // The history screens are read-only while keeping transcripts is
+            // off; nothing here may quietly change a hidden field.
+            return Ok(());
+        }
         (self.apply)(self, config)
     }
 
     pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
+        if self.disabled {
+            return Paragraph::new("History is off. Turn on Save transcript history to edit this.")
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Home \u{203a} {}", self.title)),
+                );
+        }
         let label_width = self
             .fields
             .iter()
@@ -1237,6 +1297,14 @@ impl TextFieldsScreen {
                 .borders(Borders::ALL)
                 .title(format!("Home \u{203a} {}", self.title)),
         )
+    }
+
+    pub(super) fn hint_line(&self) -> &'static str {
+        if self.disabled {
+            "History is off. Turn on Save transcript history to edit this."
+        } else {
+            self.hint
+        }
     }
 
     pub(super) fn result_line(&self, success: &str) -> Line<'static> {
@@ -1827,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn output_screen_resets_the_backend_when_output_returns_to_keep() {
+    fn output_screen_resets_the_backend_when_output_returns_to_no_delivery() {
         let capabilities = test_capabilities();
         let mut config = Config::default();
         config.output.method = OutputMethod::Type;
@@ -1846,7 +1914,7 @@ mod tests {
         assert_eq!(
             screen.labels,
             vec![
-                "Keep transcripts in TongueTyped".to_string(),
+                "Do not deliver".to_string(),
                 "Type into the focused application".to_string(),
                 "Copy to the clipboard".to_string(),
                 "Paste into the focused application".to_string(),
@@ -1931,14 +1999,14 @@ mod tests {
         let capabilities = test_capabilities();
         let mut config = Config::default();
         let mut screen = OutputScreen::new(&capabilities, &config);
-        assert_eq!(screen.rows(&config).len(), 4);
+        assert_eq!(screen.rows(&config).len(), 5);
 
         screen.selected = 2;
         screen.apply(&mut config).unwrap();
         assert_eq!(config.output.method, OutputMethod::Clipboard);
         assert_eq!(
             screen.rows(&config).len(),
-            4,
+            5,
             "copying alone has no Enter or paste-key options"
         );
 
@@ -1946,9 +2014,10 @@ mod tests {
         screen.apply(&mut config).unwrap();
         assert_eq!(config.output.method, OutputMethod::Paste);
         let rows = screen.rows(&config);
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert!(rows[4].contains("nothing"), "{rows:?}");
         assert!(rows[5].contains("Ctrl+V"), "{rows:?}");
+        assert!(rows[6].contains("Save transcript history"), "{rows:?}");
 
         // Enter on the option rows only saves; `←`/`→` (the stepper) is the
         // only thing that changes their value, matching the Overlay screen.
@@ -1977,7 +2046,7 @@ mod tests {
         // `type` keeps Enter-after but has no paste keys row.
         screen.selected = 1;
         screen.apply(&mut config).unwrap();
-        assert_eq!(screen.rows(&config).len(), 5);
+        assert_eq!(screen.rows(&config).len(), 6);
         assert!(config.output.auto_submit);
 
         // Leaving for a method that inserts nothing clears Enter-after, which
@@ -1986,6 +2055,48 @@ mod tests {
         screen.apply(&mut config).unwrap();
         assert!(!config.output.auto_submit);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn output_screen_toggles_saving_transcripts_from_the_history_row() {
+        let capabilities = test_capabilities();
+        let mut config = Config::default();
+        assert!(!config.history.enabled);
+        let mut screen = OutputScreen::new(&capabilities, &config);
+
+        // The row sits after the method choices for the default method.
+        screen.selected = 4;
+        let rows = screen.rows(&config);
+        assert!(
+            rows[4].contains("Save transcript history") && rows[4].contains("[ ] do not deliver"),
+            "{rows:?}"
+        );
+
+        // Enter only saves; the stepper is what changes the value.
+        screen.apply(&mut config).unwrap();
+        assert!(!config.history.enabled);
+        assert!(screen.step(1, &mut config));
+        assert!(config.history.enabled);
+        assert!(screen.rows(&config)[4].contains("[x] history only"));
+        config.history.transcript_folder = "/tmp/dictations".to_string();
+        assert!(screen.rows(&config)[4].contains("[x] history and folder"));
+        screen.step(-1, &mut config);
+        assert!(!config.history.enabled);
+
+        // While off, the value names what the selected method does.
+        for (method, value) in [
+            (OutputMethod::Clipboard, "[ ] copy to clipboard only"),
+            (OutputMethod::Type, "[ ] type the text only"),
+            (OutputMethod::Paste, "[ ] paste the text only"),
+        ] {
+            config.output.method = method;
+            let history_row = OutputScreen::history_row(&config);
+            assert!(
+                screen.rows(&config)[history_row].contains(value),
+                "{method}: {:?}",
+                screen.rows(&config)
+            );
+        }
     }
 
     #[test]
@@ -2080,6 +2191,7 @@ mod tests {
     #[test]
     fn history_retention_screen_applies_valid_numbers_and_rejects_junk() {
         let mut config = Config::default();
+        config.history.enabled = true;
         let screen = TextFieldsScreen::history_retention(&config);
         assert_eq!(screen.fields[0].1.value(), "100");
         assert_eq!(screen.fields[1].1.value(), "30");
@@ -2099,6 +2211,7 @@ mod tests {
     #[test]
     fn transcript_folder_screen_requires_an_absolute_path_and_allows_clearing() {
         let mut config = Config::default();
+        config.history.enabled = true;
         let mut screen = TextFieldsScreen::transcript_folder(&config);
         screen.fields[0].1 = TextField::new("relative/dir");
         assert!(screen.apply(&mut config).is_err());
@@ -2122,6 +2235,35 @@ mod tests {
         screen.apply(&mut config);
         assert!(config.activation.mode == ActivationMode::Toggle);
         assert_eq!(ActivationScreen::new(&config).selected, 1);
+    }
+
+    #[test]
+    fn history_screens_are_disabled_while_saving_is_off() {
+        let config = Config::default();
+        assert!(!config.history.enabled);
+        let retention = TextFieldsScreen::history_retention(&config);
+        let folder = TextFieldsScreen::transcript_folder(&config);
+        assert!(retention.disabled && folder.disabled);
+        assert!(retention
+            .hint_line()
+            .contains("Turn on Save transcript history"));
+
+        let mut config = config;
+        config.history.enabled = true;
+        assert!(!TextFieldsScreen::history_retention(&config).disabled);
+        assert!(!TextFieldsScreen::transcript_folder(&config).disabled);
+    }
+
+    #[test]
+    fn disabled_history_screen_never_applies_hidden_edits() {
+        let mut config = Config::default();
+        let mut folder = TextFieldsScreen::transcript_folder(&config);
+        folder.fields[0].1.insert('/');
+        folder.apply(&mut config).unwrap();
+        assert!(
+            config.history.transcript_folder.is_empty(),
+            "a disabled folder screen must not change the config"
+        );
     }
 
     #[test]
@@ -2354,14 +2496,18 @@ mod tests {
 
     #[test]
     fn text_fields_selected_value_row_is_a_full_width_highlight_bar() {
-        let screen = TextFieldsScreen::history_retention(&Config::default());
+        let mut config = Config::default();
+        config.history.enabled = true;
+        let screen = TextFieldsScreen::history_retention(&config);
         let buffer = rendered_buffer(screen.list_widget(40), 42, 12);
         assert_full_width_highlight_bar(&buffer, 1, 40);
     }
 
     #[test]
     fn text_fields_selected_empty_row_is_a_full_width_highlight_bar() {
-        let screen = TextFieldsScreen::transcript_folder(&Config::default());
+        let mut config = Config::default();
+        config.history.enabled = true;
+        let screen = TextFieldsScreen::transcript_folder(&config);
         let buffer = rendered_buffer(screen.list_widget(40), 42, 12);
         assert_full_width_highlight_bar(&buffer, 1, 40);
     }

@@ -449,6 +449,11 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
         "the Overlay row should summarize the real config:\n{screen}"
     );
     assert!(
+        screen.contains("Transcript folder  disabled (history off)")
+            && screen.contains("History retention  history off"),
+        "a fresh install must show transcript saving as off:\n{screen}"
+    );
+    assert!(
         screen.contains("Daemon:"),
         "missing status strip:\n{screen}"
     );
@@ -468,6 +473,100 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
     );
 
     session.quit_and_wait();
+}
+
+#[test]
+fn pty_home_notice_points_an_upgraded_history_setting_at_the_opt_out() {
+    let sandbox = Sandbox::new("history-notice");
+    sandbox.write_config("[history]\nenabled = true\n");
+    let session = Session::spawn(&sandbox, 100, 40);
+
+    let home = session.wait_for("Saving transcripts is on", Duration::from_secs(5));
+    assert!(
+        home.contains("Transcript output > Save transcript history"),
+        "the notice must say where the opt-out lives:\n{home}"
+    );
+
+    session.quit_and_wait();
+}
+
+/// A fresh install (no config file) starts with saving off, shows no opt-out
+/// notice, and exposes the "Save transcript history" toggle on the Transcript
+/// output screen.
+#[test]
+fn pty_fresh_install_defaults_history_off_and_shows_the_toggle() {
+    let sandbox = Sandbox::new("fresh-history-off");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+
+    let home = session.wait_for("Settings", Duration::from_secs(5));
+    assert!(
+        !home.contains("Saving transcripts is on"),
+        "a fresh install must not claim transcripts are being saved:\n{home}"
+    );
+    assert!(
+        home.contains("Transcript folder  disabled (history off)"),
+        "a fresh install must summarize saving as off:\n{home}"
+    );
+
+    select_setting(&mut session, "Transcript output");
+    session.send(KEY_ENTER);
+    let screen = session.wait_for("Save transcript history", Duration::from_secs(3));
+    assert!(
+        screen.contains("[ ] do not deliver"),
+        "the history toggle must be visible and off:\n{screen}"
+    );
+
+    session.send(KEY_ESC);
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.quit_and_wait();
+}
+
+/// Turning the toggle off persists to disk and survives stopping and starting
+/// the daemon again.
+#[test]
+fn pty_opting_out_of_history_persists_across_a_daemon_restart() {
+    // Short tag: the daemon's control-socket path must stay under SUN_LEN.
+    let sandbox = Sandbox::new("optout");
+    sandbox.write_config("[history]\nenabled = true\n");
+    let daemon = start_daemon(&sandbox);
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("Saving transcripts is on", Duration::from_secs(5));
+
+    select_setting(&mut session, "Transcript output");
+    session.send(KEY_ENTER);
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.send(KEY_RIGHT);
+    session.wait_for("[ ] do not deliver", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.quit_and_wait();
+
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["history"]["enabled"].as_bool(),
+        Some(false),
+        "opting out must be saved: {config:?}"
+    );
+
+    drop(daemon);
+    let daemon = start_daemon(&sandbox);
+    let session = Session::spawn(&sandbox, 100, 40);
+    let home = session.wait_for("Settings", Duration::from_secs(5));
+    assert!(
+        !home.contains("Saving transcripts is on"),
+        "the restart must not bring the opt-out notice back:\n{home}"
+    );
+    assert!(
+        home.contains("Transcript folder  disabled (history off)"),
+        "the restart must load the saved opt-out:\n{home}"
+    );
+    session.quit_and_wait();
+    drop(daemon);
 }
 
 #[test]
@@ -937,7 +1036,25 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    select_setting(&mut session, "Transcript folder");
+    // Saving transcripts is opt-in, so turn it on from the Transcript output
+    // screen before the folder is edited. The history row sits after the four
+    // method rows for the default "Do not deliver" method.
+    select_setting(&mut session, "Transcript output");
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output", Duration::from_secs(3));
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    session.send(KEY_RIGHT);
+    session.wait_for("[x] history only", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
+    session.wait_for("> Transcript folder", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
     let opened = session.wait_for("Folder", Duration::from_secs(3));
@@ -956,6 +1073,7 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
     assert!(saved.contains(target), "{saved}");
 
     let config = sandbox.config_contents();
+    assert!(config.contains("enabled = true"), "{config}");
     assert!(
         config.contains(&format!("transcript_folder = \"{target}\"")),
         "{config}"
@@ -1207,7 +1325,25 @@ fn pty_history_retention_setting_persists_both_limits() {
     let mut session = Session::spawn(&sandbox, 100, 40);
     session.wait_for("Settings", Duration::from_secs(5));
 
-    select_setting(&mut session, "History retention");
+    // Retention is only editable while saving transcripts is on. Enable it
+    // from the Transcript output screen's history row.
+    select_setting(&mut session, "Transcript output");
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output", Duration::from_secs(3));
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    session.send(KEY_RIGHT);
+    session.wait_for("[x] history only", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    session.wait_for("> Transcript output", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
+    session.send(KEY_DOWN);
+    session.wait_for("> History retention", Duration::from_secs(3));
     session.send(KEY_ENTER);
 
     let opened = session.wait_for("Maximum entries", Duration::from_secs(3));
@@ -1361,7 +1497,7 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     session.send(KEY_ENTER);
     let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
     assert!(
-        screen.contains("Keep transcripts in TongueTyped"),
+        screen.contains("Do not deliver"),
         "both choices must be listed:\n{screen}"
     );
     assert!(
@@ -1510,7 +1646,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     // naming what to install.
     let screen = session.wait_for("Type into the focused application", Duration::from_secs(3));
     assert!(
-        screen.contains("Keep transcripts in TongueTyped"),
+        screen.contains("Do not deliver"),
         "the type choice must not be dropped silently:\n{screen}"
     );
     session.send(KEY_DOWN);
@@ -1699,14 +1835,15 @@ const TRANSCRIPT_PHRASE: &str = "alpha bravo charlie delta echo foxtrot golf hot
 /// recording. The sandbox and daemon are returned so they outlive the session
 /// for the test's duration.
 ///
-/// The tag must stay short: this is the only PTY test that starts a daemon, and
-/// a Unix-domain socket path must fit under SUN_LEN (~108 bytes), which the
-/// longer human-readable tags the other sandboxes use would exceed under Nix's
-/// already-long TMPDIR.
+/// The tag must stay short: PTY tests that start a daemon need a Unix-domain
+/// socket path under SUN_LEN (~108 bytes), which the longer human-readable
+/// tags the other sandboxes use would exceed under Nix's already-long TMPDIR.
 fn open_last_result(tag: &str, transcript: &str) -> (Sandbox, Daemon, Session) {
     let sandbox = Sandbox::new(tag);
-    sandbox
-        .write_config("[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n");
+    sandbox.write_config(
+        "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n\
+         [history]\nenabled = true\n",
+    );
     sandbox.seed_history(transcript);
     let daemon = start_daemon(&sandbox);
 
