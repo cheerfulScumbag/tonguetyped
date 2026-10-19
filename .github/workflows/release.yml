@@ -89,17 +89,13 @@ jobs:
             --set-metadata "version = \"${version}\"" \
             -o "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64-${{ matrix.variant }}.rpm"
           cp target/release/tonguetyped "release-assets/tonguetyped-${RELEASE_TAG}-linux-x86_64-${{ matrix.variant }}"
-      - name: Bundle shell completions and man pages
-        # build.rs writes these to target/release/dist during the release
-        # build; the same files are already inside the .deb and .rpm above.
-        # One bundle is enough - it is identical for every backend.
+      - name: Bundle shell completions, man pages, and app icon
+        # build.rs writes the completions and man pages to target/release/dist
+        # during the release build; the same files are already inside the .deb
+        # and .rpm above. The app icon comes from data/. One bundle is enough -
+        # it is identical for every backend.
         if: matrix.variant == 'gpu-vulkan'
-        run: |
-          bundle="tonguetyped-${RELEASE_TAG}-completions-and-man"
-          mkdir -p "bundle/${bundle}/completions" "bundle/${bundle}/man"
-          cp target/release/dist/completions/* "bundle/${bundle}/completions/"
-          cp target/release/dist/man/*.1 "bundle/${bundle}/man/"
-          tar -C bundle -czf "release-assets/${bundle}.tar.gz" "$bundle"
+        run: bash scripts/bundle-release.sh "$RELEASE_TAG" target/release/dist release-assets
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux-${{ matrix.variant }}
