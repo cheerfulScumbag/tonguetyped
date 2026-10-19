@@ -653,10 +653,11 @@ Four things to know before choosing a streaming model:
   every other look paints its own recording animation and never live words.
 - **Most streaming models are English-only, but not all.** The small, fast
   Moonshine-streaming models and the English Parakeet port stream English only;
-  the Voxtral-realtime port streams its own multilingual language set and is
-  tagged `live` (no `(en)`) in `model list`. Pick a Whisper (or another
-  multilingual offline) model when a streaming model does not cover your
-  language; you keep the full transcript, just without live text.
+  the multilingual Nemotron 3.5 port and the Voxtral-realtime port stream their
+  own language sets and are tagged `live` (no `(en)`) in `model list`. Pick a
+  Whisper (or another multilingual offline) model when a streaming model does
+  not cover your language; you keep the full transcript, just without live
+  text.
 
 Streaming models are recorded through the model's own native stream (nothing is
 re-decoded on a timer), so the feature costs no extra CPU beyond the model
@@ -671,11 +672,11 @@ ceiling, about 24 s), its text is committed and a fresh stream starts on the
 audio that follows, keeping the live text flowing for a long dictation. Each
 segment boundary is placed in a pause where the audio has one, and the finished
 segments are joined with a single space, so nothing at the seam is dropped or
-duplicated. The unbounded streaming ports (Parakeet, Voxtral-realtime) advertise
-no model cap, but each live segment is still bounded by the decode window
-(`transcription.chunk_seconds`, 30 s by default), so they roll over the same
-way; set `chunk_seconds = 0` to run a single stream to the end of the recording
-instead.
+duplicated. The unbounded streaming ports (Parakeet, Nemotron 3.5,
+Voxtral-realtime) advertise no model cap, but each live segment is still bounded
+by the decode window (`transcription.chunk_seconds`, 30 s by default), so they
+roll over the same way; set `chunk_seconds = 0` to run a single stream to the end
+of the recording instead.
 
 ### Long recordings and file transcription
 
@@ -823,7 +824,7 @@ substitutes a different model or family.
 **A curated catalog.** `src/catalog.rs` tracks reviewed GGUF models from the
 offline families this project has checked against its VAD-then-single-buffer
 pipeline (whisper, parakeet, moonshine, canary, and cohere), plus the streaming
-ports that feed live text (Moonshine-streaming, Parakeet-unified, and
+ports that feed live text (Moonshine-streaming, the Parakeet ports, and
 Voxtral-realtime; see "Live text" above), all published by
 [handy-computer](https://huggingface.co/handy-computer). Each entry is pinned to
 a commit with an expected byte size and SHA-256, and `tonguetyped model list`
