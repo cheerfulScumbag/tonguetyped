@@ -1706,8 +1706,8 @@ pub const VARIANTS: &[VariantInfo] = &[
     },
     // qwen3_asr's cap is the engine's real `max_audio_ms`: its 65,536-token
     // decoder context minus the 48-token prompt overhead and 256-token
-    // generation reserve, at 10 ms per audio token (three stride-2 encoder
-    // convs, 160-sample hop at 16 kHz):
+    // generation reserve, at 80 ms per audio token (eight mel frames per token
+    // at 10 ms per frame; three stride-2 encoder convs, 160-sample hop at 16 kHz):
     //   (65536 - 48 - 256) * 8 * 160 * 1000 / 16000 = 5,218,560 ms.
     VariantInfo {
         variant: "qwen3-asr-1.7b",

@@ -1883,8 +1883,8 @@ mod tests {
     #[test]
     fn qwen3_asr_uses_its_derived_decoder_context_cap() {
         // 5,218 s is the engine's max_audio_ms from the 65,536-token decoder
-        // context (minus the prompt overhead and generation reserve) at 10 ms
-        // per audio token, not a rounded guess.
+        // context (minus the prompt overhead and generation reserve) at 80 ms
+        // per audio token (10 ms per mel frame), not a rounded guess.
         let mut config = Config::default();
         config.model.active_model = "qwen3-asr-1.7b-q4_k_m".to_string();
         config.transcription.chunk_seconds = 0;
