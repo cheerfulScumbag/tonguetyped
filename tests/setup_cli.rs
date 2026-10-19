@@ -104,7 +104,7 @@ fn setup_writes_a_complete_configuration_without_color() {
     assert!(config.startup.autostart);
     assert_eq!(
         std::fs::read_to_string(root.join("autostart/tonguetyped.desktop")).unwrap(),
-        include_str!("../data/tonguetyped.desktop")
+        include_str!("../data/tonguetyped-daemon.desktop")
     );
 
     let output = run_setup(

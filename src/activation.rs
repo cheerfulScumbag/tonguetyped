@@ -56,7 +56,7 @@ const SHORTCUT_RECONFIGURE_TIMEOUT: Duration = Duration::from_secs(120);
 const INSTALLED_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped";
 const DEVELOPMENT_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped.Devel";
 const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
-    include_str!("../data/tonguetyped.desktop"),
+    include_str!("../data/io.github.cheerfulScumbag.tonguetyped.desktop"),
     "NoDisplay=true\n"
 );
 

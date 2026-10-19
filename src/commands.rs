@@ -86,7 +86,7 @@ fn socket_is_alive(sock_path: &std::path::Path) -> bool {
 
 /// Launches `tonguetyped daemon` as a detached child process and returns
 /// immediately - the daemon is a long-running service that must outlive
-/// whichever CLI/TUI invocation started it (see `data/tonguetyped.desktop`'s
+/// whichever CLI/TUI invocation started it (see `data/tonguetyped-daemon.desktop`'s
 /// `Exec=tonguetyped daemon`, used identically for desktop autostart), so it
 /// is spawned as a separate OS process via `current_exe()` rather than as an
 /// in-process tokio task that would die with the dashboard. This re-executes

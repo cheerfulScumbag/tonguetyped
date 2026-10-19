@@ -1,25 +1,97 @@
 use crate::config::Config;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-const DESKTOP_ENTRY: &[u8] = include_bytes!("../data/tonguetyped.desktop");
+const AUTOSTART_ENTRY: &[u8] = include_bytes!("../data/tonguetyped-daemon.desktop");
 const DESKTOP_FILE_NAME: &str = "tonguetyped.desktop";
+const FLATPAK_INFO_PATH: &str = "/.flatpak-info";
+const AUTOSTART_REASON: &str = "Start TongueTyped dictation when you sign in";
+const AUTOSTART_COMMAND: [&str; 2] = ["tonguetyped", "daemon"];
 
 pub fn update(enabled: bool) -> anyhow::Result<()> {
     let _lock = lock()?;
     let mut config = match Config::reload() {
         Ok(config) => config,
-        Err(_) if !enabled => return set_enabled_at(&path()?, false),
+        Err(_) if !enabled => return apply(enabled),
         Err(error) => return Err(error),
     };
+    let previous = config.startup.autostart;
     config.startup.autostart = enabled;
-    save_configuration_locked(&config)
+    save_configuration_locked(&config, Some(previous))
 }
 
 pub fn save_configuration(config: &Config) -> anyhow::Result<()> {
     let _lock = lock()?;
-    save_configuration_locked(config)
+    let previous = Config::reload().ok().map(|config| config.startup.autostart);
+    save_configuration_locked(config, previous)
+}
+
+fn save_configuration_locked(
+    config: &Config,
+    previous_enabled: Option<bool>,
+) -> anyhow::Result<()> {
+    apply(config.startup.autostart)?;
+    if let Err(error) = config.save() {
+        let rollback = previous_enabled.map_or(Ok(()), apply);
+        if let Err(rollback_error) = rollback {
+            anyhow::bail!(
+                "failed to save configuration: {error}; failed to restore autostart: {rollback_error}"
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn apply(enabled: bool) -> anyhow::Result<()> {
+    let path = if is_flatpak() { None } else { Some(path()?) };
+    apply_dispatch(path.as_deref(), enabled, request_background_autostart)
+}
+
+fn apply_dispatch(
+    path: Option<&Path>,
+    enabled: bool,
+    request_background: impl FnOnce(bool) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match path {
+        Some(path) => set_enabled_at(path, enabled),
+        None => request_background(enabled),
+    }
+}
+
+fn request_background_autostart(enabled: bool) -> anyhow::Result<()> {
+    crate::activation::portal_runtime().block_on(async {
+        let request = ashpd::desktop::background::Background::request()
+            .reason(AUTOSTART_REASON)
+            .auto_start(enabled)
+            .command(AUTOSTART_COMMAND)
+            .dbus_activatable(false)
+            .send()
+            .await?;
+        let response = request.response()?;
+        portal_result(enabled, response.auto_start())
+    })
+}
+
+fn portal_result(requested: bool, reported: bool) -> anyhow::Result<()> {
+    if requested == reported {
+        Ok(())
+    } else if requested {
+        anyhow::bail!("the desktop did not enable autostart")
+    } else {
+        anyhow::bail!("the desktop did not disable autostart")
+    }
+}
+
+fn is_flatpak() -> bool {
+    let flatpak_id = std::env::var_os("FLATPAK_ID");
+    flatpak_detected(flatpak_id.as_deref(), Path::new(FLATPAK_INFO_PATH).exists())
+}
+
+fn flatpak_detected(flatpak_id: Option<&OsStr>, info_file_exists: bool) -> bool {
+    info_file_exists || flatpak_id.is_some_and(|id| !id.is_empty())
 }
 
 fn path() -> anyhow::Result<PathBuf> {
@@ -51,52 +123,19 @@ fn lock() -> anyhow::Result<File> {
     Ok(file)
 }
 
-fn save_configuration_locked(config: &Config) -> anyhow::Result<()> {
-    let path = path()?;
-    let previous = match fs::read(&path) {
-        Ok(content) => Some(content),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-
-    set_enabled_at(&path, config.startup.autostart)?;
-    if let Err(error) = config.save() {
-        if let Err(rollback_error) = restore(&path, previous.as_deref()) {
-            anyhow::bail!(
-                "failed to save configuration: {error}; failed to restore autostart entry: {rollback_error}"
-            );
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
 fn set_enabled_at(path: &Path, enabled: bool) -> anyhow::Result<()> {
     if enabled {
         let directory = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("autostart path has no parent directory"))?;
         fs::create_dir_all(directory)?;
-        crate::config::atomic_write(path, DESKTOP_ENTRY)
+        crate::config::atomic_write(path, AUTOSTART_ENTRY)
     } else {
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
         }
-    }
-}
-
-fn restore(path: &Path, previous: Option<&[u8]>) -> anyhow::Result<()> {
-    match previous {
-        Some(content) => {
-            let directory = path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("autostart path has no parent directory"))?;
-            fs::create_dir_all(directory)?;
-            crate::config::atomic_write(path, content)
-        }
-        None => set_enabled_at(path, false),
     }
 }
 
@@ -121,19 +160,75 @@ mod tests {
         let path = root.join("autostart").join(DESKTOP_FILE_NAME);
 
         set_enabled_at(&path, true).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), DESKTOP_ENTRY);
+        assert_eq!(fs::read(&path).unwrap(), AUTOSTART_ENTRY);
 
         fs::write(&path, "outdated entry").unwrap();
         set_enabled_at(&path, true).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), DESKTOP_ENTRY);
+        assert_eq!(fs::read(&path).unwrap(), AUTOSTART_ENTRY);
 
         set_enabled_at(&path, false).unwrap();
         set_enabled_at(&path, false).unwrap();
         assert!(!path.exists());
 
         set_enabled_at(&path, true).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), DESKTOP_ENTRY);
+        assert_eq!(fs::read(&path).unwrap(), AUTOSTART_ENTRY);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn desktop_file_backend_writes_entry_without_using_the_portal() {
+        let root = test_root("desktop-file");
+        let path = root.join("autostart").join(DESKTOP_FILE_NAME);
+
+        apply_dispatch(Some(&path), true, |_| {
+            panic!("the desktop-file backend must not request portal autostart")
+        })
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), AUTOSTART_ENTRY);
+
+        apply_dispatch(Some(&path), false, |_| {
+            panic!("the desktop-file backend must not request portal autostart")
+        })
+        .unwrap();
+        assert!(!path.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn flatpak_backend_requests_portal_without_writing_desktop_entry() {
+        let root = test_root("flatpak");
+        let path = root.join("autostart").join(DESKTOP_FILE_NAME);
+        let requested = std::cell::Cell::new(None);
+
+        apply_dispatch(None, true, |enabled| {
+            requested.set(Some(enabled));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(requested.get(), Some(true));
+        assert!(!path.exists());
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn portal_result_requires_the_requested_state() {
+        assert!(portal_result(true, true).is_ok());
+        assert!(portal_result(false, false).is_ok());
+        assert!(portal_result(true, false).is_err());
+        assert!(portal_result(false, true).is_err());
+    }
+
+    #[test]
+    fn flatpak_detection_uses_the_app_id_or_the_info_file() {
+        assert!(!flatpak_detected(None, false));
+        assert!(flatpak_detected(
+            Some(OsStr::new("io.github.cheerfulScumbag.tonguetyped")),
+            false
+        ));
+        assert!(flatpak_detected(None, true));
+        assert!(!flatpak_detected(Some(OsStr::new("")), false));
     }
 }
