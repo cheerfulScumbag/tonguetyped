@@ -1014,18 +1014,18 @@ impl ConsoleState {
             return;
         };
         self.shortcut_handle = None;
+        if let Ok(ReconfigureOutcome::Changed {
+            trigger_description,
+        }) = &outcome
+        {
+            self.config.activation.keybind = crate::activation::keybind_label(trigger_description);
+        }
         if self.reopen_shortcut_dialog {
             self.reopen_shortcut_dialog = false;
             if self.step == StepKind::Shortcut {
                 self.start_shortcut_reconfigure();
             }
             return;
-        }
-        if let Ok(ReconfigureOutcome::Changed {
-            trigger_description,
-        }) = &outcome
-        {
-            self.config.activation.keybind = crate::activation::keybind_label(trigger_description);
         }
         self.shortcut_feedback = Some(outcome);
     }

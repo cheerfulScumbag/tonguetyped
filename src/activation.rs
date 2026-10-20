@@ -71,6 +71,10 @@ const SHORTCUT_STARTUP_REASSERT_DELAY: Duration = Duration::from_secs(2);
 /// machine with no portal does not spin.
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+/// Consecutive connect/bind failures tolerated before the listener reports
+/// `Failed` instead of `Initializing`. The supervisor keeps retrying either
+/// way; this only changes what the status truthfully reports.
+const CONSECUTIVE_FAILURES_BEFORE_FAILED: u32 = 2;
 const INSTALLED_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped";
 const DEVELOPMENT_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped.Devel";
 const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
@@ -572,20 +576,6 @@ impl RetryBackoff {
     }
 }
 
-/// Which status the listener is in, independent of the live portal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListenerPhase {
-    Reconnecting,
-    Failed,
-}
-
-fn listener_status(phase: ListenerPhase) -> crate::ipc::ShortcutStatus {
-    match phase {
-        ListenerPhase::Reconnecting => crate::ipc::ShortcutStatus::Initializing,
-        ListenerPhase::Failed => crate::ipc::ShortcutStatus::Failed,
-    }
-}
-
 /// A session with a key bound is `Available`; one the desktop reports with no
 /// key is `Unbound`, never a silent "available".
 fn bound_status(trigger: &str) -> crate::ipc::ShortcutStatus {
@@ -667,6 +657,7 @@ impl SessionConnector for PortalConnector {
 trait SupervisorSink: Send + Sync {
     fn binding_reported(&self, trigger: String);
     fn shortcut_state(&self, status: crate::ipc::ShortcutStatus, error: Option<String>);
+    fn shortcut_failed(&self, error: String);
     fn activation(&self, pressed: bool) -> SessionFuture<'_, ()>;
 }
 
@@ -677,6 +668,10 @@ impl SupervisorSink for Coordinator {
 
     fn shortcut_state(&self, status: crate::ipc::ShortcutStatus, error: Option<String>) {
         self.set_shortcut_state(status, error);
+    }
+
+    fn shortcut_failed(&self, error: String) {
+        self.set_runtime_error(error);
     }
 
     fn activation(&self, pressed: bool) -> SessionFuture<'_, ()> {
@@ -814,10 +809,12 @@ async fn supervise<K, S, C>(
     C: SupervisorSink + 'static,
 {
     let mut backoff = RetryBackoff::default();
+    let mut consecutive_failures: u32 = 0;
     loop {
         match connector.connect().await {
             Ok(mut session) => {
                 backoff.reset();
+                consecutive_failures = 0;
                 // The bind above is the app's only source of truth for what is
                 // actually bound: persist whatever the desktop reports so
                 // `config` never claims a key TongueTyped chose.
@@ -830,17 +827,22 @@ async fn supervise<K, S, C>(
                             format!("activation listener lost its session: {error}; reconnecting");
                         tracing::warn!("{message}");
                         coordinator.shortcut_state(
-                            listener_status(ListenerPhase::Reconnecting),
+                            crate::ipc::ShortcutStatus::Initializing,
                             Some(message),
                         );
                     }
                 }
             }
             Err(error) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
                 let message = format!("activation listener failed: {error}; retrying");
                 tracing::warn!("{message}");
-                coordinator
-                    .shortcut_state(listener_status(ListenerPhase::Reconnecting), Some(message));
+                if consecutive_failures >= CONSECUTIVE_FAILURES_BEFORE_FAILED {
+                    coordinator.shortcut_failed(message);
+                } else {
+                    coordinator
+                        .shortcut_state(crate::ipc::ShortcutStatus::Initializing, Some(message));
+                }
             }
         }
 
@@ -1473,18 +1475,6 @@ mod tests {
     }
 
     #[test]
-    fn listener_status_distinguishes_reconnecting_from_failed() {
-        assert_eq!(
-            listener_status(ListenerPhase::Reconnecting),
-            crate::ipc::ShortcutStatus::Initializing
-        );
-        assert_eq!(
-            listener_status(ListenerPhase::Failed),
-            crate::ipc::ShortcutStatus::Failed
-        );
-    }
-
-    #[test]
     fn a_bound_action_with_no_key_is_unbound_not_available() {
         assert_eq!(
             bound_status("Super+O"),
@@ -1507,6 +1497,13 @@ mod tests {
 
         fn shortcut_state(&self, status: crate::ipc::ShortcutStatus, error: Option<String>) {
             self.states.lock().unwrap().push((status, error));
+        }
+
+        fn shortcut_failed(&self, error: String) {
+            self.states
+                .lock()
+                .unwrap()
+                .push((crate::ipc::ShortcutStatus::Failed, Some(error)));
         }
 
         fn activation(&self, pressed: bool) -> SessionFuture<'_, ()> {
@@ -1708,6 +1705,43 @@ mod tests {
         );
 
         drop(sender);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn persistent_bind_failure_reports_failed_instead_of_reconnecting() {
+        let (connector, _connects) = FakeConnector::new(Vec::new());
+        let sink = Arc::new(FakeSink::default());
+        let (_commands, command_rx) = mpsc::channel(8);
+        let task = tokio::spawn(supervise(
+            connector,
+            sink.clone(),
+            command_rx,
+            fast_schedule(),
+        ));
+
+        wait_until(
+            || {
+                sink.states.lock().unwrap().iter().any(|(status, error)| {
+                    *status == crate::ipc::ShortcutStatus::Failed
+                        && error
+                            .as_deref()
+                            .is_some_and(|text| text.contains("portal unavailable"))
+                })
+            },
+            "a persistent bind failure to be reported as failed",
+        )
+        .await;
+        assert!(
+            sink.states
+                .lock()
+                .unwrap()
+                .iter()
+                .take_while(|(status, _)| *status != crate::ipc::ShortcutStatus::Failed)
+                .all(|(status, _)| *status == crate::ipc::ShortcutStatus::Initializing),
+            "earlier retries must stay initializing until the failure is persistent"
+        );
+
         task.abort();
     }
 

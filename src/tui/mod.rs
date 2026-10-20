@@ -528,6 +528,9 @@ impl App {
                     }
                     _ => false,
                 };
+                if matches!(&outcome, Ok(activation::ReconfigureOutcome::Changed { .. })) {
+                    self.apply_shortcut_dialog_outcome(outcome);
+                }
                 if still_open {
                     self.start_shortcut_action(Some(0));
                 }
@@ -3186,6 +3189,30 @@ mod tests {
         assert!(
             !app.reopen_shortcut_dialog,
             "keeping the current binding must cancel the scheduled reopen"
+        );
+        assert!(app.shortcut_dialog.is_none());
+    }
+
+    #[test]
+    fn reopened_shortcut_dialog_applies_a_changed_outcome() {
+        // As above: an out-of-range recording limit makes `save()` fail before
+        // it writes, so the assertion stays about the in-memory config.
+        let mut config = Config::default();
+        config.transcription.max_recording_seconds = 0;
+        let mut app = App::new(config);
+        app.open_setting(SettingId::Shortcut);
+        app.reopen_shortcut_dialog = true;
+        app.shortcut_dialog = Some(setup::ReconfigureHandle::for_test(Arc::new(Mutex::new(
+            Some(Ok(activation::ReconfigureOutcome::Changed {
+                trigger_description: "Meta+O".to_string(),
+            })),
+        ))));
+
+        app.poll_shortcut_handles();
+
+        assert_eq!(
+            app.config.activation.keybind, "Super+O",
+            "a changed outcome that lands before the scheduled reopen must not be dropped"
         );
         assert!(app.shortcut_dialog.is_none());
     }
