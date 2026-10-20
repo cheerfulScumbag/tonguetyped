@@ -41,9 +41,10 @@ Three build details are deliberate:
   registers the ONNX operator schemas itself, so leaving ONNX's static
   registration on registers every schema twice and floods stderr.
 
-The top-level manifest cleans headers, CMake files, pkg-config files, and
-static archives out of the final app. Only the shared libraries the app needs
-remain.
+The top-level manifest cleans headers, CMake files, pkg-config files, static
+archives, and the dependency build tools (`flatc`, `protoc`, the cpuinfo tools,
+and the protobuf compiler libraries) out of the final app. Only the shared
+libraries the app needs remain.
 
 ## Prerequisites
 
@@ -73,15 +74,20 @@ flatpak-builder --user --force-clean \
   flatpak/io.github.cheerfulScumbag.tonguetyped.yml
 ```
 
-If `flatpak-builder` is not installed, use the Flatpak builder app instead:
+If `flatpak-builder` is not installed, use the Flatpak builder app instead.
+The app sandbox sets `XDG_DATA_HOME`, which makes `flatpak-builder` look for
+the SDK in the Builder app's private data directory instead of the host's
+Flatpak installations. Clear that variable inside the sandbox so the SDK and
+runtime installed with `flatpak install --user` are found:
 
 ```sh
-flatpak run --command=flatpak-builder org.flatpak.Builder \
-  --user --force-clean \
-  --state-dir="$PWD/flatpak/.state" \
-  --repo="$PWD/flatpak/.repo" \
-  "$PWD/flatpak/.build" \
-  flatpak/io.github.cheerfulScumbag.tonguetyped.yml
+flatpak run --command=sh org.flatpak.Builder -c \
+  'env -u XDG_DATA_HOME flatpak-builder \
+    --user --force-clean \
+    --state-dir="$PWD/flatpak/.state" \
+    --repo="$PWD/flatpak/.repo" \
+    "$PWD/flatpak/.build" \
+    flatpak/io.github.cheerfulScumbag.tonguetyped.yml'
 ```
 
 Install and run the local build:

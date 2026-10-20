@@ -29,7 +29,15 @@ cleanup:
   - /include
   - /lib/*.a
   - /lib/cmake
+  - /lib/libprotoc*
+  - /lib/libprotobuf-lite*
   - /lib/pkgconfig
+  - /bin/cache-info
+  - /bin/cpuid-dump
+  - /bin/cpu-info
+  - /bin/flatc
+  - /bin/isa-info
+  - /bin/protoc*
   - /share/cmake
   - /share/pkgconfig
 build-options:
