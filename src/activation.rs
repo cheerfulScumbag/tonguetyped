@@ -1,12 +1,16 @@
 use crate::coordinator::Coordinator;
 use anyhow::Context;
-use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut, ShortcutsChanged};
+use ashpd::desktop::global_shortcuts::{
+    Activated, Deactivated, GlobalShortcuts, NewShortcut, ShortcutsChanged,
+};
 use ashpd::desktop::Session;
 use futures_util::{Stream, StreamExt};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 
 /// The id the desktop stores this app's activation shortcut under. It is part
 /// of the shortcut's *persisted identity*, not a value that is safe to reuse.
@@ -53,6 +57,22 @@ const SHORTCUT_PRESS_TIMEOUT: Duration = Duration::from_secs(15);
 // `ShortcutsChanged` event ever arrives, so the wait settles on the unchanged
 // binding instead of reporting an error (see `ReconfigureOutcome::Unchanged`).
 const SHORTCUT_RECONFIGURE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often the daemon re-asserts its own binding. On KDE the action's
+/// presence is one shared flag per application id, and any second
+/// GlobalShortcuts session for the same id that goes away clears it. Binding
+/// again on the daemon's existing session is cheap (the action already
+/// exists, so no dialog appears) and re-marks the action present, so a stray
+/// helper session cannot silently deactivate the shortcut for longer than
+/// this interval. The first re-assert also runs shortly after startup to
+/// cover a manual-daemon handover whose old session closes after the new
+/// daemon's first bind.
+const SHORTCUT_REASSERT_INTERVAL: Duration = Duration::from_secs(30);
+const SHORTCUT_STARTUP_REASSERT_DELAY: Duration = Duration::from_secs(2);
+/// Reconnect backoff after the listener loses its session or cannot bind:
+/// short enough to recover from a portal restart promptly, capped so a
+/// machine with no portal does not spin.
+const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 const INSTALLED_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped";
 const DEVELOPMENT_APPLICATION_ID: &str = "io.github.cheerfulScumbag.tonguetyped.Devel";
 const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
@@ -231,10 +251,9 @@ async fn purge_legacy_shortcuts<'a>(
 /// whatever trigger the desktop already has bound for the action (empty when
 /// none), never an app-chosen key. Any stale shortcut from an older release is
 /// purged first (see [`purge_legacy_shortcuts`]) so a user gets one action,
-/// unbound, with no leftover default. Shared by `listen()`,
-/// `test_shortcut_binding()`, and `reconfigure_shortcut()`, all three of which
-/// need a bound shortcut before they can listen for presses or open the native
-/// reconfigure dialog.
+/// unbound, with no leftover default. Shared by the daemon supervisor and the
+/// standalone `test_shortcut_binding()`/`reconfigure_shortcut()` paths, which
+/// only run when no daemon owns the session.
 async fn bind_activation_shortcut<'a>(
     portal: &GlobalShortcuts<'a>,
     session: &Session<'a, GlobalShortcuts<'a>>,
@@ -255,6 +274,7 @@ async fn bind_activation_shortcut<'a>(
         .ok_or_else(|| anyhow::anyhow!("global shortcuts portal did not bind activation key"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutTestOutcome {
     /// The configured shortcut was actually pressed and observed via the
     /// portal's `Activated` signal - not just accepted by `BindShortcuts`.
@@ -262,11 +282,14 @@ pub enum ShortcutTestOutcome {
     TimedOut,
 }
 
-/// Binds the shortcut and then actually listens for it to be pressed (via
-/// the same `receive_activated()` stream `listen()` uses), instead of only
-/// checking that `bind_shortcuts` accepted the registration. Tests whatever
-/// trigger the desktop currently has bound for the action; the user sets
-/// that trigger through the desktop's own dialog (`reconfigure_shortcut`).
+/// Standalone fallback: binds the shortcut on its own session and listens for
+/// a press. Only used when no daemon is running - a daemon owns the session
+/// otherwise, and this helper session's teardown would deactivate the shared
+/// desktop action (see [`ActivationHandle`]).
+///
+/// Tests whatever trigger the desktop currently has bound for the action; the
+/// user sets that trigger through the desktop's own dialog
+/// (`reconfigure_shortcut`).
 pub async fn test_shortcut_binding() -> Result<ShortcutTestOutcome, String> {
     test_shortcut_binding_inner()
         .await
@@ -450,54 +473,512 @@ pub fn keybind_display(reported: &str) -> String {
     }
 }
 
-pub async fn listen(
-    coordinator: Arc<Coordinator>,
-    ready: tokio::sync::oneshot::Sender<Result<(), String>>,
-) -> anyhow::Result<()> {
-    if let Err(error) = register_host_app().await {
-        let message = format!("failed to register desktop application identity: {error}");
-        let _ = ready.send(Err(message.clone()));
-        anyhow::bail!(message);
-    }
-    let portal = match GlobalShortcuts::new().await {
-        Ok(portal) => portal,
-        Err(error) => {
-            let message = format!("global shortcuts portal unavailable: {error}");
-            let _ = ready.send(Err(message.clone()));
-            anyhow::bail!(message);
-        }
-    };
-    let session = portal.create_session().await?;
-    let reported = match bind_activation_shortcut(&portal, &session).await {
-        Ok(reported) => reported,
-        Err(error) => {
-            let message = error.to_string();
-            let _ = ready.send(Err(message.clone()));
-            anyhow::bail!(message);
-        }
-    };
-    // The registration above is the app's only source of truth for what is
-    // actually bound: persist whatever the desktop reports so `config` never
-    // claims a key TongueTyped chose.
-    coordinator.record_activation_binding(reported);
+/// A command the daemon's IPC dispatcher can send to the one task that owns
+/// the GlobalShortcuts session.
+pub enum ActivationCommand {
+    Test {
+        reply: oneshot::Sender<Result<ShortcutTestOutcome, String>>,
+    },
+    Configure {
+        reply: oneshot::Sender<Result<ReconfigureOutcome, String>>,
+    },
+    CancelConfigure,
+}
 
-    let mut activated = portal.receive_activated().await?;
-    let mut deactivated = portal.receive_deactivated().await?;
-    let _ = ready.send(Ok(()));
-    let mut event_order = EventOrder::default();
+/// The daemon's handle to its activation supervisor.
+///
+/// Shortcut testing and reconfiguring go through this instead of creating a
+/// second GlobalShortcuts session. On KDE a session's application id is the
+/// KGlobalAccel component, and the component's action has one shared
+/// "present" flag: destroying any helper session's QAction marks the action
+/// inactive and unregisters the key grab, while the daemon's still-connected
+/// listener sees nothing. Making the daemon the only owner removes that
+/// competing session entirely.
+#[derive(Clone)]
+pub struct ActivationHandle {
+    commands: mpsc::Sender<ActivationCommand>,
+}
+
+impl ActivationHandle {
+    pub async fn test_shortcut(&self) -> Result<ShortcutTestOutcome, String> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(ActivationCommand::Test { reply })
+            .await
+            .map_err(|_| "the daemon's shortcut listener is not running".to_string())?;
+        result
+            .await
+            .map_err(|_| "the daemon's shortcut listener stopped before replying".to_string())?
+    }
+
+    pub async fn configure_shortcut(&self) -> Result<ReconfigureOutcome, String> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(ActivationCommand::Configure { reply })
+            .await
+            .map_err(|_| "the daemon's shortcut listener is not running".to_string())?;
+        result
+            .await
+            .map_err(|_| "the daemon's shortcut listener stopped before replying".to_string())?
+    }
+
+    pub async fn cancel_configure(&self) {
+        let _ = self.commands.send(ActivationCommand::CancelConfigure).await;
+    }
+}
+
+/// Starts the daemon's activation supervisor and returns its control handle.
+///
+/// The supervisor owns the process's only GlobalShortcuts session for as long
+/// as it can hold one. It rebinds on session close or a failed bind, retries
+/// with bounded backoff, and periodically re-asserts its binding so a stray
+/// helper session (another build, a leftover process) cannot leave the shared
+/// desktop action inactive. This mirrors `libei`'s "one session owned by the
+/// process, reconnect on death" pattern.
+pub fn spawn(coordinator: Arc<Coordinator>) -> ActivationHandle {
+    let (commands, receiver) = mpsc::channel(8);
+    tokio::spawn(supervise(coordinator, receiver));
+    ActivationHandle { commands }
+}
+
+/// Bounded exponential reconnect backoff, split out so the policy is testable
+/// without a portal.
+#[derive(Debug, Default)]
+pub struct RetryBackoff {
+    attempt: u32,
+}
+
+impl RetryBackoff {
+    fn reset(&mut self) {
+        self.attempt = 0;
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        // 1s, 2s, 4s, 8s, 16s, then the 30s cap.
+        let shift = self.attempt.min(5);
+        let delay = RECONNECT_BASE_DELAY
+            .saturating_mul(1u32 << shift)
+            .min(RECONNECT_MAX_DELAY);
+        self.attempt = self.attempt.saturating_add(1);
+        delay
+    }
+}
+
+/// Which status the listener is in, independent of the live portal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenerPhase {
+    Reconnecting,
+    Failed,
+}
+
+fn listener_status(phase: ListenerPhase) -> crate::ipc::ShortcutStatus {
+    match phase {
+        ListenerPhase::Reconnecting => crate::ipc::ShortcutStatus::Initializing,
+        ListenerPhase::Failed => crate::ipc::ShortcutStatus::Failed,
+    }
+}
+
+/// A session with a key bound is `Available`; one the desktop reports with no
+/// key is `Unbound`, never a silent "available".
+fn bound_status(trigger: &str) -> crate::ipc::ShortcutStatus {
+    if trigger.trim().is_empty() {
+        crate::ipc::ShortcutStatus::Unbound
+    } else {
+        crate::ipc::ShortcutStatus::Available
+    }
+}
+
+type ActivatedStream = Pin<Box<dyn Stream<Item = Activated> + Send>>;
+type DeactivatedStream = Pin<Box<dyn Stream<Item = Deactivated> + Send>>;
+type ClosedStream = Pin<Box<dyn Stream<Item = ()> + Send>>;
+
+struct Binding {
+    portal: GlobalShortcuts<'static>,
+    session: Session<'static, GlobalShortcuts<'static>>,
+    activated: ActivatedStream,
+    deactivated: DeactivatedStream,
+    closed: ClosedStream,
+    /// The trigger the desktop last reported, in the desktop's own wording.
+    trigger: String,
+}
+
+async fn connect() -> anyhow::Result<Binding> {
+    register_host_app()
+        .await
+        .context("could not register the desktop application identity")?;
+    let portal = GlobalShortcuts::new()
+        .await
+        .context("global shortcuts portal unavailable")?;
+    let session = portal
+        .create_session()
+        .await
+        .context("could not create a global shortcuts session")?;
+    let trigger = bind_activation_shortcut(&portal, &session).await?;
+    let activated = Box::pin(
+        portal
+            .receive_activated()
+            .await
+            .context("could not subscribe to shortcut activations")?,
+    );
+    let deactivated = Box::pin(
+        portal
+            .receive_deactivated()
+            .await
+            .context("could not subscribe to shortcut deactivations")?,
+    );
+    let closed = Box::pin(
+        session
+            .receive_closed()
+            .await
+            .context("could not watch the shortcut session")?,
+    );
+    Ok(Binding {
+        portal,
+        session,
+        activated,
+        deactivated,
+        closed,
+        trigger,
+    })
+}
+
+async fn supervise(coordinator: Arc<Coordinator>, mut commands: mpsc::Receiver<ActivationCommand>) {
+    let mut backoff = RetryBackoff::default();
     loop {
-        let event = tokio::select! {
-            event = activated.next() => event.map(|event| (event.timestamp(), event.shortcut_id() == SHORTCUT_ID, true)),
-            event = deactivated.next() => event.map(|event| (event.timestamp(), event.shortcut_id() == SHORTCUT_ID, false)),
-        };
-        let Some(event) = event else {
-            anyhow::bail!("global shortcuts event stream closed");
-        };
-        let (timestamp, is_activation, pressed) = event;
-        if is_activation {
-            for pressed in event_order.push(timestamp, pressed) {
-                if let Err(error) = coordinator.handle_activation(pressed).await {
-                    tracing::error!("activation command failed: {error}");
+        match connect().await {
+            Ok(mut binding) => {
+                backoff.reset();
+                // The bind above is the app's only source of truth for what is
+                // actually bound: persist whatever the desktop reports so
+                // `config` never claims a key TongueTyped chose.
+                coordinator.record_activation_binding(binding.trigger.clone());
+                coordinator.set_shortcut_state(bound_status(&binding.trigger), None);
+                match run_bound(&coordinator, &mut binding, &mut commands).await {
+                    SessionEnd::CommandsClosed => return,
+                    SessionEnd::Lost(error) => {
+                        let message =
+                            format!("activation listener lost its session: {error}; reconnecting");
+                        tracing::warn!("{message}");
+                        coordinator.set_shortcut_state(
+                            listener_status(ListenerPhase::Reconnecting),
+                            Some(message),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                let message = format!("activation listener failed: {error}; retrying");
+                tracing::warn!("{message}");
+                coordinator.set_shortcut_state(
+                    listener_status(ListenerPhase::Reconnecting),
+                    Some(message),
+                );
+            }
+        }
+
+        let delay = backoff.next_delay();
+        let wait = tokio::time::sleep(delay);
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                _ = &mut wait => break,
+                command = commands.recv() => match command {
+                    Some(command) => reply_while_reconnecting(command),
+                    None => return,
+                },
+            }
+        }
+    }
+}
+
+fn reply_while_reconnecting(command: ActivationCommand) {
+    let message = "the shortcut listener is reconnecting; try again in a moment".to_string();
+    match command {
+        ActivationCommand::Test { reply } => {
+            let _ = reply.send(Err(message));
+        }
+        ActivationCommand::Configure { reply } => {
+            let _ = reply.send(Err(message));
+        }
+        ActivationCommand::CancelConfigure => {}
+    }
+}
+
+enum SessionEnd {
+    CommandsClosed,
+    Lost(String),
+}
+
+struct TestWait {
+    reply: oneshot::Sender<Result<ShortcutTestOutcome, String>>,
+    deadline: tokio::time::Instant,
+}
+
+async fn run_bound(
+    coordinator: &Arc<Coordinator>,
+    binding: &mut Binding,
+    commands: &mut mpsc::Receiver<ActivationCommand>,
+) -> SessionEnd {
+    let mut event_order = EventOrder::default();
+    let mut test_wait: Option<TestWait> = None;
+    // A test press is consumed by the test rather than toggling dictation;
+    // its matching release is swallowed too so the hold-release ordering does
+    // not see a release with no press.
+    let mut swallow_release = false;
+    let mut reassert = tokio::time::interval_at(
+        tokio::time::Instant::now() + SHORTCUT_STARTUP_REASSERT_DELAY,
+        SHORTCUT_REASSERT_INTERVAL,
+    );
+    reassert.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Events are filtered by shortcut id, not by originating session:
+    // `ashpd`'s `Session::path()` is `pub(crate)`, so the app cannot compare
+    // `Activated::session_handle()` with its own session. The single-owner
+    // rule is the defense - the daemon holds the process's only session, so
+    // there is no other TongueTyped session whose presses could fan out here.
+    loop {
+        let test_timer = sleep_until_optional(test_wait.as_ref().map(|wait| wait.deadline));
+        tokio::select! {
+            event = binding.activated.next() => {
+                let Some(event) = event else {
+                    return SessionEnd::Lost(
+                        "global shortcuts activation stream closed".to_string(),
+                    );
+                };
+                let matches = event.shortcut_id() == SHORTCUT_ID;
+                if matches {
+                    if let Some(wait) = test_wait.take() {
+                        swallow_release = true;
+                        let _ = wait.reply.send(Ok(ShortcutTestOutcome::Pressed));
+                        continue;
+                    }
+                    for pressed in event_order.push(event.timestamp(), true) {
+                        handle_activated(coordinator, pressed).await;
+                    }
+                }
+            }
+            event = binding.deactivated.next() => {
+                let Some(event) = event else {
+                    return SessionEnd::Lost(
+                        "global shortcuts deactivation stream closed".to_string(),
+                    );
+                };
+                if event.shortcut_id() != SHORTCUT_ID {
+                    continue;
+                }
+                if swallow_release {
+                    swallow_release = false;
+                    continue;
+                }
+                for pressed in event_order.push(event.timestamp(), false) {
+                    handle_activated(coordinator, pressed).await;
+                }
+            }
+            event = binding.closed.next() => {
+                return SessionEnd::Lost(match event {
+                    Some(()) => "the desktop closed the global shortcuts session".to_string(),
+                    None => "the global shortcuts session-closed stream ended".to_string(),
+                });
+            }
+            command = commands.recv() => {
+                match command {
+                    None => return SessionEnd::CommandsClosed,
+                    Some(ActivationCommand::Test { reply }) => {
+                        if test_wait.is_some() {
+                            let _ = reply
+                                .send(Err("a shortcut test is already running".to_string()));
+                        } else {
+                            test_wait = Some(TestWait {
+                                reply,
+                                deadline: tokio::time::Instant::now() + SHORTCUT_PRESS_TIMEOUT,
+                            });
+                        }
+                    }
+                    Some(ActivationCommand::Configure { reply }) => {
+                        if test_wait.is_some() {
+                            // Let the test finish rather than silently
+                            // swallowing the press the user is about to make.
+                            let _ = reply.send(Err(
+                                "finish the running shortcut test before configuring".to_string(),
+                            ));
+                        } else {
+                            let result = configure_on_session(
+                                binding,
+                                commands,
+                                coordinator,
+                                &mut event_order,
+                                &mut swallow_release,
+                                &mut reassert,
+                            )
+                            .await;
+                            let _ = reply.send(result);
+                        }
+                    }
+                    Some(ActivationCommand::CancelConfigure) => {}
+                }
+            }
+            _ = test_timer => {
+                if let Some(wait) = test_wait.take() {
+                    let _ = wait.reply.send(Ok(ShortcutTestOutcome::TimedOut));
+                }
+            }
+            _ = reassert.tick() => {
+                match bind_activation_shortcut(&binding.portal, &binding.session).await {
+                    Ok(trigger) => {
+                        binding.trigger = trigger.clone();
+                        coordinator.record_activation_binding(trigger.clone());
+                        coordinator.set_shortcut_state(bound_status(&trigger), None);
+                    }
+                    Err(error) => {
+                        coordinator.set_shortcut_state(
+                            listener_status(ListenerPhase::Failed),
+                            Some(format!("shortcut rebind failed: {error}")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_activated(coordinator: &Coordinator, pressed: bool) {
+    if let Err(error) = coordinator.handle_activation(pressed).await {
+        tracing::error!("activation command failed: {error}");
+    }
+}
+
+async fn sleep_until_optional(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Runs the desktop's shortcut editor on the daemon's own session and waits
+/// for the reported trigger. Kept inline in the listener because a session is
+/// not cloneable: the alternative would be a second session, which is the bug.
+/// Presses still reach dictation while the editor is open, and the periodic
+/// re-assert keeps running.
+async fn configure_on_session(
+    binding: &mut Binding,
+    commands: &mut mpsc::Receiver<ActivationCommand>,
+    coordinator: &Arc<Coordinator>,
+    event_order: &mut EventOrder,
+    swallow_release: &mut bool,
+    reassert: &mut tokio::time::Interval,
+) -> Result<ReconfigureOutcome, String> {
+    // Subscribe before opening the dialog: it can close and emit
+    // ShortcutsChanged at any point after ConfigureShortcuts is called, and
+    // that call returns immediately without waiting for the dialog.
+    let mut changed = binding
+        .portal
+        .receive_shortcuts_changed()
+        .await
+        .map_err(|error| format!("could not watch shortcut changes: {error}"))?;
+    binding
+        .portal
+        .configure_shortcuts(&binding.session, None, None)
+        .await
+        .map_err(|error| format!("could not open the desktop shortcut editor: {error}"))?;
+
+    let deadline = tokio::time::Instant::now() + SHORTCUT_RECONFIGURE_TIMEOUT;
+    loop {
+        tokio::select! {
+            event = changed.next() => {
+                match event {
+                    Some(event) => {
+                        if let Some(trigger) = shortcut_trigger(&event) {
+                            binding.trigger = trigger.clone();
+                            coordinator.record_activation_binding(trigger.clone());
+                            coordinator.set_shortcut_state(bound_status(&trigger), None);
+                            return Ok(ReconfigureOutcome::Changed {
+                                trigger_description: trigger,
+                            });
+                        }
+                    }
+                    None => {
+                        return Err("the desktop's shortcut change stream closed".to_string());
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Ok(ReconfigureOutcome::Unchanged {
+                    trigger_description: binding.trigger.clone(),
+                });
+            }
+            command = commands.recv() => {
+                match command {
+                    None => return Err("the daemon is shutting down".to_string()),
+                    Some(ActivationCommand::CancelConfigure) => {
+                        return Ok(ReconfigureOutcome::Unchanged {
+                            trigger_description: binding.trigger.clone(),
+                        });
+                    }
+                    Some(ActivationCommand::Test { reply }) => {
+                        let _ = reply.send(Err(
+                            "a shortcut configuration dialog is open".to_string()
+                        ));
+                    }
+                    Some(ActivationCommand::Configure { reply }) => {
+                        let _ = reply.send(Err(
+                            "a shortcut configuration dialog is already open".to_string()
+                        ));
+                    }
+                }
+            }
+            event = binding.closed.next() => {
+                return Err(match event {
+                    Some(()) => {
+                        "the desktop closed the global shortcuts session while configuring"
+                            .to_string()
+                    }
+                    None => {
+                        "the global shortcuts session-closed stream ended while configuring"
+                            .to_string()
+                    }
+                });
+            }
+            event = binding.activated.next() => {
+                let Some(event) = event else {
+                    return Err(
+                        "global shortcuts activation stream closed while configuring".to_string(),
+                    );
+                };
+                if event.shortcut_id() == SHORTCUT_ID {
+                    for pressed in event_order.push(event.timestamp(), true) {
+                        handle_activated(coordinator, pressed).await;
+                    }
+                }
+            }
+            event = binding.deactivated.next() => {
+                let Some(event) = event else {
+                    return Err(
+                        "global shortcuts deactivation stream closed while configuring".to_string(),
+                    );
+                };
+                if event.shortcut_id() == SHORTCUT_ID {
+                    if *swallow_release {
+                        *swallow_release = false;
+                    } else {
+                        for pressed in event_order.push(event.timestamp(), false) {
+                            handle_activated(coordinator, pressed).await;
+                        }
+                    }
+                }
+            }
+            _ = reassert.tick() => {
+                match bind_activation_shortcut(&binding.portal, &binding.session).await {
+                    Ok(trigger) => {
+                        binding.trigger = trigger.clone();
+                        coordinator.record_activation_binding(trigger.clone());
+                        coordinator.set_shortcut_state(bound_status(&trigger), None);
+                    }
+                    Err(error) => {
+                        coordinator.set_shortcut_state(
+                            listener_status(ListenerPhase::Failed),
+                            Some(format!("shortcut rebind failed: {error}")),
+                        );
+                    }
                 }
             }
         }
@@ -773,5 +1254,45 @@ mod tests {
         assert!(matches!(changed, ReconfigureOutcome::Changed { .. }));
         assert!(matches!(unchanged, ReconfigureOutcome::Unchanged { .. }));
         assert_ne!(changed, unchanged);
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_then_stays_bounded() {
+        let mut backoff = RetryBackoff::default();
+        let delays: Vec<Duration> = (0..8).map(|_| backoff.next_delay()).collect();
+        assert_eq!(delays[0], Duration::from_secs(1));
+        assert_eq!(delays[1], Duration::from_secs(2));
+        assert_eq!(delays[2], Duration::from_secs(4));
+        assert_eq!(delays[3], Duration::from_secs(8));
+        assert_eq!(delays[4], Duration::from_secs(16));
+        assert_eq!(delays[5], RECONNECT_MAX_DELAY);
+        assert_eq!(delays[7], RECONNECT_MAX_DELAY);
+        assert!(delays.iter().all(|delay| *delay <= RECONNECT_MAX_DELAY));
+
+        // A successful bind resets the sequence to the first short delay.
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn listener_status_distinguishes_reconnecting_from_failed() {
+        assert_eq!(
+            listener_status(ListenerPhase::Reconnecting),
+            crate::ipc::ShortcutStatus::Initializing
+        );
+        assert_eq!(
+            listener_status(ListenerPhase::Failed),
+            crate::ipc::ShortcutStatus::Failed
+        );
+    }
+
+    #[test]
+    fn a_bound_action_with_no_key_is_unbound_not_available() {
+        assert_eq!(
+            bound_status("Super+O"),
+            crate::ipc::ShortcutStatus::Available
+        );
+        assert_eq!(bound_status(""), crate::ipc::ShortcutStatus::Unbound);
+        assert_eq!(bound_status("   "), crate::ipc::ShortcutStatus::Unbound);
     }
 }

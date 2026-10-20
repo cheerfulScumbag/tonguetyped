@@ -37,7 +37,16 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Setup) => setup::run()?,
         Some(Commands::Daemon { command: None }) => {
             let config = config::Config::load()?;
-            daemon::run_daemon(config).await?;
+            if let Err(error) = daemon::run_daemon(config).await {
+                // "Another daemon owns the lock" is not a crash to retry: the
+                // systemd units skip this exit status, so the unit fails once
+                // instead of restarting forever behind a manual daemon.
+                if error.is::<daemon::DaemonAlreadyRunning>() {
+                    eprintln!("Error: {error}");
+                    std::process::exit(daemon::EXIT_DAEMON_ALREADY_RUNNING);
+                }
+                return Err(error);
+            }
         }
         Some(Commands::Daemon {
             command: Some(DaemonCommand::Stop),
@@ -97,9 +106,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::ShortcutTest) => {
             println!("Press your shortcut now...");
-            match activation::test_shortcut_binding().await {
+            match commands::test_shortcut().await {
                 Ok(activation::ShortcutTestOutcome::Pressed) => {
-                    println!("Shortcut press detected - the binding works.");
+                    println!("Shortcut press detected - the daemon received it.");
                 }
                 Ok(activation::ShortcutTestOutcome::TimedOut) => {
                     anyhow::bail!(

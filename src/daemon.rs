@@ -64,27 +64,11 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     spawn_config_watcher(coordinator.clone());
     let listener = UnixListener::bind(&sock_path)?;
     let shutdown = Arc::new(tokio::sync::Notify::new());
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let activation = coordinator.clone();
-    let activation_status = coordinator.clone();
-    tokio::spawn(async move {
-        let listener = tokio::spawn(crate::activation::listen(activation, ready_tx));
-        match ready_rx.await {
-            Ok(Ok(())) => activation_status.set_runtime_ready(),
-            Ok(Err(error)) => activation_status.set_runtime_error(error),
-            Err(_) => {}
-        }
-        match listener.await {
-            Ok(Err(error)) => {
-                tracing::error!("activation listener failed: {error}");
-                activation_status.set_runtime_error(format!("activation listener failed: {error}"));
-            }
-            Ok(Ok(())) => activation_status
-                .set_runtime_error("activation listener stopped unexpectedly".to_string()),
-            Err(error) => activation_status
-                .set_runtime_error(format!("activation listener task failed: {error}")),
-        }
-    });
+    // The daemon owns the one GlobalShortcuts session. Its supervisor reports
+    // its own health directly and rebinds after session loss; IPC shortcut
+    // test/configure requests route through this handle instead of opening a
+    // competing helper session.
+    coordinator.set_activation_handle(crate::activation::spawn(coordinator.clone()));
 
     tracing::info!("daemon listening on {}", sock_path.display());
 
@@ -176,6 +160,37 @@ fn spawn_config_watcher(coordinator: Arc<Coordinator>) {
     ));
 }
 
+/// Exit status for "another daemon already holds the instance lock". The
+/// systemd units list it in `RestartPreventExitStatus`, so a second unit start
+/// fails honestly once instead of restarting forever while a manually started
+/// daemon owns the lock.
+pub const EXIT_DAEMON_ALREADY_RUNNING: i32 = 3;
+
+/// Typed "another daemon is already running" outcome, so `main` can map it to
+/// its own exit status instead of anyhow's generic 1.
+#[derive(Debug)]
+pub struct DaemonAlreadyRunning;
+
+impl std::fmt::Display for DaemonAlreadyRunning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("daemon is already running")
+    }
+}
+
+impl std::error::Error for DaemonAlreadyRunning {}
+
+/// The process exit status for a failed daemon start. Only "another daemon is
+/// already running" gets its own status; every other failure stays 1 and keeps
+/// systemd's `Restart=on-failure` behavior.
+pub fn exit_code_for_error(error: &anyhow::Error) -> i32 {
+    if error.is::<DaemonAlreadyRunning>() {
+        EXIT_DAEMON_ALREADY_RUNNING
+    } else {
+        1
+    }
+}
+
+#[derive(Debug)]
 struct InstanceLock {
     _file: File,
 }
@@ -196,10 +211,10 @@ fn acquire_instance_lock_at(
         .truncate(false)
         .open(path)?;
     file.try_lock()
-        .map_err(|_| anyhow::anyhow!("daemon is already running"))?;
+        .map_err(|_| anyhow::Error::new(DaemonAlreadyRunning))?;
     if sock_path.exists() {
         if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
-            anyhow::bail!("daemon is already running");
+            return Err(anyhow::Error::new(DaemonAlreadyRunning));
         }
         std::fs::remove_file(sock_path)?;
     }
@@ -311,6 +326,54 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
                 tokio::time::timeout(SHUTDOWN_WORKER_TIMEOUT, coordinator.wait_for_worker()).await;
             return Response::Ok;
         }
+        Request::ShortcutTest => {
+            let Some(handle) = coordinator.activation_handle() else {
+                return Response::Error {
+                    message: "the daemon's shortcut listener is not running".to_string(),
+                };
+            };
+            return match handle.test_shortcut().await {
+                Ok(crate::activation::ShortcutTestOutcome::Pressed) => {
+                    Response::ShortcutTest { pressed: true }
+                }
+                Ok(crate::activation::ShortcutTestOutcome::TimedOut) => {
+                    Response::ShortcutTest { pressed: false }
+                }
+                Err(error) => Response::Error {
+                    message: format!("shortcut test failed: {error}"),
+                },
+            };
+        }
+        Request::ConfigureShortcut => {
+            let Some(handle) = coordinator.activation_handle() else {
+                return Response::Error {
+                    message: "the daemon's shortcut listener is not running".to_string(),
+                };
+            };
+            return match handle.configure_shortcut().await {
+                Ok(crate::activation::ReconfigureOutcome::Changed {
+                    trigger_description,
+                }) => Response::ShortcutConfigured {
+                    changed: true,
+                    trigger_description,
+                },
+                Ok(crate::activation::ReconfigureOutcome::Unchanged {
+                    trigger_description,
+                }) => Response::ShortcutConfigured {
+                    changed: false,
+                    trigger_description,
+                },
+                Err(error) => Response::Error {
+                    message: format!("shortcut configuration failed: {error}"),
+                },
+            };
+        }
+        Request::CancelShortcutConfigure => {
+            if let Some(handle) = coordinator.activation_handle() {
+                handle.cancel_configure().await;
+            }
+            return Response::Ok;
+        }
         Request::GetLastResult => {
             let result = coordinator.get_last_result();
             match result {
@@ -354,6 +417,7 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             config_error,
             shortcut_status,
             activation_error,
+            shortcut_trigger,
             model,
             backend,
         } => {
@@ -368,6 +432,7 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
                 config_error,
                 shortcut_status,
                 activation_error,
+                shortcut_trigger,
                 build: Some(crate::build_info::VERSION.to_string()),
                 model: Some(model),
                 backend,
@@ -396,7 +461,20 @@ mod tests {
         let socket_path = root.join("control.sock");
 
         let first = acquire_instance_lock_at(&lock_path, &socket_path).unwrap();
-        assert!(acquire_instance_lock_at(&lock_path, &socket_path).is_err());
+        let duplicate = acquire_instance_lock_at(&lock_path, &socket_path).unwrap_err();
+        assert!(
+            duplicate.is::<DaemonAlreadyRunning>(),
+            "a second daemon must return the typed already-running error"
+        );
+        assert_eq!(duplicate.to_string(), "daemon is already running");
+        assert_eq!(exit_code_for_error(&duplicate), EXIT_DAEMON_ALREADY_RUNNING);
+        assert_eq!(EXIT_DAEMON_ALREADY_RUNNING, 3);
+        // Every other failure keeps the ordinary exit status, so systemd still
+        // restarts a genuinely broken start.
+        assert_eq!(
+            exit_code_for_error(&anyhow::anyhow!("model download failed")),
+            1
+        );
         drop(first);
 
         // A concurrently forked test process can retain the descriptor until exec

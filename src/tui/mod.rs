@@ -338,7 +338,7 @@ struct App {
     shortcut_test: Option<setup::ShortcutTestHandle>,
     shortcut_dialog: Option<setup::ReconfigureHandle>,
     should_quit: bool,
-    daemon_status_cache: Cell<Option<(bool, Instant)>>,
+    daemon_status_cache: RefCell<Option<(DaemonHealth, Instant)>>,
     /// Scroll offset (in wrapped rows) for the current `Screen::Info` pane.
     /// `render_info` clamps it to the wrapped content height each frame, so
     /// the key handler can simply increment/decrement it and a transcript
@@ -363,14 +363,40 @@ struct OverlayPreview {
     pixels: Vec<u8>,
 }
 
-/// How often the home screen's status strip re-probes daemon liveness.
+/// What the home screen's status strip knows about the daemon, refreshed on
+/// `run_loop`'s ticker rather than on every 66ms redraw.
+#[derive(Clone, Default)]
+struct DaemonHealth {
+    running: bool,
+    shortcut_status: Option<ipc::ShortcutStatus>,
+    activation_error: Option<String>,
+}
+
+/// The red warning the home strip shows for a shortcut that is not usable.
+/// `None` when the daemon reports a bound key (or reports nothing, as older
+/// daemons did - the strip does not invent a failure it cannot see).
+fn shortcut_warning(health: &DaemonHealth) -> Option<&'static str> {
+    match health.shortcut_status {
+        Some(ipc::ShortcutStatus::Failed) => Some("failed"),
+        Some(ipc::ShortcutStatus::Unbound) => Some("unbound - no key set"),
+        Some(ipc::ShortcutStatus::Initializing) if health.activation_error.is_some() => {
+            Some("reconnecting")
+        }
+        _ if health.activation_error.is_some() => Some("error"),
+        _ => None,
+    }
+}
+
+/// How often the home screen's status strip re-probes daemon health.
 /// `status_strip_line` renders on every tick of `run_loop`'s 66ms ticker, but
-/// the probe it displays (`commands::daemon_socket_exists`) opens a real
-/// `UnixStream` connection against the daemon's control socket - re-running
-/// that on every redraw would make the daemon's accept loop spawn a task per
-/// frame purely to paint a status string, so the cached result is reused
-/// until it goes stale.
+/// the probe opens a real `UnixStream` connection against the daemon's control
+/// socket and asks for `Status` - re-running that on every redraw would make
+/// the daemon's accept loop spawn a task per frame purely to paint a status
+/// string, so the cached result is reused until it goes stale.
 const DAEMON_STATUS_REFRESH: Duration = Duration::from_secs(1);
+/// Bound on the status request behind the strip, so a wedged daemon cannot
+/// stall the dashboard's event loop.
+const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The Overlay screen's preview band: its total height in rows including the
 /// border and title. Kept small so the preview reads as a preview rather than
@@ -390,7 +416,7 @@ impl App {
             shortcut_test: None,
             shortcut_dialog: None,
             should_quit: false,
-            daemon_status_cache: Cell::new(None),
+            daemon_status_cache: RefCell::new(None),
             info_scroll: Cell::new(0),
             overlay_preview: RefCell::new(None),
         }
@@ -401,6 +427,7 @@ impl App {
         let mut ticker = tokio::time::interval(Duration::from_millis(66));
 
         loop {
+            self.refresh_daemon_health().await;
             self.refresh_screens();
             terminal.draw(|frame| self.render(frame))?;
 
@@ -502,7 +529,7 @@ impl App {
         match outcome {
             Ok(activation::ShortcutTestOutcome::Pressed) => {
                 screen.status = screens::ShortcutStatus::Message {
-                    text: "shortcut press detected - the binding works".to_string(),
+                    text: "shortcut press detected - the shortcut listener received it".to_string(),
                     is_error: false,
                 };
             }
@@ -1655,26 +1682,58 @@ impl App {
         frame.render_widget(Paragraph::new(footer), chunks[1]);
     }
 
-    fn daemon_running_cached(&self) -> bool {
+    /// Refreshes the home strip's daemon snapshot once per
+    /// `DAEMON_STATUS_REFRESH`, using the same `Status` request the CLI prints
+    /// so a dead or unbound shortcut is visible instead of only liveness.
+    /// A daemon that accepts the socket but fails the bounded request is shown
+    /// as not running.
+    async fn refresh_daemon_health(&self) {
         let now = Instant::now();
-        if let Some((running, checked_at)) = self.daemon_status_cache.get() {
-            if now.duration_since(checked_at) < DAEMON_STATUS_REFRESH {
-                return running;
+        if let Some((_, checked_at)) = self.daemon_status_cache.borrow().as_ref() {
+            if now.duration_since(*checked_at) < DAEMON_STATUS_REFRESH {
+                return;
             }
         }
-        let running = commands::daemon_socket_exists();
-        self.daemon_status_cache.set(Some((running, now)));
-        running
+        let health = if commands::daemon_socket_exists() {
+            match tokio::time::timeout(
+                DAEMON_STATUS_TIMEOUT,
+                commands::send_ipc(ipc::Request::Status),
+            )
+            .await
+            {
+                Ok(Ok(ipc::Response::Status {
+                    shortcut_status,
+                    activation_error,
+                    ..
+                })) => DaemonHealth {
+                    running: true,
+                    shortcut_status: Some(shortcut_status),
+                    activation_error,
+                },
+                _ => DaemonHealth::default(),
+            }
+        } else {
+            DaemonHealth::default()
+        };
+        *self.daemon_status_cache.borrow_mut() = Some((health, now));
+    }
+
+    fn daemon_health_cached(&self) -> DaemonHealth {
+        self.daemon_status_cache
+            .borrow()
+            .as_ref()
+            .map(|(health, _)| health.clone())
+            .unwrap_or_default()
     }
 
     fn status_strip_line(&self) -> Line<'static> {
-        let daemon_running = self.daemon_running_cached();
-        let (daemon_text, daemon_color) = if daemon_running {
+        let health = self.daemon_health_cached();
+        let (daemon_text, daemon_color) = if health.running {
             ("running", Color::Green)
         } else {
             ("not running", Color::Red)
         };
-        Line::from(vec![
+        let mut spans = vec![
             Span::raw("Daemon: "),
             Span::styled(daemon_text, Style::default().fg(daemon_color)),
             Span::raw("   Model: "),
@@ -1684,7 +1743,15 @@ impl App {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-        ])
+        ];
+        if let Some(warning) = shortcut_warning(&health) {
+            spans.push(Span::raw("   "));
+            spans.push(Span::styled(
+                format!("Shortcut: {warning}"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+        Line::from(spans)
     }
 
     /// The current value shown next to a Settings-panel row, grounded in the
@@ -2493,9 +2560,11 @@ async fn doctor_task(config: Config) -> Vec<OutputLine> {
 }
 
 async fn shortcut_test_task() -> Vec<OutputLine> {
-    match activation::test_shortcut_binding().await {
+    // Routes through the daemon's own listener when one is running, so the
+    // test cannot open a competing session that deactivates the shortcut.
+    match commands::test_shortcut().await {
         Ok(activation::ShortcutTestOutcome::Pressed) => vec![OutputLine {
-            text: "shortcut press detected - the binding works".to_string(),
+            text: "shortcut press detected - the shortcut listener received it".to_string(),
             is_error: false,
         }],
         Ok(activation::ShortcutTestOutcome::TimedOut) => vec![OutputLine {
@@ -2681,6 +2750,46 @@ async fn backend_activation_task(name: &'static str) -> Vec<OutputLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_strip_warns_about_a_dead_or_unbound_shortcut() {
+        let app = App::new(Config::default());
+        let cache = |health: DaemonHealth| {
+            *app.daemon_status_cache.borrow_mut() = Some((health, Instant::now()));
+        };
+
+        cache(DaemonHealth {
+            running: true,
+            shortcut_status: Some(ipc::ShortcutStatus::Failed),
+            activation_error: Some("activation listener failed".to_string()),
+        });
+        assert!(
+            app.status_strip_line()
+                .to_string()
+                .contains("Shortcut: failed"),
+            "a failed listener must be a red warning on the home strip"
+        );
+
+        cache(DaemonHealth {
+            running: true,
+            shortcut_status: Some(ipc::ShortcutStatus::Unbound),
+            activation_error: None,
+        });
+        assert!(app
+            .status_strip_line()
+            .to_string()
+            .contains("Shortcut: unbound - no key set"));
+
+        cache(DaemonHealth {
+            running: true,
+            shortcut_status: Some(ipc::ShortcutStatus::Available),
+            activation_error: None,
+        });
+        assert!(
+            !app.status_strip_line().to_string().contains("Shortcut:"),
+            "a healthy binding does not need a warning"
+        );
+    }
 
     #[test]
     fn overlay_preview_draws_a_grid_of_half_block_cells() {

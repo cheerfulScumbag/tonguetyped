@@ -39,6 +39,10 @@ in
         ExecStart = helpers.session;
         Restart = "on-failure";
         RestartSec = 2;
+        # Exit 3 means another daemon already holds the lock (for example one
+        # started manually). Retrying cannot succeed while that one lives, so
+        # fail honestly once instead of restarting forever.
+        RestartPreventExitStatus = "3";
       };
     };
 

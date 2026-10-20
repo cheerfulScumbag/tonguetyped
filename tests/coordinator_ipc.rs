@@ -344,11 +344,22 @@ async fn shortcut_listener_health_is_explicit() {
         }
     ));
 
-    coordinator.set_runtime_ready();
+    coordinator.set_shortcut_state(tonguetyped::ipc::ShortcutStatus::Available, None);
     assert!(matches!(
         dispatch(&coordinator, Request::Status).await,
         Response::Status {
             shortcut_status: tonguetyped::ipc::ShortcutStatus::Available,
+            activation_error: None,
+            ..
+        }
+    ));
+
+    // A bound action with no key is reported as unbound, not available.
+    coordinator.set_shortcut_state(tonguetyped::ipc::ShortcutStatus::Unbound, None);
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            shortcut_status: tonguetyped::ipc::ShortcutStatus::Unbound,
             activation_error: None,
             ..
         }

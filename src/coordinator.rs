@@ -923,6 +923,9 @@ pub struct Coordinator {
     clock: Arc<dyn Clock>,
     latency_sink: Arc<dyn LatencySink>,
     worker_finished: Arc<tokio::sync::watch::Sender<()>>,
+    /// The daemon's activation supervisor handle, set once at daemon startup.
+    /// `None` in tests and in a process that never bound a session.
+    activation: std::sync::OnceLock<crate::activation::ActivationHandle>,
 }
 
 impl Coordinator {
@@ -1001,6 +1004,7 @@ impl Coordinator {
                 let (worker_finished, _) = tokio::sync::watch::channel(());
                 Arc::new(worker_finished)
             },
+            activation: std::sync::OnceLock::new(),
         })
     }
 
@@ -1602,16 +1606,28 @@ impl Coordinator {
         }
     }
 
-    pub fn set_runtime_error(&self, error: String) {
-        let mut inner = self.state.lock().unwrap();
-        inner.shortcut_status = crate::ipc::ShortcutStatus::Failed;
-        inner.runtime_error = Some(error);
+    /// Attaches the daemon's activation supervisor so IPC shortcut requests
+    /// can be routed to the one session that owns the desktop action.
+    pub fn set_activation_handle(&self, handle: crate::activation::ActivationHandle) {
+        let _ = self.activation.set(handle);
     }
 
-    pub fn set_runtime_ready(&self) {
+    pub fn activation_handle(&self) -> Option<&crate::activation::ActivationHandle> {
+        self.activation.get()
+    }
+
+    /// Records the listener's own health. The status is only `Available` when
+    /// the desktop reports a key actually bound, `Unbound` when it reports
+    /// none, and `Failed`/`Initializing` with the reason otherwise - never
+    /// "available" merely because a listener task started.
+    pub fn set_shortcut_state(&self, status: crate::ipc::ShortcutStatus, error: Option<String>) {
         let mut inner = self.state.lock().unwrap();
-        inner.shortcut_status = crate::ipc::ShortcutStatus::Available;
-        inner.runtime_error = None;
+        inner.shortcut_status = status;
+        inner.runtime_error = error;
+    }
+
+    pub fn set_runtime_error(&self, error: String) {
+        self.set_shortcut_state(crate::ipc::ShortcutStatus::Failed, Some(error));
     }
 
     /// Record why the last attempt to load the config file failed, so `status`
@@ -1793,6 +1809,10 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         config_error: inner.config_error.clone(),
         shortcut_status: inner.shortcut_status.clone(),
         activation_error: inner.runtime_error.clone(),
+        shortcut_trigger: {
+            let keybind = inner.config.activation.keybind.trim();
+            (!keybind.is_empty()).then(|| keybind.to_string())
+        },
         model: inner.config.model.active_model.clone(),
         backend: crate::inference::BackendPreference::parse(&inner.config.model.preferred_backend)
             .ok()
@@ -1815,6 +1835,8 @@ pub enum CoordinatorResponse {
         config_error: Option<String>,
         shortcut_status: crate::ipc::ShortcutStatus,
         activation_error: Option<String>,
+        /// The key the desktop reports is bound, in TongueTyped's wording.
+        shortcut_trigger: Option<String>,
         /// The configured `model.active_model`.
         model: String,
         /// The backend and device the configured `model.preferred_backend`
