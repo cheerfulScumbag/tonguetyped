@@ -42,9 +42,9 @@ Three build details are deliberate:
   registration on registers every schema twice and floods stderr.
 
 The top-level manifest cleans headers, CMake files, pkg-config files, static
-archives, and the dependency build tools (`flatc`, `protoc`, the cpuinfo tools,
-and the protobuf compiler libraries) out of the final app. Only the shared
-libraries the app needs remain.
+archives, the dependency build tools (`flatc`, `protoc`, and the cpuinfo
+tools), and the unused protobuf libraries (`libprotoc`, `libprotobuf-lite`)
+out of the final app. Only the shared libraries the app needs remain.
 
 ## Prerequisites
 
@@ -112,8 +112,8 @@ The source manifest built, installed, and ran with
   `device: NVIDIA GeForce RTX 4080 SUPER`, `overlay: layer-shell available`,
   `audio: available`, `clipboard: wl-copy found`, and `helpers: libei`.
 - `ldd /app/bin/tonguetyped` resolves `libonnxruntime.so.1` to
-  `/app/lib/libonnxruntime.so.1`, and the packaged app no longer contains the
-  prebuilt ONNX Runtime archive.
+  `/app/lib/libonnxruntime.so.1`, and the packaged app no longer ships the
+  prebuilt ONNX Runtime libraries.
 - A VAD-only run loads the Silero model through the source-built library:
   transcribing a 16 kHz silence WAV returns an empty transcript and exit code
   0 without loading the whisper model or printing errors. This exercises

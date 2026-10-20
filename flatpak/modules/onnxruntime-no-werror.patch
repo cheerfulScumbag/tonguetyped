@@ -3,7 +3,7 @@
 @@ -1081,7 +1081,7 @@
        target_compile_definitions(${target_name} PRIVATE USE_KLEIDIAI)
      endif()
- 
+
 -    set_target_properties(${target_name} PROPERTIES COMPILE_WARNING_AS_ERROR ON)
 +    set_target_properties(${target_name} PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
      if (onnxruntime_USE_CUDA)
