@@ -69,6 +69,9 @@ pub enum Commands {
         test_type: bool,
     },
     /// Bind the desktop shortcut and wait for you to actually press it
+    ///
+    /// While a daemon is running it asks the daemon's own listener instead of
+    /// opening a second shortcut session; with no daemon it uses its own.
     ShortcutTest,
     /// Manage desktop-session autostart
     Autostart {
