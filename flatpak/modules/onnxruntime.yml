@@ -1,0 +1,220 @@
+# Source build of ONNX Runtime for the Silero VAD dependency
+# (`vad-rs` -> `ort` -> `ort-sys`).
+#
+# `ort-sys` 2.0.0-rc.12 targets ONNX Runtime 1.24, so this pins ONNX Runtime
+# 1.24.1, the same release as the prebuilt archive this replaces.
+#
+# ONNX Runtime is configured with `onnxruntime_USE_VCPKG=ON`, which makes its
+# CMake build use `find_package()` for every dependency instead of
+# `FetchContent`. That, plus `FETCHCONTENT_FULLY_DISCONNECTED=ON`, lets the
+# build finish with no network access: every dependency below is built as its
+# own nested module first. The versions follow `cmake/deps.txt` in ONNX
+# Runtime v1.24.1.
+#
+# This module is consumed by the local test manifest. It is not the final
+# Flathub manifest; see ../README.md.
+
+name: onnxruntime
+buildsystem: cmake-ninja
+builddir: true
+subdir: cmake
+build-options:
+  cxxflags: -Wno-error=maybe-uninitialized
+config-opts:
+  - -DCMAKE_BUILD_TYPE=Release
+  - -DCMAKE_INSTALL_PREFIX=/app
+  - -DCMAKE_PREFIX_PATH=/app
+  - -DBOOST_INCLUDEDIR=/app/include
+  - -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+  - -Donnxruntime_BUILD_UNIT_TESTS=OFF
+  - -Donnxruntime_BUILD_BENCHMARKS=OFF
+  - -Donnxruntime_BUILD_SHARED_LIB=ON
+  - -Donnxruntime_USE_VCPKG=ON
+  - -Donnxruntime_USE_FULL_PROTOBUF=ON
+  - -Donnxruntime_ENABLE_PYTHON=OFF
+  - -Donnxruntime_ENABLE_DLPACK=OFF
+  - -Donnxruntime_USE_XNNPACK=OFF
+  - -Donnxruntime_ENABLE_TRAINING=OFF
+  - -Donnxruntime_ENABLE_CPUINFO=ON
+sources:
+  - type: archive
+    url: https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.24.1.tar.gz
+    sha256: 65bc043f5c1f386fc3e04aa2efdab91ac53f5195d4f78fc7e22eb0fe9caeadc6
+    strip-components: 1
+  # ONNX Runtime sets COMPILE_WARNING_AS_ERROR ON for every target. GCC 16
+  # (the 26.08 SDK) adds warnings that older releases did not, so keep the
+  # warnings but do not fail the build on them.
+  - type: patch
+    path: onnxruntime-no-werror.patch
+modules:
+  - name: abseil-cpp
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DCMAKE_CXX_STANDARD=17
+      - -DCMAKE_CXX_STANDARD_REQUIRED=ON
+      - -DABSL_PROPAGATE_CXX_STD=ON
+      - -DBUILD_TESTING=OFF
+    sources:
+      - type: archive
+        url: https://github.com/abseil/abseil-cpp/archive/refs/tags/20250814.0.tar.gz
+        sha256: 9b2b72d4e8367c0b843fa2bcfa2b08debbe3cee34f7aaa27de55a6cbb3e843db
+        strip-components: 1
+
+  - name: re2
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DRE2_BUILD_TESTING=OFF
+    sources:
+      - type: archive
+        url: https://github.com/google/re2/archive/refs/tags/2024-07-02.tar.gz
+        sha256: eb2df807c781601c14a260a507a5bb4509be1ee626024cb45acbd57cb9d4032b
+        strip-components: 1
+
+  - name: protobuf
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -Dprotobuf_BUILD_TESTS=OFF
+      - -Dprotobuf_BUILD_SHARED_LIBS=ON
+      - -Dprotobuf_INSTALL=ON
+    sources:
+      - type: archive
+        url: https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.tar.gz
+        sha256: 22fdaf641b31655d4b2297f9981fa5203b2866f8332d3c6333f6b0107bb320de
+        strip-components: 1
+
+  - name: date
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DENABLE_DATE_TESTING=OFF
+      - -DUSE_SYSTEM_TZ_DB=ON
+    sources:
+      - type: archive
+        url: https://github.com/HowardHinnant/date/archive/refs/tags/v3.0.1.tar.gz
+        sha256: 7a390f200f0ccd207e8cff6757e04817c1a0aec3e327b006b7eb451c57ee3538
+        strip-components: 1
+
+  - name: boost-headers
+    buildsystem: simple
+    build-commands:
+      - ./bootstrap.sh --prefix=${FLATPAK_DEST}
+      - ./b2 headers
+      - cp -r boost ${FLATPAK_DEST}/include
+    sources:
+      - type: archive
+        url: https://archives.boost.io/release/1.82.0/source/boost_1_82_0.tar.bz2
+        sha256: a6e1ab9b0860e6a2881dd7b21fe9f737a095e5f33a3a874afc6a345228597ee6
+        strip-components: 1
+
+  - name: nlohmann_json
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DJSON_BuildTests=OFF
+    sources:
+      - type: archive
+        url: https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz
+        sha256: 0d8ef5af7f9794e3263480193c491549b2ba6cc74bb018906202ada498a79406
+        strip-components: 1
+
+  - name: cpuinfo
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DCPUINFO_BUILD_UNIT_TESTS=OFF
+      - -DCPUINFO_BUILD_MOCK_TESTS=OFF
+      - -DCPUINFO_BUILD_BENCHMARKS=OFF
+    sources:
+      - type: archive
+        url: https://github.com/pytorch/cpuinfo/archive/403d652dca4c1046e8145950b1c0997a9f748b57.tar.gz
+        sha256: c33bcad94ccbdd4966cc21291f0dcacd40d1dd04eb4c2a6ef1c8da669c01e024
+        strip-components: 1
+
+  - name: microsoft-gsl
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DGSL_TEST=OFF
+    sources:
+      - type: archive
+        url: https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.tar.gz
+        sha256: f0e32cb10654fea91ad56bde89170d78cfbf4363ee0b01d8f097de2ba49f6ce9
+        strip-components: 1
+
+  - name: safeint
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 SafeInt.hpp ${FLATPAK_DEST}/include/SafeInt.hpp
+      - install -Dm644 safe_math.h ${FLATPAK_DEST}/include/safe_math.h
+      - install -Dm644 safe_math_impl.h ${FLATPAK_DEST}/include/safe_math_impl.h
+    sources:
+      - type: archive
+        url: https://github.com/dcleblanc/SafeInt/archive/refs/tags/3.0.28.tar.gz
+        sha256: d6b164bcea92a746e4d44132e505c7ab1816d1089ba99ebc674ccd4b70262ed5
+        strip-components: 1
+
+  - name: flatbuffers
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DFLATBUFFERS_BUILD_TESTS=OFF
+    sources:
+      - type: archive
+        url: https://github.com/google/flatbuffers/archive/refs/tags/v23.5.26.tar.gz
+        sha256: 1cce06b17cddd896b6d73cc047e36a254fb8df4d7ea18a46acf16c4c0cd3f3f3
+        strip-components: 1
+
+  - name: onnx
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DCMAKE_PREFIX_PATH=/app
+      - -DONNX_BUILD_TESTS=OFF
+      - -DONNX_BUILD_PYTHON=OFF
+      - -DONNX_GEN_PB_TYPE_STUBS=OFF
+      - -DONNX_USE_PROTOBUF_SHARED_LIBS=ON
+      - -DONNX_USE_LITE_PROTO=OFF
+      - -DONNX_DISABLE_STATIC_REGISTRATION=ON
+      - -DONNX_WERROR=OFF
+    sources:
+      - type: archive
+        url: https://github.com/onnx/onnx/archive/refs/tags/v1.20.1.tar.gz
+        sha256: 9bcd6473c689b1ac3aeba8df572891756e01c1a151ae788df5cbc7a4499e5db5
+        strip-components: 1
+
+  - name: eigen
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      - -DBUILD_TESTING=OFF
+      - -DEIGEN_BUILD_DOC=OFF
+      - -DEIGEN_BUILD_BLAS=OFF
+      - -DEIGEN_BUILD_LAPACK=OFF
+      - -DEIGEN_BUILD_PKGCONFIG=OFF
+    sources:
+      - type: archive
+        url: https://github.com/eigen-mirror/eigen/archive/1d8b82b0740839c0de7f1242a3585e3390ff5f33.tar.gz
+        sha256: c8adb6532fbfacd2ec1418c66404159b00c34d855bdc19cefa1f0db0e5e0aa5f
+        strip-components: 1

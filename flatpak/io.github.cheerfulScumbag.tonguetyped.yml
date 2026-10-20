@@ -1,10 +1,10 @@
 # LOCAL TEST MANIFEST - NOT FOR FLATHUB SUBMISSION.
 #
 # This manifest verifies that the app builds and runs inside a Flatpak. It
-# uses a local `dir` source, Microsoft's prebuilt ONNX Runtime archive, and it
-# installs the app icon for that local build. It installs no AppStream
-# metainfo or screenshots: Flathub requires all of those, and it requires a
-# human maintainer to author the submitted manifest.
+# uses a local `dir` source and a source-built ONNX Runtime (modules/
+# onnxruntime.yml), and it installs the app icon for that local build. It
+# installs no AppStream metainfo or screenshots: Flathub requires all of
+# those, and it requires a human maintainer to author the submitted manifest.
 # See ../flatpak/README.md.
 id: io.github.cheerfulScumbag.tonguetyped
 runtime: org.freedesktop.Platform
@@ -25,6 +25,13 @@ finish-args:
   # Test-only: lets the local test build pause/resume MPRIS players. The
   # submission permission is decided in the separate Flathub task.
   - --talk-name=org.mpris.MediaPlayer2.*
+cleanup:
+  - /include
+  - /lib/*.a
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/cmake
+  - /share/pkgconfig
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
   prepend-ld-library-path: /usr/lib/sdk/llvm22/lib
@@ -87,26 +94,9 @@ modules:
         sha256: c1f971a384da588eb99ca0755fc4300316d49c1e612537e3f1de52215e104fa3
         strip-components: 1
 
-  # Prebuilt ONNX Runtime for the local test build only. Flathub's current
-  # policy requires dependencies to build from source; the submission policy
-  # decision for ONNX Runtime is still open.
-  - name: onnxruntime
-    buildsystem: simple
-    build-commands:
-      - mkdir -p /app/lib /app/include
-      - cp -a lib/* /app/lib/
-      - cp -a include/* /app/include/
-    sources:
-      - type: archive
-        only-arches: [x86_64]
-        url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-x64-1.24.1.tgz
-        sha256: 9142552248b735920f9390027e4512a2cacf8946a1ffcbe9071a5c210531026f
-        strip-components: 1
-      - type: archive
-        only-arches: [aarch64]
-        url: https://github.com/microsoft/onnxruntime/releases/download/v1.24.1/onnxruntime-linux-aarch64-1.24.1.tgz
-        sha256: 0f56edd68f7602df790b68b874a46b115add037e88385c6c842bb763b39b9f89
-        strip-components: 1
+  # ONNX Runtime 1.24.1 built from source, plus its build dependencies. The
+  # app's VAD path links it dynamically through ORT_LIB_LOCATION below.
+  - modules/onnxruntime.yml
 
   - name: tonguetyped
     buildsystem: simple
