@@ -78,11 +78,13 @@ pub(crate) struct ShortcutTestHandle {
     pub result: Arc<Mutex<Option<Result<crate::activation::ShortcutTestOutcome, String>>>>,
 }
 
-/// Spawns a background thread that drives `activation::test_shortcut_binding`
-/// to completion and reports its outcome through the returned handle. Runs on
-/// the shared portal runtime (`activation::portal_runtime`), not a fresh
-/// per-thread one, so the process-global portal connection it opens stays
-/// usable for later calls; same as `reconfigure_shortcut_async` below.
+/// Spawns a background thread that drives the shortcut test to completion
+/// and reports its outcome through the returned handle. It routes through the
+/// daemon's own listener when a daemon is running (`commands::test_shortcut`),
+/// and only opens a standalone portal session when none is. Runs on the
+/// shared portal runtime (`activation::portal_runtime`), not a fresh
+/// per-thread one, so the process-global portal connection stays usable for
+/// later calls; same as `reconfigure_shortcut_async` below.
 pub(crate) fn shortcut_test_async() -> ShortcutTestHandle {
     let result = Arc::new(Mutex::new(None));
     let result_for_thread = result.clone();
@@ -96,7 +98,9 @@ pub(crate) fn shortcut_test_async() -> ShortcutTestHandle {
 }
 
 fn run_shortcut_test() -> Result<crate::activation::ShortcutTestOutcome, String> {
-    crate::activation::portal_runtime().block_on(crate::activation::test_shortcut_binding())
+    // Routes through the daemon when one owns the shortcut session; the
+    // standalone portal path is only for when no daemon is running.
+    crate::activation::portal_runtime().block_on(crate::commands::test_shortcut())
 }
 
 /// Shared state a background shortcut-reconfigure thread reports into,
@@ -136,11 +140,14 @@ impl ReconfigureHandle {
     }
 }
 
-/// Spawns a background thread that drives `activation::reconfigure_shortcut`
-/// to completion and reports its outcome through the returned handle. Runs on
-/// the shared portal runtime (`activation::portal_runtime`) rather than a
-/// fresh per-thread one, so the process-global portal connection stays alive
-/// across reconfigures (a second Ctrl+R must actually reopen the dialog).
+/// Spawns a background thread that drives the shortcut reconfigure to
+/// completion and reports its outcome through the returned handle. It asks
+/// the daemon's own session to open the editor when a daemon is running
+/// (`commands::configure_shortcut`), so it never opens a competing session; a
+/// standalone portal session is only used when no daemon exists. Runs on the
+/// shared portal runtime (`activation::portal_runtime`) rather than a fresh
+/// per-thread one, so the process-global portal connection stays alive across
+/// reconfigures (a second Ctrl+R must actually reopen the dialog).
 pub(crate) fn reconfigure_shortcut_async() -> ReconfigureHandle {
     let result = Arc::new(Mutex::new(None));
     let result_for_thread = result.clone();
@@ -160,7 +167,9 @@ pub(crate) fn reconfigure_shortcut_async() -> ReconfigureHandle {
 fn run_reconfigure(
     cancel: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<crate::activation::ReconfigureOutcome, String> {
-    crate::activation::portal_runtime().block_on(crate::activation::reconfigure_shortcut(cancel))
+    // The daemon owns the shortcut session while it runs, so reconfiguring
+    // must use its session rather than a competing helper one.
+    crate::activation::portal_runtime().block_on(crate::commands::configure_shortcut(cancel))
 }
 
 pub(crate) fn outcome_label(outcome: crate::model::DownloadOutcome) -> &'static str {

@@ -69,6 +69,9 @@ pub fn bar_status(response: Option<&Response>, extended: bool) -> BarStatus {
         state,
         operation_error,
         config_error,
+        shortcut_status,
+        activation_error,
+        shortcut_trigger,
         build,
         model,
         backend,
@@ -98,6 +101,19 @@ pub fn bar_status(response: Option<&Response>, extended: bool) -> BarStatus {
             unknown(backend),
             unknown(device)
         ));
+    }
+    // The daemon's shortcut health was previously dropped here, so a bar could
+    // never show that the shortcut had died. It is reported even when healthy,
+    // with the bound key, so "available" can be read honestly.
+    tooltip.push_str(&format!(
+        "\nShortcut: {}",
+        crate::commands::shortcut_status_label(shortcut_status)
+    ));
+    if let Some(trigger) = shortcut_trigger {
+        tooltip.push_str(&format!("\nShortcut key: {trigger}"));
+    }
+    if let Some(error) = activation_error {
+        tooltip.push_str(&format!("\nShortcut error: {error}"));
     }
     if let Some(error) = operation_error {
         tooltip.push_str(&format!("\nLast error: {error}"));
@@ -211,6 +227,7 @@ mod tests {
             config_error: None,
             shortcut_status: ipc::ShortcutStatus::Available,
             activation_error: None,
+            shortcut_trigger: Some("Super+Space".to_string()),
             build: Some("0.2.2 (a1b2c3d)".to_string()),
             model: Some("whisper-small-q5_k_m".to_string()),
             backend: Some("transcribe.cpp/vulkan".to_string()),
@@ -230,7 +247,7 @@ mod tests {
                 "text": "recording",
                 "alt": "recording",
                 "class": "recording",
-                "tooltip": "TongueTyped: recording",
+                "tooltip": "TongueTyped: recording\nShortcut: available\nShortcut key: Super+Space",
             })
         );
     }
@@ -239,7 +256,7 @@ mod tests {
     fn json_status_serializes_on_one_line_in_waybar_field_order() {
         assert_eq!(
             serde_json::to_string(&bar_status(Some(&status("idle", None)), false)).unwrap(),
-            r#"{"text":"idle","alt":"idle","class":"idle","tooltip":"TongueTyped: idle"}"#
+            r#"{"text":"idle","alt":"idle","class":"idle","tooltip":"TongueTyped: idle\nShortcut: available\nShortcut key: Super+Space"}"#
         );
     }
 
@@ -253,6 +270,7 @@ mod tests {
                 "class": "processing",
                 "tooltip": "TongueTyped: processing\nModel: whisper-small-q5_k_m\n\
                             Backend: transcribe.cpp/vulkan on AMD Radeon RX 7900\n\
+                            Shortcut: available\nShortcut key: Super+Space\n\
                             Last error: output failed",
                 "model": "whisper-small-q5_k_m",
                 "backend": "transcribe.cpp/vulkan",
@@ -270,7 +288,8 @@ mod tests {
         }
         assert_eq!(
             json(Some(&response), false)["tooltip"],
-            "TongueTyped: idle\nConfig error: unknown field `bogus`"
+            "TongueTyped: idle\nShortcut: available\nShortcut key: Super+Space\n\
+             Config error: unknown field `bogus`"
         );
     }
 
@@ -310,7 +329,44 @@ mod tests {
         assert_eq!(value["backend"], serde_json::Value::Null);
         assert_eq!(
             value["tooltip"],
-            "TongueTyped: idle\nModel: unknown\nBackend: unknown on unknown"
+            "TongueTyped: idle\nModel: unknown\nBackend: unknown on unknown\n\
+             Shortcut: available"
+        );
+    }
+
+    #[test]
+    fn shortcut_failure_and_unbound_state_reach_the_tooltip() {
+        let mut response = status("idle", None);
+        if let Response::Status {
+            shortcut_status,
+            activation_error,
+            shortcut_trigger,
+            ..
+        } = &mut response
+        {
+            *shortcut_status = ipc::ShortcutStatus::Failed;
+            *activation_error = Some("activation listener failed: no portal".to_string());
+            *shortcut_trigger = None;
+        }
+        assert_eq!(
+            json(Some(&response), false)["tooltip"],
+            "TongueTyped: idle\nShortcut: failed\n\
+             Shortcut error: activation listener failed: no portal"
+        );
+
+        let mut unbound = status("idle", None);
+        if let Response::Status {
+            shortcut_status,
+            shortcut_trigger,
+            ..
+        } = &mut unbound
+        {
+            *shortcut_status = ipc::ShortcutStatus::Unbound;
+            *shortcut_trigger = None;
+        }
+        assert_eq!(
+            json(Some(&unbound), false)["tooltip"],
+            "TongueTyped: idle\nShortcut: unbound (no key set)"
         );
     }
 

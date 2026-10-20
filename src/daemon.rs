@@ -64,27 +64,11 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
     spawn_config_watcher(coordinator.clone());
     let listener = UnixListener::bind(&sock_path)?;
     let shutdown = Arc::new(tokio::sync::Notify::new());
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let activation = coordinator.clone();
-    let activation_status = coordinator.clone();
-    tokio::spawn(async move {
-        let listener = tokio::spawn(crate::activation::listen(activation, ready_tx));
-        match ready_rx.await {
-            Ok(Ok(())) => activation_status.set_runtime_ready(),
-            Ok(Err(error)) => activation_status.set_runtime_error(error),
-            Err(_) => {}
-        }
-        match listener.await {
-            Ok(Err(error)) => {
-                tracing::error!("activation listener failed: {error}");
-                activation_status.set_runtime_error(format!("activation listener failed: {error}"));
-            }
-            Ok(Ok(())) => activation_status
-                .set_runtime_error("activation listener stopped unexpectedly".to_string()),
-            Err(error) => activation_status
-                .set_runtime_error(format!("activation listener task failed: {error}")),
-        }
-    });
+    // The daemon owns the one GlobalShortcuts session. Its supervisor reports
+    // its own health directly and rebinds after session loss; IPC shortcut
+    // test/configure requests route through this handle instead of opening a
+    // competing helper session.
+    coordinator.set_activation_handle(crate::activation::spawn(coordinator.clone()));
 
     tracing::info!("daemon listening on {}", sock_path.display());
 
@@ -176,6 +160,37 @@ fn spawn_config_watcher(coordinator: Arc<Coordinator>) {
     ));
 }
 
+/// Exit status for "another daemon already holds the instance lock". The
+/// systemd units list it in `RestartPreventExitStatus`, so a second unit start
+/// fails honestly once instead of restarting forever while a manually started
+/// daemon owns the lock.
+pub const EXIT_DAEMON_ALREADY_RUNNING: i32 = 3;
+
+/// Typed "another daemon is already running" outcome, so `main` can map it to
+/// its own exit status instead of anyhow's generic 1.
+#[derive(Debug)]
+pub struct DaemonAlreadyRunning;
+
+impl std::fmt::Display for DaemonAlreadyRunning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("daemon is already running")
+    }
+}
+
+impl std::error::Error for DaemonAlreadyRunning {}
+
+/// The process exit status for a failed daemon start. Only "another daemon is
+/// already running" gets its own status; every other failure stays 1 and keeps
+/// systemd's `Restart=on-failure` behavior.
+pub fn exit_code_for_error(error: &anyhow::Error) -> i32 {
+    if error.is::<DaemonAlreadyRunning>() {
+        EXIT_DAEMON_ALREADY_RUNNING
+    } else {
+        1
+    }
+}
+
+#[derive(Debug)]
 struct InstanceLock {
     _file: File,
 }
@@ -195,12 +210,25 @@ fn acquire_instance_lock_at(
         .create(true)
         .truncate(false)
         .open(path)?;
-    file.try_lock()
-        .map_err(|_| anyhow::anyhow!("daemon is already running"))?;
-    if sock_path.exists() {
-        if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
-            anyhow::bail!("daemon is already running");
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(anyhow::Error::new(DaemonAlreadyRunning));
         }
+        // A real locking failure (ENOLCK/EIO on the runtime directory) is not
+        // another daemon: reporting it as one would exit 3 and stop systemd
+        // from retrying a genuinely broken start.
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(
+                anyhow::Error::new(error).context(format!("could not lock {}", path.display()))
+            );
+        }
+    }
+    // Holding the lock means no other daemon owns this socket: a daemon that
+    // released the lock but has not removed the socket yet is already shutting
+    // down. Treat the file as stale rather than probing it and mistaking that
+    // handover for a live duplicate.
+    if sock_path.exists() {
         std::fs::remove_file(sock_path)?;
     }
     file.set_len(0)?;
@@ -278,7 +306,68 @@ pub async fn reload_config_from_disk(coordinator: &Arc<Coordinator>) -> anyhow::
     result
 }
 
+/// Routes every shortcut request through the daemon's activation handle, the
+/// only owner of the GlobalShortcuts session. Returns `None` for requests
+/// that are not shortcut-related, so `dispatch` can keep one match over the
+/// rest. Split out so the routing (including "no listener is running") is
+/// testable without a full `Coordinator`.
+async fn dispatch_shortcut(
+    handle: Option<&crate::activation::ActivationHandle>,
+    request: &Request,
+) -> Option<Response> {
+    match request {
+        Request::ShortcutTest => Some(match handle {
+            None => Response::Error {
+                message: "the daemon's shortcut listener is not running".to_string(),
+            },
+            Some(handle) => match handle.test_shortcut().await {
+                Ok(crate::activation::ShortcutTestOutcome::Pressed) => {
+                    Response::ShortcutTest { pressed: true }
+                }
+                Ok(crate::activation::ShortcutTestOutcome::TimedOut) => {
+                    Response::ShortcutTest { pressed: false }
+                }
+                Err(error) => Response::Error {
+                    message: format!("shortcut test failed: {error}"),
+                },
+            },
+        }),
+        Request::ConfigureShortcut => Some(match handle {
+            None => Response::Error {
+                message: "the daemon's shortcut listener is not running".to_string(),
+            },
+            Some(handle) => match handle.configure_shortcut().await {
+                Ok(crate::activation::ReconfigureOutcome::Changed {
+                    trigger_description,
+                }) => Response::ShortcutConfigured {
+                    changed: true,
+                    trigger_description,
+                },
+                Ok(crate::activation::ReconfigureOutcome::Unchanged {
+                    trigger_description,
+                }) => Response::ShortcutConfigured {
+                    changed: false,
+                    trigger_description,
+                },
+                Err(error) => Response::Error {
+                    message: format!("shortcut configuration failed: {error}"),
+                },
+            },
+        }),
+        Request::CancelShortcutConfigure => {
+            if let Some(handle) = handle {
+                handle.cancel_configure().await;
+            }
+            Some(Response::Ok)
+        }
+        _ => None,
+    }
+}
+
 pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Response {
+    if let Some(response) = dispatch_shortcut(coordinator.activation_handle(), &request).await {
+        return response;
+    }
     let cmd = match request {
         Request::Start => CoordinatorCommand::Start,
         Request::Stop => CoordinatorCommand::Stop,
@@ -327,6 +416,9 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
                 }
             }
         }
+        Request::ShortcutTest | Request::ConfigureShortcut | Request::CancelShortcutConfigure => {
+            unreachable!("shortcut requests are handled by dispatch_shortcut")
+        }
     };
 
     match coordinator.handle_command(cmd).await {
@@ -354,6 +446,7 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             config_error,
             shortcut_status,
             activation_error,
+            shortcut_trigger,
             model,
             backend,
         } => {
@@ -368,6 +461,7 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
                 config_error,
                 shortcut_status,
                 activation_error,
+                shortcut_trigger,
                 build: Some(crate::build_info::VERSION.to_string()),
                 model: Some(model),
                 backend,
@@ -396,7 +490,20 @@ mod tests {
         let socket_path = root.join("control.sock");
 
         let first = acquire_instance_lock_at(&lock_path, &socket_path).unwrap();
-        assert!(acquire_instance_lock_at(&lock_path, &socket_path).is_err());
+        let duplicate = acquire_instance_lock_at(&lock_path, &socket_path).unwrap_err();
+        assert!(
+            duplicate.is::<DaemonAlreadyRunning>(),
+            "a second daemon must return the typed already-running error"
+        );
+        assert_eq!(duplicate.to_string(), "daemon is already running");
+        assert_eq!(exit_code_for_error(&duplicate), EXIT_DAEMON_ALREADY_RUNNING);
+        assert_eq!(EXIT_DAEMON_ALREADY_RUNNING, 3);
+        // Every other failure keeps the ordinary exit status, so systemd still
+        // restarts a genuinely broken start.
+        assert_eq!(
+            exit_code_for_error(&anyhow::anyhow!("model download failed")),
+            1
+        );
         drop(first);
 
         // A concurrently forked test process can retain the descriptor until exec
@@ -414,5 +521,91 @@ mod tests {
         drop(second);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_socket_left_by_a_previous_daemon_is_reclaimed() {
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-stale-socket-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let lock_path = root.join("daemon.lock");
+        let socket_path = root.join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        // Holding the instance lock proves no live daemon owns the socket, so
+        // the leftover file is reclaimed instead of reported as a duplicate.
+        let lock = acquire_instance_lock_at(&lock_path, &socket_path).unwrap();
+        assert!(!socket_path.exists(), "the stale socket must be removed");
+        drop(lock);
+        drop(listener);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shortcut_requests_route_through_the_activation_handle() {
+        let (commands, mut receiver) = tokio::sync::mpsc::channel(8);
+        let handle = crate::activation::ActivationHandle::for_test(commands);
+        let responder = tokio::spawn(async move {
+            match receiver.recv().await {
+                Some(crate::activation::ActivationCommand::Test { reply }) => {
+                    reply
+                        .send(Ok(crate::activation::ShortcutTestOutcome::Pressed))
+                        .unwrap();
+                }
+                _ => panic!("expected a shortcut test command"),
+            }
+            match receiver.recv().await {
+                Some(crate::activation::ActivationCommand::Configure { reply }) => {
+                    reply
+                        .send(Ok(crate::activation::ReconfigureOutcome::Changed {
+                            trigger_description: "Super+O".to_string(),
+                        }))
+                        .unwrap();
+                }
+                _ => panic!("expected a configure command"),
+            }
+            match receiver.recv().await {
+                Some(crate::activation::ActivationCommand::CancelConfigure) => {}
+                _ => panic!("expected a cancel command"),
+            }
+        });
+
+        let test = dispatch_shortcut(Some(&handle), &Request::ShortcutTest)
+            .await
+            .unwrap();
+        assert!(matches!(test, Response::ShortcutTest { pressed: true }));
+
+        let configure = dispatch_shortcut(Some(&handle), &Request::ConfigureShortcut)
+            .await
+            .unwrap();
+        assert!(matches!(
+            configure,
+            Response::ShortcutConfigured { changed: true, .. }
+        ));
+
+        let cancel = dispatch_shortcut(Some(&handle), &Request::CancelShortcutConfigure)
+            .await
+            .unwrap();
+        assert!(matches!(cancel, Response::Ok));
+        responder.await.unwrap();
+
+        let missing = dispatch_shortcut(None, &Request::ShortcutTest)
+            .await
+            .unwrap();
+        assert!(
+            matches!(missing, Response::Error { message } if message.contains("not running")),
+            "no listener must be reported, not a silent fallback"
+        );
+        assert!(
+            dispatch_shortcut(None, &Request::Start).await.is_none(),
+            "non-shortcut requests stay with dispatch"
+        );
     }
 }
