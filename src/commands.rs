@@ -125,18 +125,23 @@ pub async fn configure_shortcut(
 /// wait sends a separate `CancelShortcutConfigure` request (a second
 /// connection), because the original connection is still waiting for the
 /// configure reply; the daemon settles that request on the unchanged trigger.
+/// The cancel round-trip completes before this returns, so a caller that
+/// starts a replacement dialog afterwards cannot have a stale cancel end it.
 pub async fn configure_shortcut_at(
     sock_path: &std::path::Path,
-    cancel: tokio::sync::oneshot::Receiver<()>,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<crate::activation::ReconfigureOutcome, String> {
-    let cancel_path = sock_path.to_path_buf();
-    let canceller = tokio::spawn(async move {
-        if cancel.await.is_ok() {
-            let _ = send_ipc_at(&cancel_path, Request::CancelShortcutConfigure).await;
+    let response = send_ipc_at(sock_path, Request::ConfigureShortcut);
+    tokio::pin!(response);
+    let response = tokio::select! {
+        response = &mut response => response,
+        cancelled = &mut cancel => {
+            if cancelled.is_ok() {
+                let _ = send_ipc_at(sock_path, Request::CancelShortcutConfigure).await;
+            }
+            (&mut response).await
         }
-    });
-    let response = send_ipc_at(sock_path, Request::ConfigureShortcut).await;
-    canceller.abort();
+    };
     match response {
         Ok(Response::ShortcutConfigured {
             changed: true,

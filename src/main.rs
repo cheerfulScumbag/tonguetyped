@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Press your shortcut now...");
             match commands::test_shortcut().await {
                 Ok(activation::ShortcutTestOutcome::Pressed) => {
-                    println!("Shortcut press detected - the daemon received it.");
+                    println!("Shortcut press detected - the shortcut listener received it.");
                 }
                 Ok(activation::ShortcutTestOutcome::TimedOut) => {
                     anyhow::bail!(

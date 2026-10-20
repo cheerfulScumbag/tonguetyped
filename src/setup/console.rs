@@ -161,6 +161,7 @@ struct ConsoleState {
     overlay_look_selection: usize,
     overlay_shape_selection: usize,
     shortcut_handle: Option<ReconfigureHandle>,
+    reopen_shortcut_dialog: bool,
     shortcut_feedback: Option<Result<ReconfigureOutcome, String>>,
     error: Option<String>,
     mic_monitor: audio::MicMonitor,
@@ -309,6 +310,7 @@ impl ConsoleState {
             overlay_look_selection,
             overlay_shape_selection,
             shortcut_handle: None,
+            reopen_shortcut_dialog: false,
             shortcut_feedback: None,
             error: None,
             mic_monitor: audio::MicMonitor::new(),
@@ -485,8 +487,7 @@ impl ConsoleState {
                 }
                 // Reopen the dialog without waiting out the old wait.
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.cancel_shortcut_reconfigure();
-                    self.start_shortcut_reconfigure();
+                    self.reopen_shortcut_reconfigure();
                     Ok(ControlFlow::Continue)
                 }
                 _ => Ok(ControlFlow::Continue),
@@ -508,8 +509,24 @@ impl ConsoleState {
     /// on its own (an `Unchanged` outcome) once the cancellation lands; its
     /// late result is simply never polled again.
     fn cancel_shortcut_reconfigure(&mut self) {
+        self.reopen_shortcut_dialog = false;
         if let Some(handle) = self.shortcut_handle.take() {
             handle.cancel();
+        }
+    }
+
+    /// Ctrl+R while the desktop dialog is open: cancel the current wait but
+    /// keep the handle, and open the replacement only after that wait settles.
+    /// Starting it immediately would race the cancel (the daemon could reject
+    /// the new dialog as "already open", or the stale cancel could end the new
+    /// one).
+    fn reopen_shortcut_reconfigure(&mut self) {
+        match self.shortcut_handle.as_ref() {
+            Some(handle) => {
+                handle.cancel();
+                self.reopen_shortcut_dialog = true;
+            }
+            None => self.start_shortcut_reconfigure(),
         }
     }
 
@@ -997,6 +1014,13 @@ impl ConsoleState {
             return;
         };
         self.shortcut_handle = None;
+        if self.reopen_shortcut_dialog {
+            self.reopen_shortcut_dialog = false;
+            if self.step == StepKind::Shortcut {
+                self.start_shortcut_reconfigure();
+            }
+            return;
+        }
         if let Ok(ReconfigureOutcome::Changed {
             trigger_description,
         }) = &outcome
@@ -2480,6 +2504,36 @@ mod tests {
             "leaving must stop the wait"
         );
         assert_eq!(state.step, StepKind::Activation);
+    }
+
+    #[test]
+    fn ctrl_r_keeps_the_old_wait_until_it_settles() {
+        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
+        state.step = StepKind::Shortcut;
+        let old_result = Arc::new(Mutex::new(None));
+        state.shortcut_handle = Some(ReconfigureHandle::for_test(old_result.clone()));
+
+        state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(
+            state.reopen_shortcut_dialog,
+            "Ctrl+R must schedule a reopen after the old wait settles"
+        );
+        assert!(
+            state.shortcut_handle.is_some(),
+            "Ctrl+R must not start a second configure while the first is still open"
+        );
+
+        state
+            .handle_shortcut_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            !state.reopen_shortcut_dialog,
+            "keeping the current binding must cancel the scheduled reopen"
+        );
+        assert!(state.shortcut_handle.is_none());
     }
 
     #[test]
