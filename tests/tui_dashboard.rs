@@ -333,9 +333,10 @@ fn open_settings(session: &mut Session) {
         if text.contains("Settings") {
             return;
         }
-        if text.contains("5 destinations") {
+        if text.contains("LIVE") {
             session.send(b"p");
-            session.send(KEY_ENTER);
+            session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+            session.send(b"g");
             session.wait_for("Settings", Duration::from_secs(3));
             return;
         }
@@ -682,7 +683,7 @@ fn pty_arrow_keys_move_the_home_selection_marker_and_escape_returns_to_the_deck(
 
     // Escape returns to the split deck instead of quitting.
     session.send(KEY_ESC);
-    let deck = session.wait_for("5 destinations", Duration::from_secs(3));
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
     assert!(
         session.child.try_wait().unwrap().is_none(),
         "Esc must not quit the dashboard"
@@ -730,6 +731,23 @@ fn pty_logo_recenters_for_wide_and_narrow_terminals_without_clipping() {
 }
 
 #[test]
+fn pty_splash_shows_the_chafa_bubble_then_the_deck() {
+    let sandbox = Sandbox::new("splash");
+    let session = Session::spawn(&sandbox, 80, 24);
+    let splash = session.wait_for("press any key", Duration::from_secs(2));
+    assert!(
+        splash.contains("TONGUETYPED"),
+        "the splash should show the chafa bubble and wordmark:\n{splash}"
+    );
+    let deck = session.wait_for("5 destinations", Duration::from_secs(3));
+    assert!(
+        deck.contains("LIVE") && deck.contains("SPEAK"),
+        "the splash should give way to the split deck:\n{deck}"
+    );
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
     let sandbox = Sandbox::new("deck");
     let mut session = Session::spawn(&sandbox, 80, 24);
@@ -745,7 +763,7 @@ fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
         );
     }
     assert!(
-        deck.contains("enter open") && deck.contains("↑↓ move"),
+        deck.contains("enter start") && deck.contains("↑↓ move"),
         "the footer should keep the single-letter key map:\n{deck}"
     );
     assert!(
@@ -755,8 +773,59 @@ fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
 
     session.send(b"p");
     session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
-    session.send(KEY_ENTER);
+    session.send(b"g");
     session.wait_for("Settings", Duration::from_secs(3));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_panes_show_models_output_history_and_setup() {
+    let sandbox = Sandbox::new("deck-panes");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"m");
+    let models = session.wait_for("STREAM", Duration::from_secs(3));
+    assert!(
+        models.contains("STREAM") && (models.contains("live") || models.contains("final")),
+        "the model pane should show the stream column:\n{models}"
+    );
+    assert!(
+        models.contains("more") || models.contains("above"),
+        "the model pane should show the more-below cue:\n{models}"
+    );
+    assert!(
+        models.contains("activate") && models.contains("download"),
+        "the model pane should show its actions:\n{models}"
+    );
+
+    session.send(b"o");
+    let output = session.wait_for("Save transcript history", Duration::from_secs(3));
+    assert!(
+        output.contains("Save transcript history") || output.contains("Do not deliver"),
+        "the output pane should show the delivery choices:\n{output}"
+    );
+
+    session.send(b"h");
+    let history = session.wait_for("History is off", Duration::from_secs(3));
+    assert!(
+        history.contains("History is off") || history.contains("Maximum entries"),
+        "the history pane should show the history state:\n{history}"
+    );
+    session.send(b" ");
+    let history_on = session.wait_for("Maximum entries", Duration::from_secs(3));
+    assert!(
+        history_on.contains("Maximum age"),
+        "turning history on should reveal both fields:\n{history_on}"
+    );
+
+    session.send(b"p");
+    let setup = session.wait_for("Review", Duration::from_secs(3));
+    assert!(
+        setup.contains("Model") && setup.contains("Review"),
+        "the setup pane should show the five chapters:\n{setup}"
+    );
 
     session.quit_and_wait();
 }

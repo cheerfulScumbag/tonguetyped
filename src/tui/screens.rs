@@ -841,7 +841,7 @@ impl OutputScreen {
         }
     }
 
-    pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
+    pub(super) fn deck_lines(&self, config: &Config, width: usize) -> Vec<Line<'static>> {
         let rows = self.rows(config);
         let keys = paste_keys_labels();
         let key_options: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -853,8 +853,7 @@ impl OutputScreen {
         let history_row = Self::history_row(config);
         let paste_row =
             (config.output.method == OutputMethod::Paste).then_some(history_row.saturating_sub(1));
-        let lines: Vec<Line> = rows
-            .iter()
+        rows.iter()
             .enumerate()
             .map(|(index, row)| {
                 let is_selected = index == self.selected;
@@ -875,8 +874,14 @@ impl OutputScreen {
                 pad_selected_row(&mut spans, is_selected, width);
                 Line::from(spans)
             })
-            .collect();
-        list_panel("Home \u{203a} Transcript output", lines)
+            .collect()
+    }
+
+    pub(super) fn list_widget(&self, config: &Config, width: usize) -> Paragraph<'static> {
+        list_panel(
+            "Home \u{203a} Transcript output",
+            self.deck_lines(config, width),
+        )
     }
 
     /// The install warning for the highlighted method when it cannot work
@@ -1253,15 +1258,11 @@ impl TextFieldsScreen {
         (self.apply)(self, config)
     }
 
-    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
+    pub(super) fn deck_lines(&self, width: usize) -> Vec<Line<'static>> {
         if self.disabled {
-            return Paragraph::new("History is off. Turn on Save transcript history to edit this.")
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!("Home \u{203a} {}", self.title)),
-                );
+            return vec![Line::from(
+                "History is off. Press s to turn it on and edit these fields.",
+            )];
         }
         let label_width = self
             .fields
@@ -1269,8 +1270,7 @@ impl TextFieldsScreen {
             .map(|(label, _)| label.chars().count())
             .max()
             .unwrap_or(0);
-        let lines: Vec<Line> = self
-            .fields
+        self.fields
             .iter()
             .enumerate()
             .map(|(index, (label, field))| {
@@ -1291,12 +1291,26 @@ impl TextFieldsScreen {
                 pad_selected_row(&mut spans, selected, width);
                 Line::from(spans).style(selection_style(selected))
             })
-            .collect();
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Home \u{203a} {}", self.title)),
-        )
+            .collect()
+    }
+
+    pub(super) fn list_widget(&self, width: usize) -> Paragraph<'static> {
+        if self.disabled {
+            return Paragraph::new("History is off. Turn on Save transcript history to edit this.")
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Home \u{203a} {}", self.title)),
+                );
+        }
+        Paragraph::new(self.deck_lines(width))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Home \u{203a} {}", self.title)),
+            )
     }
 
     pub(super) fn hint_line(&self) -> &'static str {

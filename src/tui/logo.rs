@@ -130,17 +130,40 @@ mod tests {
 pub const BUBBLE_HEIGHT: u16 = 7;
 
 const BUBBLE_ART: [&str; 7] = [
-    "   ▄▄▄▄▄▄▄▄▄▄",
-    "  █▓▓▄▓▓▓▄▓▓█",
-    "  ▀▓██▀▀██▀▓",
-    "  ▓▓██▓▓█▓▓█",
-    " █▓▓██▄▄█▓▓█",
-    " ▀▄▄▓▄▄▀▀▀▀",
-    "  ▀▀",
+    "   ▂▂▃▃▃▃▄▄▄▖",
+    "  ▐▔▕▅  ▗▅ ▗▌",
+    "  ▋▐▇█▆▛██▛▐▏",
+    " ▕▍ ▟▋  █▍ ▟",
+    " ▐▎ ▜▙▃▅█▏ ▌",
+    " ▐▅▖▂▔▔▔  ▝",
+    "  ▀▔▔",
+];
+
+const SPLASH_ART: [&str; 21] = [
+    "",
+    "                        ▁▁▁▁▂▂▂▃▃▃▃▄▄▄▃",
+    "         ▃▅▅▅▆▆▆▆▇▇▇▇█▛▛▛▛▛▛▀▀▀▀▀▀▀▀▀██▙",
+    "        ▟▀▔                          ▐█▉",
+    "       ▕▉      ▁▃▅▆        ▐█▆▖      ▐█▌",
+    "       ▐▋      ▐██▊        ▟██▍      ██▏",
+    "       ▟▍      ▟██▌     ▁▁▁███▂▂▂▂▂  █▊",
+    "       █▏ ▐▆▇▇▇███████████████████▌ ▗█▍",
+    "      ▕█  ▀▀▀▀▜███▀▀▀▀▔▔▔▔▜██▊      ▐█▏",
+    "      ▐▊      ▐██▊        ▟██▌      █▊",
+    "      ▟▌      ▟██▌        ███▎      █▍",
+    "     ▕█▎      ███▎       ▕███      ▕█",
+    "     ▐█      ▕███        ▐██▊      ▐▊",
+    "     █▊      ▕██▉       ▁▟██▌      ▟▌",
+    "    ▕█▌      ▝███▆▄▃▃▄▄▅███▛       █▎",
+    "    ▐█▎       ▝▜████████▛▀▘       ▗█",
+    "    ██▁                      ▁▁▁▂▄▇▘",
+    "    ▜██▅▅▅▆▎    ▂▄▅▆▇▇▇▀▀▀▀▀▀▀▀▀▀▔",
+    "     ▔▔▔██▀▁▃▅▆▛▀▔▔",
+    "      ▗███▇▀▀▔",
+    "      ▝▀▀▔",
 ];
 
 fn bubble_line(art: &str, text: Option<Line<'static>>) -> Line<'static> {
-    let purple = Style::default().fg(Color::Rgb(50, 0, 77));
     let green = Style::default()
         .fg(Color::Rgb(0, 255, 0))
         .add_modifier(Modifier::BOLD);
@@ -148,10 +171,10 @@ fn bubble_line(art: &str, text: Option<Line<'static>>) -> Line<'static> {
     let mut used = 0usize;
     for ch in art.chars() {
         used += 1;
-        match ch {
-            '▓' => spans.push(Span::styled("▓", purple)),
-            '█' => spans.push(Span::styled("█", green)),
-            _ => spans.push(Span::raw(ch.to_string())),
+        if ch == ' ' {
+            spans.push(Span::raw(" "));
+        } else {
+            spans.push(Span::styled(ch.to_string(), green));
         }
     }
     for _ in used..14 {
@@ -208,4 +231,51 @@ pub fn bubble_header(daemon_running: bool, model: &str) -> Vec<Line<'static>> {
         ),
         bubble_line(BUBBLE_ART[6], None),
     ]
+}
+
+/// The launch splash: the chafa line-art bubble, then the wordmark and the
+/// skip hint. At narrow widths the art is dropped and the wordmark remains.
+pub fn splash_lines(width: u16) -> Vec<Line<'static>> {
+    let art_width = SPLASH_ART
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let green = Style::default()
+        .fg(Color::Rgb(0, 255, 0))
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(Color::DarkGray);
+    let mut lines: Vec<Line> = Vec::new();
+    if width >= art_width {
+        for art in SPLASH_ART {
+            let text_width = art.chars().count() as u16;
+            let margin = usize::from(width.saturating_sub(text_width) / 2);
+            let mut spans = vec![Span::raw(" ".repeat(margin))];
+            for ch in art.chars() {
+                if ch == ' ' {
+                    spans.push(Span::raw(" "));
+                } else {
+                    spans.push(Span::styled(ch.to_string(), green));
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    let brand = Line::from(vec![Span::styled("TONGUETYPED", green)])
+        .alignment(ratatui::layout::Alignment::Center);
+    let tagline = Line::from(vec![Span::styled("speak · type · repeat", muted)])
+        .alignment(ratatui::layout::Alignment::Center);
+    let hint = Line::from(vec![Span::styled("press any key", muted)])
+        .alignment(ratatui::layout::Alignment::Center);
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(brand);
+        lines.push(tagline);
+        lines.push(hint);
+    } else {
+        lines.push(brand);
+        lines.push(tagline);
+        lines.push(hint);
+    }
+    lines
 }
