@@ -337,6 +337,10 @@ struct App {
     pending: Option<PendingAction>,
     shortcut_test: Option<setup::ShortcutTestHandle>,
     shortcut_dialog: Option<setup::ReconfigureHandle>,
+    /// Ctrl+R while the desktop dialog is open: cancel the current wait and
+    /// reopen the dialog only after it settles, so the cancel cannot race the
+    /// replacement request.
+    reopen_shortcut_dialog: bool,
     should_quit: bool,
     daemon_status_cache: RefCell<Option<(DaemonHealth, Instant)>>,
     /// Scroll offset (in wrapped rows) for the current `Screen::Info` pane.
@@ -415,6 +419,7 @@ impl App {
             pending: None,
             shortcut_test: None,
             shortcut_dialog: None,
+            reopen_shortcut_dialog: false,
             should_quit: false,
             daemon_status_cache: RefCell::new(None),
             info_scroll: Cell::new(0),
@@ -515,7 +520,20 @@ impl App {
             .and_then(|handle| handle.result.lock().ok().and_then(|mut guard| guard.take()));
         if let Some(outcome) = dialog_outcome {
             self.shortcut_dialog = None;
-            self.apply_shortcut_dialog_outcome(outcome);
+            if self.reopen_shortcut_dialog {
+                self.reopen_shortcut_dialog = false;
+                let still_open = match &self.screen {
+                    Screen::Shortcut(screen) => {
+                        matches!(screen.status, screens::ShortcutStatus::DialogOpen)
+                    }
+                    _ => false,
+                };
+                if still_open {
+                    self.start_shortcut_action(Some(0));
+                }
+            } else {
+                self.apply_shortcut_dialog_outcome(outcome);
+            }
         }
     }
 
@@ -1240,8 +1258,7 @@ impl App {
                             self.screen = Screen::Home;
                         }
                         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.cancel_shortcut_dialog();
-                            self.start_shortcut_action(Some(0));
+                            self.reopen_shortcut_dialog();
                         }
                         _ => {}
                     }
@@ -1282,8 +1299,23 @@ impl App {
     /// settles on its own (`Unchanged`) once the cancellation lands; its late
     /// result is never polled again.
     fn cancel_shortcut_dialog(&mut self) {
+        self.reopen_shortcut_dialog = false;
         if let Some(handle) = self.shortcut_dialog.take() {
             handle.cancel();
+        }
+    }
+
+    /// Ctrl+R while the desktop dialog is open: cancel the current wait but
+    /// keep the handle, and open the replacement only after that wait settles.
+    /// Starting it immediately would race the cancel (a new dialog could be
+    /// rejected as "already open", or the stale cancel could end the new one).
+    fn reopen_shortcut_dialog(&mut self) {
+        match self.shortcut_dialog.as_ref() {
+            Some(handle) => {
+                handle.cancel();
+                self.reopen_shortcut_dialog = true;
+            }
+            None => self.start_shortcut_action(Some(0)),
         }
     }
 
@@ -3126,5 +3158,35 @@ mod tests {
             None => std::env::remove_var("XDG_CONFIG_HOME"),
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ctrl_r_keeps_the_old_wait_until_it_settles() {
+        let mut app = App::new(Config::default());
+        app.open_setting(SettingId::Shortcut);
+        if let Screen::Shortcut(screen) = &mut app.screen {
+            screen.status = screens::ShortcutStatus::DialogOpen;
+        }
+        let old_result = Arc::new(Mutex::new(None));
+        app.shortcut_dialog = Some(setup::ReconfigureHandle::for_test(old_result.clone()));
+
+        app.handle_shortcut_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert!(
+            app.reopen_shortcut_dialog,
+            "Ctrl+R must schedule a reopen after the old wait settles"
+        );
+        assert!(
+            app.shortcut_dialog.is_some(),
+            "Ctrl+R must not start a second configure while the first is still open"
+        );
+
+        // Settling on the current binding instead cancels the scheduled reopen.
+        app.handle_shortcut_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            !app.reopen_shortcut_dialog,
+            "keeping the current binding must cancel the scheduled reopen"
+        );
+        assert!(app.shortcut_dialog.is_none());
     }
 }

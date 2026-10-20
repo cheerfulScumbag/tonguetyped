@@ -1,8 +1,6 @@
 use crate::coordinator::Coordinator;
 use anyhow::Context;
-use ashpd::desktop::global_shortcuts::{
-    Activated, Deactivated, GlobalShortcuts, NewShortcut, ShortcutsChanged,
-};
+use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut, ShortcutsChanged};
 use ashpd::desktop::Session;
 use futures_util::{Stream, StreamExt};
 use std::path::Path;
@@ -525,6 +523,11 @@ impl ActivationHandle {
     pub async fn cancel_configure(&self) {
         let _ = self.commands.send(ActivationCommand::CancelConfigure).await;
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(commands: mpsc::Sender<ActivationCommand>) -> Self {
+        Self { commands }
+    }
 }
 
 /// Starts the daemon's activation supervisor and returns its control handle.
@@ -537,7 +540,12 @@ impl ActivationHandle {
 /// process, reconnect on death" pattern.
 pub fn spawn(coordinator: Arc<Coordinator>) -> ActivationHandle {
     let (commands, receiver) = mpsc::channel(8);
-    tokio::spawn(supervise(coordinator, receiver));
+    tokio::spawn(supervise(
+        PortalConnector,
+        coordinator,
+        receiver,
+        ReassertSchedule::default(),
+    ));
     ActivationHandle { commands }
 }
 
@@ -588,18 +596,148 @@ fn bound_status(trigger: &str) -> crate::ipc::ShortcutStatus {
     }
 }
 
-type ActivatedStream = Pin<Box<dyn Stream<Item = Activated> + Send>>;
-type DeactivatedStream = Pin<Box<dyn Stream<Item = Deactivated> + Send>>;
-type ClosedStream = Pin<Box<dyn Stream<Item = ()> + Send>>;
+/// Every signal the supervisor needs from the desktop, merged into one stream
+/// so the listener (and a headless test) has a single source of events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionEvent {
+    Activated {
+        shortcut_id: String,
+        timestamp: Duration,
+    },
+    Deactivated {
+        shortcut_id: String,
+        timestamp: Duration,
+    },
+    ShortcutChanged {
+        shortcut_id: String,
+        trigger_description: String,
+    },
+    SessionClosed,
+    /// The underlying signal stream ended. Any one of them ending means the
+    /// session can no longer be trusted, so the supervisor reconnects.
+    StreamEnded,
+}
+
+type EventStream = Pin<Box<dyn Stream<Item = SessionEvent> + Send>>;
+
+/// Appends [`SessionEvent::StreamEnded`] to a signal stream, so `select_all`
+/// reports a single stream's end as a reconnect rather than waiting for all of
+/// them to end.
+fn end_marked<S>(stream: S) -> EventStream
+where
+    S: Stream<Item = SessionEvent> + Send + 'static,
+{
+    Box::pin(stream.chain(futures_util::stream::once(async {
+        SessionEvent::StreamEnded
+    })))
+}
+
+type SessionFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// The supervisor's only view of a live portal session. Implemented by the real
+/// [`Binding`] and by headless fakes in the tests, so reconnection, periodic
+/// re-assertion, and portal-restart recovery can be exercised without a portal.
+trait ShortcutSession: Send {
+    fn events(&mut self) -> &mut EventStream;
+    fn trigger(&self) -> &str;
+    fn set_trigger(&mut self, trigger: String);
+    fn reassert(&mut self) -> SessionFuture<'_, anyhow::Result<String>>;
+    fn open_configure(&mut self) -> SessionFuture<'_, anyhow::Result<()>>;
+}
+
+/// Creates sessions on demand. The supervisor calls this again after every
+/// loss, which is exactly the reconnect path.
+trait SessionConnector: Send + 'static {
+    type Session: ShortcutSession + 'static;
+    fn connect(&mut self) -> SessionFuture<'static, anyhow::Result<Self::Session>>;
+}
+
+struct PortalConnector;
+
+impl SessionConnector for PortalConnector {
+    type Session = Binding;
+
+    fn connect(&mut self) -> SessionFuture<'static, anyhow::Result<Binding>> {
+        Box::pin(connect())
+    }
+}
+
+/// The effects the supervisor reports. Implemented by [`Coordinator`] in
+/// production, so the loop can run headlessly against a recording fake.
+trait SupervisorSink: Send + Sync {
+    fn binding_reported(&self, trigger: String);
+    fn shortcut_state(&self, status: crate::ipc::ShortcutStatus, error: Option<String>);
+    fn activation(&self, pressed: bool) -> SessionFuture<'_, ()>;
+}
+
+impl SupervisorSink for Coordinator {
+    fn binding_reported(&self, trigger: String) {
+        self.record_activation_binding(trigger);
+    }
+
+    fn shortcut_state(&self, status: crate::ipc::ShortcutStatus, error: Option<String>) {
+        self.set_shortcut_state(status, error);
+    }
+
+    fn activation(&self, pressed: bool) -> SessionFuture<'_, ()> {
+        Box::pin(async move {
+            if let Err(error) = self.handle_activation(pressed).await {
+                tracing::error!("activation command failed: {error}");
+            }
+        })
+    }
+}
+
+/// When to re-assert the binding. Bounds are injectable so the recovery loop is
+/// testable without waiting through the production 30-second interval.
+#[derive(Debug, Clone, Copy)]
+struct ReassertSchedule {
+    startup_delay: Duration,
+    interval: Duration,
+}
+
+impl Default for ReassertSchedule {
+    fn default() -> Self {
+        Self {
+            startup_delay: SHORTCUT_STARTUP_REASSERT_DELAY,
+            interval: SHORTCUT_REASSERT_INTERVAL,
+        }
+    }
+}
 
 struct Binding {
     portal: GlobalShortcuts<'static>,
     session: Session<'static, GlobalShortcuts<'static>>,
-    activated: ActivatedStream,
-    deactivated: DeactivatedStream,
-    closed: ClosedStream,
+    events: EventStream,
     /// The trigger the desktop last reported, in the desktop's own wording.
     trigger: String,
+}
+
+impl ShortcutSession for Binding {
+    fn events(&mut self) -> &mut EventStream {
+        &mut self.events
+    }
+
+    fn trigger(&self) -> &str {
+        &self.trigger
+    }
+
+    fn set_trigger(&mut self, trigger: String) {
+        self.trigger = trigger;
+    }
+
+    fn reassert(&mut self) -> SessionFuture<'_, anyhow::Result<String>> {
+        Box::pin(async move { bind_activation_shortcut(&self.portal, &self.session).await })
+    }
+
+    fn open_configure(&mut self) -> SessionFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.portal
+                .configure_shortcuts(&self.session, None, None)
+                .await?;
+            Ok(())
+        })
+    }
 }
 
 async fn connect() -> anyhow::Result<Binding> {
@@ -614,52 +752,84 @@ async fn connect() -> anyhow::Result<Binding> {
         .await
         .context("could not create a global shortcuts session")?;
     let trigger = bind_activation_shortcut(&portal, &session).await?;
-    let activated = Box::pin(
-        portal
-            .receive_activated()
-            .await
-            .context("could not subscribe to shortcut activations")?,
-    );
-    let deactivated = Box::pin(
-        portal
-            .receive_deactivated()
-            .await
-            .context("could not subscribe to shortcut deactivations")?,
-    );
-    let closed = Box::pin(
-        session
-            .receive_closed()
-            .await
-            .context("could not watch the shortcut session")?,
-    );
+
+    let activated = portal
+        .receive_activated()
+        .await
+        .context("could not subscribe to shortcut activations")?
+        .map(|event| SessionEvent::Activated {
+            shortcut_id: event.shortcut_id().to_string(),
+            timestamp: event.timestamp(),
+        });
+    let deactivated = portal
+        .receive_deactivated()
+        .await
+        .context("could not subscribe to shortcut deactivations")?
+        .map(|event| SessionEvent::Deactivated {
+            shortcut_id: event.shortcut_id().to_string(),
+            timestamp: event.timestamp(),
+        });
+    let changed = portal
+        .receive_shortcuts_changed()
+        .await
+        .context("could not subscribe to shortcut changes")?
+        .flat_map(|event| {
+            let changes: Vec<SessionEvent> = event
+                .shortcuts()
+                .iter()
+                .map(|shortcut| SessionEvent::ShortcutChanged {
+                    shortcut_id: shortcut.id().to_string(),
+                    trigger_description: shortcut.trigger_description().to_string(),
+                })
+                .collect();
+            futures_util::stream::iter(changes)
+        });
+    let closed = session
+        .receive_closed()
+        .await
+        .context("could not watch the shortcut session")?
+        .map(|()| SessionEvent::SessionClosed);
+    let events = futures_util::stream::select_all(vec![
+        end_marked(activated),
+        end_marked(deactivated),
+        end_marked(changed),
+        end_marked(closed),
+    ]);
     Ok(Binding {
         portal,
         session,
-        activated,
-        deactivated,
-        closed,
+        events: Box::pin(events),
         trigger,
     })
 }
 
-async fn supervise(coordinator: Arc<Coordinator>, mut commands: mpsc::Receiver<ActivationCommand>) {
+async fn supervise<K, S, C>(
+    mut connector: K,
+    coordinator: Arc<C>,
+    mut commands: mpsc::Receiver<ActivationCommand>,
+    schedule: ReassertSchedule,
+) where
+    K: SessionConnector<Session = S>,
+    S: ShortcutSession + 'static,
+    C: SupervisorSink + 'static,
+{
     let mut backoff = RetryBackoff::default();
     loop {
-        match connect().await {
-            Ok(mut binding) => {
+        match connector.connect().await {
+            Ok(mut session) => {
                 backoff.reset();
                 // The bind above is the app's only source of truth for what is
                 // actually bound: persist whatever the desktop reports so
                 // `config` never claims a key TongueTyped chose.
-                coordinator.record_activation_binding(binding.trigger.clone());
-                coordinator.set_shortcut_state(bound_status(&binding.trigger), None);
-                match run_bound(&coordinator, &mut binding, &mut commands).await {
+                coordinator.binding_reported(session.trigger().to_string());
+                coordinator.shortcut_state(bound_status(session.trigger()), None);
+                match run_bound(&*coordinator, &mut session, &mut commands, schedule).await {
                     SessionEnd::CommandsClosed => return,
                     SessionEnd::Lost(error) => {
                         let message =
                             format!("activation listener lost its session: {error}; reconnecting");
                         tracing::warn!("{message}");
-                        coordinator.set_shortcut_state(
+                        coordinator.shortcut_state(
                             listener_status(ListenerPhase::Reconnecting),
                             Some(message),
                         );
@@ -669,10 +839,8 @@ async fn supervise(coordinator: Arc<Coordinator>, mut commands: mpsc::Receiver<A
             Err(error) => {
                 let message = format!("activation listener failed: {error}; retrying");
                 tracing::warn!("{message}");
-                coordinator.set_shortcut_state(
-                    listener_status(ListenerPhase::Reconnecting),
-                    Some(message),
-                );
+                coordinator
+                    .shortcut_state(listener_status(ListenerPhase::Reconnecting), Some(message));
             }
         }
 
@@ -709,16 +877,63 @@ enum SessionEnd {
     Lost(String),
 }
 
+/// Why `configure_on_session` returned. A lost session must end the whole
+/// listener so the supervisor reconnects, not just fail the dialog request.
+enum ConfigureEnd {
+    Finished(Result<ReconfigureOutcome, String>),
+    SessionLost(String),
+}
+
+/// One wake-up from the `run_bound` select. Handled after the borrow of the
+/// session's event stream ends, so the session can be used mutably again.
+enum Wake {
+    Event(Option<SessionEvent>),
+    Command(Option<ActivationCommand>),
+    TestTimeout,
+    Reassert,
+}
+
+enum ConfigureWake {
+    Event(Option<SessionEvent>),
+    Command(Option<ActivationCommand>),
+    Deadline,
+    Reassert,
+}
+
 struct TestWait {
     reply: oneshot::Sender<Result<ShortcutTestOutcome, String>>,
     deadline: tokio::time::Instant,
 }
 
-async fn run_bound(
-    coordinator: &Arc<Coordinator>,
-    binding: &mut Binding,
+/// Re-asserts the binding on the current session and reports the trigger the
+/// desktop reports. A failure means the session is no longer usable (a portal
+/// restart invalidates it without emitting `Session.Closed`), so the caller
+/// must treat it as session loss and reconnect.
+async fn reassert_binding<S, C>(session: &mut S, coordinator: &C) -> Result<(), String>
+where
+    S: ShortcutSession,
+    C: SupervisorSink + ?Sized,
+{
+    let trigger = session
+        .reassert()
+        .await
+        .map_err(|error| format!("shortcut rebind failed: {error}"))?;
+    session.set_trigger(trigger.clone());
+    coordinator.binding_reported(trigger.clone());
+    coordinator.shortcut_state(bound_status(&trigger), None);
+    Ok(())
+}
+
+async fn run_bound<S, C>(
+    coordinator: &C,
+    session: &mut S,
     commands: &mut mpsc::Receiver<ActivationCommand>,
-) -> SessionEnd {
+    schedule: ReassertSchedule,
+) -> SessionEnd
+where
+    S: ShortcutSession,
+    C: SupervisorSink + ?Sized,
+{
     let mut event_order = EventOrder::default();
     let mut test_wait: Option<TestWait> = None;
     // A test press is consumed by the test rather than toggling dictation;
@@ -726,8 +941,8 @@ async fn run_bound(
     // not see a release with no press.
     let mut swallow_release = false;
     let mut reassert = tokio::time::interval_at(
-        tokio::time::Instant::now() + SHORTCUT_STARTUP_REASSERT_DELAY,
-        SHORTCUT_REASSERT_INTERVAL,
+        tokio::time::Instant::now() + schedule.startup_delay,
+        schedule.interval,
     );
     reassert.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -738,112 +953,109 @@ async fn run_bound(
     // there is no other TongueTyped session whose presses could fan out here.
     loop {
         let test_timer = sleep_until_optional(test_wait.as_ref().map(|wait| wait.deadline));
-        tokio::select! {
-            event = binding.activated.next() => {
-                let Some(event) = event else {
-                    return SessionEnd::Lost(
-                        "global shortcuts activation stream closed".to_string(),
-                    );
-                };
-                let matches = event.shortcut_id() == SHORTCUT_ID;
-                if matches {
-                    if let Some(wait) = test_wait.take() {
-                        swallow_release = true;
-                        let _ = wait.reply.send(Ok(ShortcutTestOutcome::Pressed));
-                        continue;
-                    }
-                    for pressed in event_order.push(event.timestamp(), true) {
-                        handle_activated(coordinator, pressed).await;
-                    }
+        let wake = {
+            let events = session.events();
+            tokio::select! {
+                event = events.next() => Wake::Event(event),
+                command = commands.recv() => Wake::Command(command),
+                _ = test_timer => Wake::TestTimeout,
+                _ = reassert.tick() => Wake::Reassert,
+            }
+        };
+        match wake {
+            Wake::Event(None) | Wake::Event(Some(SessionEvent::StreamEnded)) => {
+                return SessionEnd::Lost("the global shortcuts event stream ended".to_string());
+            }
+            Wake::Event(Some(SessionEvent::SessionClosed)) => {
+                return SessionEnd::Lost(
+                    "the desktop closed the global shortcuts session".to_string(),
+                );
+            }
+            Wake::Event(Some(SessionEvent::Activated {
+                shortcut_id,
+                timestamp,
+            })) => {
+                if shortcut_id != SHORTCUT_ID {
+                    continue;
+                }
+                if let Some(wait) = test_wait.take() {
+                    swallow_release = true;
+                    let _ = wait.reply.send(Ok(ShortcutTestOutcome::Pressed));
+                    continue;
+                }
+                for pressed in event_order.push(timestamp, true) {
+                    coordinator.activation(pressed).await;
                 }
             }
-            event = binding.deactivated.next() => {
-                let Some(event) = event else {
-                    return SessionEnd::Lost(
-                        "global shortcuts deactivation stream closed".to_string(),
-                    );
-                };
-                if event.shortcut_id() != SHORTCUT_ID {
+            Wake::Event(Some(SessionEvent::Deactivated {
+                shortcut_id,
+                timestamp,
+            })) => {
+                if shortcut_id != SHORTCUT_ID {
                     continue;
                 }
                 if swallow_release {
                     swallow_release = false;
                     continue;
                 }
-                for pressed in event_order.push(event.timestamp(), false) {
-                    handle_activated(coordinator, pressed).await;
+                for pressed in event_order.push(timestamp, false) {
+                    coordinator.activation(pressed).await;
                 }
             }
-            event = binding.closed.next() => {
-                return SessionEnd::Lost(match event {
-                    Some(()) => "the desktop closed the global shortcuts session".to_string(),
-                    None => "the global shortcuts session-closed stream ended".to_string(),
-                });
+            // A change outside the dialog is not a new binding; the desktop
+            // only emits it for the editor this app opens.
+            Wake::Event(Some(SessionEvent::ShortcutChanged { .. })) => {}
+            Wake::Command(None) => return SessionEnd::CommandsClosed,
+            Wake::Command(Some(ActivationCommand::Test { reply })) => {
+                if test_wait.is_some() {
+                    let _ = reply.send(Err("a shortcut test is already running".to_string()));
+                } else {
+                    test_wait = Some(TestWait {
+                        reply,
+                        deadline: tokio::time::Instant::now() + SHORTCUT_PRESS_TIMEOUT,
+                    });
+                }
             }
-            command = commands.recv() => {
-                match command {
-                    None => return SessionEnd::CommandsClosed,
-                    Some(ActivationCommand::Test { reply }) => {
-                        if test_wait.is_some() {
-                            let _ = reply
-                                .send(Err("a shortcut test is already running".to_string()));
-                        } else {
-                            test_wait = Some(TestWait {
-                                reply,
-                                deadline: tokio::time::Instant::now() + SHORTCUT_PRESS_TIMEOUT,
-                            });
-                        }
-                    }
-                    Some(ActivationCommand::Configure { reply }) => {
-                        if test_wait.is_some() {
-                            // Let the test finish rather than silently
-                            // swallowing the press the user is about to make.
-                            let _ = reply.send(Err(
-                                "finish the running shortcut test before configuring".to_string(),
-                            ));
-                        } else {
-                            let result = configure_on_session(
-                                binding,
-                                commands,
-                                coordinator,
-                                &mut event_order,
-                                &mut swallow_release,
-                                &mut reassert,
-                            )
-                            .await;
+            Wake::Command(Some(ActivationCommand::Configure { reply })) => {
+                if test_wait.is_some() {
+                    // Let the test finish rather than silently swallowing the
+                    // press the user is about to make.
+                    let _ = reply.send(Err(
+                        "finish the running shortcut test before configuring".to_string()
+                    ));
+                } else {
+                    match configure_on_session(
+                        session,
+                        commands,
+                        coordinator,
+                        &mut event_order,
+                        &mut swallow_release,
+                        &mut reassert,
+                    )
+                    .await
+                    {
+                        ConfigureEnd::Finished(result) => {
                             let _ = reply.send(result);
                         }
+                        ConfigureEnd::SessionLost(error) => {
+                            let _ = reply.send(Err(error.clone()));
+                            return SessionEnd::Lost(error);
+                        }
                     }
-                    Some(ActivationCommand::CancelConfigure) => {}
                 }
             }
-            _ = test_timer => {
+            Wake::Command(Some(ActivationCommand::CancelConfigure)) => {}
+            Wake::TestTimeout => {
                 if let Some(wait) = test_wait.take() {
                     let _ = wait.reply.send(Ok(ShortcutTestOutcome::TimedOut));
                 }
             }
-            _ = reassert.tick() => {
-                match bind_activation_shortcut(&binding.portal, &binding.session).await {
-                    Ok(trigger) => {
-                        binding.trigger = trigger.clone();
-                        coordinator.record_activation_binding(trigger.clone());
-                        coordinator.set_shortcut_state(bound_status(&trigger), None);
-                    }
-                    Err(error) => {
-                        coordinator.set_shortcut_state(
-                            listener_status(ListenerPhase::Failed),
-                            Some(format!("shortcut rebind failed: {error}")),
-                        );
-                    }
+            Wake::Reassert => {
+                if let Err(error) = reassert_binding(session, coordinator).await {
+                    return SessionEnd::Lost(error);
                 }
             }
         }
-    }
-}
-
-async fn handle_activated(coordinator: &Coordinator, pressed: bool) {
-    if let Err(error) = coordinator.handle_activation(pressed).await {
-        tracing::error!("activation command failed: {error}");
     }
 }
 
@@ -858,127 +1070,110 @@ async fn sleep_until_optional(deadline: Option<tokio::time::Instant>) {
 /// for the reported trigger. Kept inline in the listener because a session is
 /// not cloneable: the alternative would be a second session, which is the bug.
 /// Presses still reach dictation while the editor is open, and the periodic
-/// re-assert keeps running.
-async fn configure_on_session(
-    binding: &mut Binding,
+/// re-assert keeps running. A lost session or a failed re-assert ends the
+/// listener so the supervisor reconnects instead of settling on a dead one.
+async fn configure_on_session<S, C>(
+    session: &mut S,
     commands: &mut mpsc::Receiver<ActivationCommand>,
-    coordinator: &Arc<Coordinator>,
+    coordinator: &C,
     event_order: &mut EventOrder,
     swallow_release: &mut bool,
     reassert: &mut tokio::time::Interval,
-) -> Result<ReconfigureOutcome, String> {
-    // Subscribe before opening the dialog: it can close and emit
-    // ShortcutsChanged at any point after ConfigureShortcuts is called, and
-    // that call returns immediately without waiting for the dialog.
-    let mut changed = binding
-        .portal
-        .receive_shortcuts_changed()
-        .await
-        .map_err(|error| format!("could not watch shortcut changes: {error}"))?;
-    binding
-        .portal
-        .configure_shortcuts(&binding.session, None, None)
-        .await
-        .map_err(|error| format!("could not open the desktop shortcut editor: {error}"))?;
+) -> ConfigureEnd
+where
+    S: ShortcutSession,
+    C: SupervisorSink + ?Sized,
+{
+    if let Err(error) = session.open_configure().await {
+        return ConfigureEnd::Finished(Err(format!(
+            "could not open the desktop shortcut editor: {error}"
+        )));
+    }
 
     let deadline = tokio::time::Instant::now() + SHORTCUT_RECONFIGURE_TIMEOUT;
     loop {
-        tokio::select! {
-            event = changed.next() => {
-                match event {
-                    Some(event) => {
-                        if let Some(trigger) = shortcut_trigger(&event) {
-                            binding.trigger = trigger.clone();
-                            coordinator.record_activation_binding(trigger.clone());
-                            coordinator.set_shortcut_state(bound_status(&trigger), None);
-                            return Ok(ReconfigureOutcome::Changed {
-                                trigger_description: trigger,
-                            });
-                        }
-                    }
-                    None => {
-                        return Err("the desktop's shortcut change stream closed".to_string());
+        let wake = {
+            let events = session.events();
+            tokio::select! {
+                event = events.next() => ConfigureWake::Event(event),
+                _ = tokio::time::sleep_until(deadline) => ConfigureWake::Deadline,
+                command = commands.recv() => ConfigureWake::Command(command),
+                _ = reassert.tick() => ConfigureWake::Reassert,
+            }
+        };
+        match wake {
+            ConfigureWake::Event(None) | ConfigureWake::Event(Some(SessionEvent::StreamEnded)) => {
+                return ConfigureEnd::SessionLost(
+                    "the global shortcuts event stream ended while configuring".to_string(),
+                );
+            }
+            ConfigureWake::Event(Some(SessionEvent::SessionClosed)) => {
+                return ConfigureEnd::SessionLost(
+                    "the desktop closed the global shortcuts session while configuring".to_string(),
+                );
+            }
+            ConfigureWake::Event(Some(SessionEvent::ShortcutChanged {
+                shortcut_id,
+                trigger_description,
+            })) => {
+                if shortcut_id != SHORTCUT_ID {
+                    continue;
+                }
+                session.set_trigger(trigger_description.clone());
+                coordinator.binding_reported(trigger_description.clone());
+                coordinator.shortcut_state(bound_status(&trigger_description), None);
+                return ConfigureEnd::Finished(Ok(ReconfigureOutcome::Changed {
+                    trigger_description,
+                }));
+            }
+            ConfigureWake::Event(Some(SessionEvent::Activated {
+                shortcut_id,
+                timestamp,
+            })) => {
+                if shortcut_id == SHORTCUT_ID {
+                    for pressed in event_order.push(timestamp, true) {
+                        coordinator.activation(pressed).await;
                     }
                 }
             }
-            _ = tokio::time::sleep_until(deadline) => {
-                return Ok(ReconfigureOutcome::Unchanged {
-                    trigger_description: binding.trigger.clone(),
-                });
-            }
-            command = commands.recv() => {
-                match command {
-                    None => return Err("the daemon is shutting down".to_string()),
-                    Some(ActivationCommand::CancelConfigure) => {
-                        return Ok(ReconfigureOutcome::Unchanged {
-                            trigger_description: binding.trigger.clone(),
-                        });
-                    }
-                    Some(ActivationCommand::Test { reply }) => {
-                        let _ = reply.send(Err(
-                            "a shortcut configuration dialog is open".to_string()
-                        ));
-                    }
-                    Some(ActivationCommand::Configure { reply }) => {
-                        let _ = reply.send(Err(
-                            "a shortcut configuration dialog is already open".to_string()
-                        ));
-                    }
-                }
-            }
-            event = binding.closed.next() => {
-                return Err(match event {
-                    Some(()) => {
-                        "the desktop closed the global shortcuts session while configuring"
-                            .to_string()
-                    }
-                    None => {
-                        "the global shortcuts session-closed stream ended while configuring"
-                            .to_string()
-                    }
-                });
-            }
-            event = binding.activated.next() => {
-                let Some(event) = event else {
-                    return Err(
-                        "global shortcuts activation stream closed while configuring".to_string(),
-                    );
-                };
-                if event.shortcut_id() == SHORTCUT_ID {
-                    for pressed in event_order.push(event.timestamp(), true) {
-                        handle_activated(coordinator, pressed).await;
-                    }
-                }
-            }
-            event = binding.deactivated.next() => {
-                let Some(event) = event else {
-                    return Err(
-                        "global shortcuts deactivation stream closed while configuring".to_string(),
-                    );
-                };
-                if event.shortcut_id() == SHORTCUT_ID {
+            ConfigureWake::Event(Some(SessionEvent::Deactivated {
+                shortcut_id,
+                timestamp,
+            })) => {
+                if shortcut_id == SHORTCUT_ID {
                     if *swallow_release {
                         *swallow_release = false;
                     } else {
-                        for pressed in event_order.push(event.timestamp(), false) {
-                            handle_activated(coordinator, pressed).await;
+                        for pressed in event_order.push(timestamp, false) {
+                            coordinator.activation(pressed).await;
                         }
                     }
                 }
             }
-            _ = reassert.tick() => {
-                match bind_activation_shortcut(&binding.portal, &binding.session).await {
-                    Ok(trigger) => {
-                        binding.trigger = trigger.clone();
-                        coordinator.record_activation_binding(trigger.clone());
-                        coordinator.set_shortcut_state(bound_status(&trigger), None);
-                    }
-                    Err(error) => {
-                        coordinator.set_shortcut_state(
-                            listener_status(ListenerPhase::Failed),
-                            Some(format!("shortcut rebind failed: {error}")),
-                        );
-                    }
+            ConfigureWake::Command(None) => {
+                return ConfigureEnd::Finished(Err("the daemon is shutting down".to_string()));
+            }
+            ConfigureWake::Command(Some(ActivationCommand::CancelConfigure)) => {
+                return ConfigureEnd::Finished(Ok(ReconfigureOutcome::Unchanged {
+                    trigger_description: session.trigger().to_string(),
+                }));
+            }
+            ConfigureWake::Command(Some(ActivationCommand::Test { reply })) => {
+                let _ = reply.send(Err("a shortcut configuration dialog is open".to_string()));
+            }
+            ConfigureWake::Command(Some(ActivationCommand::Configure { reply })) => {
+                let _ = reply.send(Err(
+                    "a shortcut configuration dialog is already open".to_string()
+                ));
+            }
+            ConfigureWake::Deadline => {
+                return ConfigureEnd::Finished(Ok(ReconfigureOutcome::Unchanged {
+                    trigger_description: session.trigger().to_string(),
+                }));
+            }
+            ConfigureWake::Reassert => {
+                if let Err(error) = reassert_binding(session, coordinator).await {
+                    return ConfigureEnd::SessionLost(error);
                 }
             }
         }
@@ -1022,6 +1217,9 @@ impl EventOrder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
 
     #[test]
     fn installs_discoverable_development_application_identity() {
@@ -1294,5 +1492,258 @@ mod tests {
         );
         assert_eq!(bound_status(""), crate::ipc::ShortcutStatus::Unbound);
         assert_eq!(bound_status("   "), crate::ipc::ShortcutStatus::Unbound);
+    }
+    #[derive(Default)]
+    struct FakeSink {
+        bindings: Mutex<Vec<String>>,
+        states: Mutex<Vec<(crate::ipc::ShortcutStatus, Option<String>)>>,
+        activations: Mutex<Vec<bool>>,
+    }
+
+    impl SupervisorSink for FakeSink {
+        fn binding_reported(&self, trigger: String) {
+            self.bindings.lock().unwrap().push(trigger);
+        }
+
+        fn shortcut_state(&self, status: crate::ipc::ShortcutStatus, error: Option<String>) {
+            self.states.lock().unwrap().push((status, error));
+        }
+
+        fn activation(&self, pressed: bool) -> SessionFuture<'_, ()> {
+            Box::pin(async move {
+                self.activations.lock().unwrap().push(pressed);
+            })
+        }
+    }
+
+    struct FakeSession {
+        events: EventStream,
+        trigger: String,
+        reasserts: Arc<Mutex<VecDeque<Result<String, String>>>>,
+        reassert_count: Arc<AtomicUsize>,
+    }
+
+    impl ShortcutSession for FakeSession {
+        fn events(&mut self) -> &mut EventStream {
+            &mut self.events
+        }
+
+        fn trigger(&self) -> &str {
+            &self.trigger
+        }
+
+        fn set_trigger(&mut self, trigger: String) {
+            self.trigger = trigger;
+        }
+
+        fn reassert(&mut self) -> SessionFuture<'_, anyhow::Result<String>> {
+            let result = self.reasserts.lock().unwrap().pop_front();
+            let fallback = self.trigger.clone();
+            self.reassert_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                match result {
+                    Some(Ok(trigger)) => Ok(trigger),
+                    Some(Err(error)) => Err(anyhow::anyhow!(error)),
+                    None => Ok(fallback),
+                }
+            })
+        }
+
+        fn open_configure(&mut self) -> SessionFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn fake_session(trigger: &str) -> (mpsc::UnboundedSender<SessionEvent>, FakeSession) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let events = futures_util::stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|event| (event, receiver))
+        });
+        (
+            sender,
+            FakeSession {
+                events: Box::pin(events),
+                trigger: trigger.to_string(),
+                reasserts: Arc::new(Mutex::new(VecDeque::new())),
+                reassert_count: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+    }
+
+    struct FakeConnector {
+        sessions: Arc<Mutex<VecDeque<FakeSession>>>,
+        connects: Arc<AtomicUsize>,
+    }
+
+    impl FakeConnector {
+        fn new(sessions: Vec<FakeSession>) -> (Self, Arc<AtomicUsize>) {
+            let connects = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    sessions: Arc::new(Mutex::new(VecDeque::from(sessions))),
+                    connects: connects.clone(),
+                },
+                connects,
+            )
+        }
+    }
+
+    impl SessionConnector for FakeConnector {
+        type Session = FakeSession;
+
+        fn connect(&mut self) -> SessionFuture<'static, anyhow::Result<FakeSession>> {
+            let session = self.sessions.lock().unwrap().pop_front();
+            let connects = self.connects.clone();
+            Box::pin(async move {
+                match session {
+                    Some(session) => {
+                        connects.fetch_add(1, Ordering::SeqCst);
+                        Ok(session)
+                    }
+                    None => Err(anyhow::anyhow!("portal unavailable")),
+                }
+            })
+        }
+    }
+
+    fn fast_schedule() -> ReassertSchedule {
+        ReassertSchedule {
+            startup_delay: Duration::from_millis(5),
+            interval: Duration::from_millis(10),
+        }
+    }
+
+    async fn wait_until(condition: impl Fn() -> bool, what: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    #[tokio::test]
+    async fn reconnects_after_the_desktop_closes_the_session() {
+        let (sender, first) = fake_session("Super+O");
+        let (_second_sender, second) = fake_session("Super+O");
+        let (connector, connects) = FakeConnector::new(vec![first, second]);
+        let (_commands, command_rx) = mpsc::channel(8);
+        let task = tokio::spawn(supervise(
+            connector,
+            Arc::new(FakeSink::default()),
+            command_rx,
+            fast_schedule(),
+        ));
+
+        wait_until(|| connects.load(Ordering::SeqCst) == 1, "the first session").await;
+        sender.send(SessionEvent::SessionClosed).unwrap();
+        wait_until(
+            || connects.load(Ordering::SeqCst) == 2,
+            "a reconnect after the desktop closed the session",
+        )
+        .await;
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnects_after_the_event_stream_ends() {
+        let (sender, first) = fake_session("Super+O");
+        let (_second_sender, second) = fake_session("Super+O");
+        let (connector, connects) = FakeConnector::new(vec![first, second]);
+        let (_commands, command_rx) = mpsc::channel(8);
+        let task = tokio::spawn(supervise(
+            connector,
+            Arc::new(FakeSink::default()),
+            command_rx,
+            fast_schedule(),
+        ));
+
+        wait_until(|| connects.load(Ordering::SeqCst) == 1, "the first session").await;
+        drop(sender);
+        wait_until(
+            || connects.load(Ordering::SeqCst) == 2,
+            "a reconnect after the event stream ended",
+        )
+        .await;
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnects_when_a_periodic_rebind_fails() {
+        let (sender, first) = fake_session("Super+O");
+        first
+            .reasserts
+            .lock()
+            .unwrap()
+            .push_back(Err("AccessDenied: Invalid session".to_string()));
+        let first_reasserts = first.reassert_count.clone();
+        let (_second_sender, second) = fake_session("Super+O");
+        let (connector, connects) = FakeConnector::new(vec![first, second]);
+        let (_commands, command_rx) = mpsc::channel(8);
+        let task = tokio::spawn(supervise(
+            connector,
+            Arc::new(FakeSink::default()),
+            command_rx,
+            fast_schedule(),
+        ));
+
+        wait_until(
+            || connects.load(Ordering::SeqCst) == 2,
+            "a reconnect after a failed periodic rebind",
+        )
+        .await;
+        assert_eq!(
+            first_reasserts.load(Ordering::SeqCst),
+            1,
+            "the dead session must not keep being rebound"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            first_reasserts.load(Ordering::SeqCst),
+            1,
+            "the supervisor must reconnect instead of retrying the stale session"
+        );
+
+        drop(sender);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn periodically_reasserts_the_binding() {
+        let (_sender, session) = fake_session("");
+        session
+            .reasserts
+            .lock()
+            .unwrap()
+            .push_back(Ok("Ctrl+B".to_string()));
+        let reasserts = session.reassert_count.clone();
+        let (connector, _connects) = FakeConnector::new(vec![session]);
+        let sink = Arc::new(FakeSink::default());
+        let (_commands, command_rx) = mpsc::channel(8);
+        let task = tokio::spawn(supervise(
+            connector,
+            sink.clone(),
+            command_rx,
+            fast_schedule(),
+        ));
+
+        wait_until(
+            || reasserts.load(Ordering::SeqCst) >= 2,
+            "repeated periodic re-asserts",
+        )
+        .await;
+        assert!(
+            sink.bindings
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|binding| binding == "Ctrl+B"),
+            "the re-assert must record the trigger the desktop reported"
+        );
+
+        task.abort();
     }
 }

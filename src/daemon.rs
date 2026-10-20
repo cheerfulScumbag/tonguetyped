@@ -210,12 +210,25 @@ fn acquire_instance_lock_at(
         .create(true)
         .truncate(false)
         .open(path)?;
-    file.try_lock()
-        .map_err(|_| anyhow::Error::new(DaemonAlreadyRunning))?;
-    if sock_path.exists() {
-        if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
             return Err(anyhow::Error::new(DaemonAlreadyRunning));
         }
+        // A real locking failure (ENOLCK/EIO on the runtime directory) is not
+        // another daemon: reporting it as one would exit 3 and stop systemd
+        // from retrying a genuinely broken start.
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(
+                anyhow::Error::new(error).context(format!("could not lock {}", path.display()))
+            );
+        }
+    }
+    // Holding the lock means no other daemon owns this socket: a daemon that
+    // released the lock but has not removed the socket yet is already shutting
+    // down. Treat the file as stale rather than probing it and mistaking that
+    // handover for a live duplicate.
+    if sock_path.exists() {
         std::fs::remove_file(sock_path)?;
     }
     file.set_len(0)?;
@@ -293,7 +306,68 @@ pub async fn reload_config_from_disk(coordinator: &Arc<Coordinator>) -> anyhow::
     result
 }
 
+/// Routes every shortcut request through the daemon's activation handle, the
+/// only owner of the GlobalShortcuts session. Returns `None` for requests
+/// that are not shortcut-related, so `dispatch` can keep one match over the
+/// rest. Split out so the routing (including "no listener is running") is
+/// testable without a full `Coordinator`.
+async fn dispatch_shortcut(
+    handle: Option<&crate::activation::ActivationHandle>,
+    request: &Request,
+) -> Option<Response> {
+    match request {
+        Request::ShortcutTest => Some(match handle {
+            None => Response::Error {
+                message: "the daemon's shortcut listener is not running".to_string(),
+            },
+            Some(handle) => match handle.test_shortcut().await {
+                Ok(crate::activation::ShortcutTestOutcome::Pressed) => {
+                    Response::ShortcutTest { pressed: true }
+                }
+                Ok(crate::activation::ShortcutTestOutcome::TimedOut) => {
+                    Response::ShortcutTest { pressed: false }
+                }
+                Err(error) => Response::Error {
+                    message: format!("shortcut test failed: {error}"),
+                },
+            },
+        }),
+        Request::ConfigureShortcut => Some(match handle {
+            None => Response::Error {
+                message: "the daemon's shortcut listener is not running".to_string(),
+            },
+            Some(handle) => match handle.configure_shortcut().await {
+                Ok(crate::activation::ReconfigureOutcome::Changed {
+                    trigger_description,
+                }) => Response::ShortcutConfigured {
+                    changed: true,
+                    trigger_description,
+                },
+                Ok(crate::activation::ReconfigureOutcome::Unchanged {
+                    trigger_description,
+                }) => Response::ShortcutConfigured {
+                    changed: false,
+                    trigger_description,
+                },
+                Err(error) => Response::Error {
+                    message: format!("shortcut configuration failed: {error}"),
+                },
+            },
+        }),
+        Request::CancelShortcutConfigure => {
+            if let Some(handle) = handle {
+                handle.cancel_configure().await;
+            }
+            Some(Response::Ok)
+        }
+        _ => None,
+    }
+}
+
 pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Response {
+    if let Some(response) = dispatch_shortcut(coordinator.activation_handle(), &request).await {
+        return response;
+    }
     let cmd = match request {
         Request::Start => CoordinatorCommand::Start,
         Request::Stop => CoordinatorCommand::Stop,
@@ -326,54 +400,6 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
                 tokio::time::timeout(SHUTDOWN_WORKER_TIMEOUT, coordinator.wait_for_worker()).await;
             return Response::Ok;
         }
-        Request::ShortcutTest => {
-            let Some(handle) = coordinator.activation_handle() else {
-                return Response::Error {
-                    message: "the daemon's shortcut listener is not running".to_string(),
-                };
-            };
-            return match handle.test_shortcut().await {
-                Ok(crate::activation::ShortcutTestOutcome::Pressed) => {
-                    Response::ShortcutTest { pressed: true }
-                }
-                Ok(crate::activation::ShortcutTestOutcome::TimedOut) => {
-                    Response::ShortcutTest { pressed: false }
-                }
-                Err(error) => Response::Error {
-                    message: format!("shortcut test failed: {error}"),
-                },
-            };
-        }
-        Request::ConfigureShortcut => {
-            let Some(handle) = coordinator.activation_handle() else {
-                return Response::Error {
-                    message: "the daemon's shortcut listener is not running".to_string(),
-                };
-            };
-            return match handle.configure_shortcut().await {
-                Ok(crate::activation::ReconfigureOutcome::Changed {
-                    trigger_description,
-                }) => Response::ShortcutConfigured {
-                    changed: true,
-                    trigger_description,
-                },
-                Ok(crate::activation::ReconfigureOutcome::Unchanged {
-                    trigger_description,
-                }) => Response::ShortcutConfigured {
-                    changed: false,
-                    trigger_description,
-                },
-                Err(error) => Response::Error {
-                    message: format!("shortcut configuration failed: {error}"),
-                },
-            };
-        }
-        Request::CancelShortcutConfigure => {
-            if let Some(handle) = coordinator.activation_handle() {
-                handle.cancel_configure().await;
-            }
-            return Response::Ok;
-        }
         Request::GetLastResult => {
             let result = coordinator.get_last_result();
             match result {
@@ -389,6 +415,9 @@ pub async fn dispatch(coordinator: &Arc<Coordinator>, request: Request) -> Respo
                     };
                 }
             }
+        }
+        Request::ShortcutTest | Request::ConfigureShortcut | Request::CancelShortcutConfigure => {
+            unreachable!("shortcut requests are handled by dispatch_shortcut")
         }
     };
 
@@ -492,5 +521,91 @@ mod tests {
         drop(second);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_socket_left_by_a_previous_daemon_is_reclaimed() {
+        let root = std::env::temp_dir().join(format!(
+            "tonguetyped-stale-socket-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let lock_path = root.join("daemon.lock");
+        let socket_path = root.join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        // Holding the instance lock proves no live daemon owns the socket, so
+        // the leftover file is reclaimed instead of reported as a duplicate.
+        let lock = acquire_instance_lock_at(&lock_path, &socket_path).unwrap();
+        assert!(!socket_path.exists(), "the stale socket must be removed");
+        drop(lock);
+        drop(listener);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shortcut_requests_route_through_the_activation_handle() {
+        let (commands, mut receiver) = tokio::sync::mpsc::channel(8);
+        let handle = crate::activation::ActivationHandle::for_test(commands);
+        let responder = tokio::spawn(async move {
+            match receiver.recv().await {
+                Some(crate::activation::ActivationCommand::Test { reply }) => {
+                    reply
+                        .send(Ok(crate::activation::ShortcutTestOutcome::Pressed))
+                        .unwrap();
+                }
+                _ => panic!("expected a shortcut test command"),
+            }
+            match receiver.recv().await {
+                Some(crate::activation::ActivationCommand::Configure { reply }) => {
+                    reply
+                        .send(Ok(crate::activation::ReconfigureOutcome::Changed {
+                            trigger_description: "Super+O".to_string(),
+                        }))
+                        .unwrap();
+                }
+                _ => panic!("expected a configure command"),
+            }
+            match receiver.recv().await {
+                Some(crate::activation::ActivationCommand::CancelConfigure) => {}
+                _ => panic!("expected a cancel command"),
+            }
+        });
+
+        let test = dispatch_shortcut(Some(&handle), &Request::ShortcutTest)
+            .await
+            .unwrap();
+        assert!(matches!(test, Response::ShortcutTest { pressed: true }));
+
+        let configure = dispatch_shortcut(Some(&handle), &Request::ConfigureShortcut)
+            .await
+            .unwrap();
+        assert!(matches!(
+            configure,
+            Response::ShortcutConfigured { changed: true, .. }
+        ));
+
+        let cancel = dispatch_shortcut(Some(&handle), &Request::CancelShortcutConfigure)
+            .await
+            .unwrap();
+        assert!(matches!(cancel, Response::Ok));
+        responder.await.unwrap();
+
+        let missing = dispatch_shortcut(None, &Request::ShortcutTest)
+            .await
+            .unwrap();
+        assert!(
+            matches!(missing, Response::Error { message } if message.contains("not running")),
+            "no listener must be reported, not a silent fallback"
+        );
+        assert!(
+            dispatch_shortcut(None, &Request::Start).await.is_none(),
+            "non-shortcut requests stay with dispatch"
+        );
     }
 }

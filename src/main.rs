@@ -40,12 +40,15 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = daemon::run_daemon(config).await {
                 // "Another daemon owns the lock" is not a crash to retry: the
                 // systemd units skip this exit status, so the unit fails once
-                // instead of restarting forever behind a manual daemon.
-                if error.is::<daemon::DaemonAlreadyRunning>() {
-                    eprintln!("Error: {error}");
-                    std::process::exit(daemon::EXIT_DAEMON_ALREADY_RUNNING);
+                // instead of restarting forever behind a manual daemon. Every
+                // other failure keeps anyhow's ordinary exit-1 reporting.
+                match daemon::exit_code_for_error(&error) {
+                    daemon::EXIT_DAEMON_ALREADY_RUNNING => {
+                        eprintln!("Error: {error}");
+                        std::process::exit(daemon::EXIT_DAEMON_ALREADY_RUNNING);
+                    }
+                    _ => return Err(error),
                 }
-                return Err(error);
             }
         }
         Some(Commands::Daemon {

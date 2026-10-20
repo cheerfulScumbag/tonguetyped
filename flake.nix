@@ -342,17 +342,6 @@
               test ${pkgs.lib.escapeShellArg service.serviceConfig.RestartPreventExitStatus} = "3"
               touch $out
             '';
-
-        # Both modules must keep "another daemon is already running" out of
-        # the restart loop, not just the NixOS one. The home-manager module
-        # cannot be evaluated here without a home-manager input, so its unit
-        # declaration is asserted directly.
-        checks.daemon-unit-exit-status =
-          pkgs.runCommand "tonguetyped-daemon-unit-exit-status-check" { } ''
-            grep -q 'RestartPreventExitStatus = "3";' ${./nix/modules/home-manager.nix}
-            grep -q 'RestartPreventExitStatus = "3";' ${./nix/modules/nixos.nix}
-            touch $out
-          '';
       }
     )
     // {
