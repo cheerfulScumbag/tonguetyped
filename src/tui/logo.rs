@@ -122,3 +122,90 @@ mod tests {
         assert_eq!(first_line_text, format!("{}TONGUETYPED", " ".repeat(5)));
     }
 }
+
+/// The compact speech-bubble mark used by the split-deck header. The art is
+/// the 14x7 half-block version of the app icon: `▓` is the purple bubble fill,
+/// `█` is the green outline and T. The text blocks align to the right of the
+/// mark, so narrow terminals still see the wordmark.
+pub const BUBBLE_HEIGHT: u16 = 7;
+
+const BUBBLE_ART: [&str; 7] = [
+    "   ▄▄▄▄▄▄▄▄▄▄",
+    "  █▓▓▄▓▓▓▄▓▓█",
+    "  ▀▓██▀▀██▀▓",
+    "  ▓▓██▓▓█▓▓█",
+    " █▓▓██▄▄█▓▓█",
+    " ▀▄▄▓▄▄▀▀▀▀",
+    "  ▀▀",
+];
+
+fn bubble_line(art: &str, text: Option<Line<'static>>) -> Line<'static> {
+    let purple = Style::default().fg(Color::Rgb(50, 0, 77));
+    let green = Style::default()
+        .fg(Color::Rgb(0, 255, 0))
+        .add_modifier(Modifier::BOLD);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for ch in art.chars() {
+        used += 1;
+        match ch {
+            '▓' => spans.push(Span::styled("▓", purple)),
+            '█' => spans.push(Span::styled("█", green)),
+            _ => spans.push(Span::raw(ch.to_string())),
+        }
+    }
+    for _ in used..14 {
+        spans.push(Span::raw(" "));
+    }
+    if let Some(text) = text {
+        spans.push(Span::raw("   "));
+        spans.extend(text.spans);
+    }
+    Line::from(spans)
+}
+
+/// The header for the split deck: the compact bubble on the left, the wordmark
+/// and live status on the right. The art is always 14 columns so the text has a
+/// stable column; terminals narrower than that simply clip the right side.
+pub fn bubble_header(daemon_running: bool, model: &str) -> Vec<Line<'static>> {
+    let brand = Style::default()
+        .fg(Color::Rgb(0, 255, 0))
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(Color::DarkGray);
+    let (daemon_text, daemon_style) = if daemon_running {
+        ("running", Style::default().fg(Color::Green))
+    } else {
+        ("stopped", Style::default().fg(Color::Red))
+    };
+    vec![
+        bubble_line(
+            BUBBLE_ART[0],
+            Some(Line::from(Span::styled("TONGUETYPED", brand))),
+        ),
+        bubble_line(
+            BUBBLE_ART[1],
+            Some(Line::from(Span::styled("speak · type · repeat", muted))),
+        ),
+        bubble_line(
+            BUBBLE_ART[2],
+            Some(Line::from(vec![
+                Span::styled("● ", daemon_style),
+                Span::raw("daemon "),
+                Span::styled(daemon_text, daemon_style),
+                Span::raw("   "),
+                Span::styled("model ", muted),
+                Span::styled(model.to_string(), Style::default().fg(Color::Cyan)),
+            ])),
+        ),
+        bubble_line(BUBBLE_ART[3], None),
+        bubble_line(BUBBLE_ART[4], None),
+        bubble_line(
+            BUBBLE_ART[5],
+            Some(Line::from(Span::styled(
+                "~/tonguetyped · local only",
+                muted,
+            ))),
+        ),
+        bubble_line(BUBBLE_ART[6], None),
+    ]
+}
