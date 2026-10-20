@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # libsamplerate-sys still declares cmake_minimum_required(VERSION 2.8).
+  # CMake 4 removed compatibility with minimums below 3.5.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   fmt:
