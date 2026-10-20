@@ -323,12 +323,13 @@ its list steps) goes back.
 | `tonguetyped last-result` | Print the most recent transcription |
 | `tonguetyped transcribe <file>` | Transcribe a WAV file and print the transcript |
 | `tonguetyped doctor` | Check runtime dependencies, mic, model, and backends |
-| `tonguetyped shortcut-test` | Bind the shortcut and wait for you to press it |
+| `tonguetyped shortcut-test` | Test the shortcut and wait for you to press it |
 | `tonguetyped autostart enable` / `disable` | Toggle desktop-session autostart |
 | `tonguetyped model list` / `install` / `use` / `remove` | Manage GGUF models |
 
 The daemon listens on `$XDG_RUNTIME_DIR/tonguetyped/control.sock` and refuses to
-start a second instance.
+start a second instance, exiting with status 3 when another daemon already
+holds the lock.
 
 ### The desktop shortcut
 
@@ -339,9 +340,10 @@ KDE's System Settings, GNOME's Keyboard settings, and so on. The dashboard's
 Shortcut screen offers an explicit action to open that dialog for you.
 
 This means a fresh install starts **unbound**: nothing responds until you assign
-a key. `tonguetyped shortcut-test` binds the action and waits up to 15 seconds
-for you to press whatever key you have bound, reporting whether the press was
-actually detected.
+a key. `tonguetyped shortcut-test` waits up to 15 seconds for you to press
+whatever key you have bound, reporting whether the press was actually detected.
+While the daemon runs, it asks the daemon's own listener, so the test never
+opens a competing shortcut session; with no daemon, it uses its own session.
 
 Activation comes in two modes, set from the dashboard or `config.toml`:
 
@@ -385,14 +387,17 @@ shows as `stopped` and is picked up again when it comes back, so the stream
 never ends while the bar runs.
 
 ```json
-{"text":"recording","alt":"recording","class":"recording","tooltip":"TongueTyped: recording"}
+{"text":"recording","alt":"recording","class":"recording","tooltip":"TongueTyped: recording\nShortcut: available\nShortcut key: Super+O"}
 ```
 
 The state is `idle`, `recording`, `processing`, or `stopped`, repeated in
 `text`, `alt` and `class` so you can show it as text, map it to an icon, or
-style it. `--extended` adds `model`, `backend`, `device` and `build` fields;
-the tooltip lists `model`, `backend` and `device`, while `build` appears only in
-the JSON.
+style it. The tooltip always reports the shortcut state (`initializing`,
+`available`, `unbound (no key set)`, or `failed`), the bound key when there is
+one, and any shortcut error, so a bar can show a shortcut that died instead of
+claiming it works. `--extended` adds `model`, `backend`, `device` and `build`
+fields; the tooltip then also lists `model`, `backend` and `device`, while
+`build` appears only in the JSON.
 
 ```jsonc
 // Waybar (config.jsonc)

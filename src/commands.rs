@@ -36,7 +36,10 @@ pub async fn send_ipc(request: Request) -> anyhow::Result<Response> {
 /// [`send_ipc`] against an explicit socket path. Split out so a caller can
 /// bound or target a specific socket (`stop_daemon_at` below) without reaching
 /// for the process-wide `daemon::socket_path()`.
-async fn send_ipc_at(sock_path: &std::path::Path, request: Request) -> anyhow::Result<Response> {
+pub async fn send_ipc_at(
+    sock_path: &std::path::Path,
+    request: Request,
+) -> anyhow::Result<Response> {
     if !sock_path.exists() {
         anyhow::bail!(
             "daemon is not running (no socket at {})",
@@ -71,6 +74,100 @@ pub fn daemon_socket_exists() -> bool {
     crate::daemon::socket_path()
         .map(|path| socket_is_alive(&path))
         .unwrap_or(false)
+}
+
+/// Tests the activation shortcut without ever opening a second
+/// GlobalShortcuts session while a daemon owns one. On KDE a helper session's
+/// teardown deactivates the shared desktop action, so a daemon-present test
+/// asks the daemon's own listener instead. With no daemon there is no binding
+/// to clobber, so the standalone helper path is safe.
+pub async fn test_shortcut() -> Result<crate::activation::ShortcutTestOutcome, String> {
+    match daemon_control_socket() {
+        Some(sock_path) => test_shortcut_at(&sock_path).await,
+        None => crate::activation::test_shortcut_binding().await,
+    }
+}
+
+/// [`test_shortcut`] against an explicit daemon socket, so the routing can be
+/// exercised headlessly with a fake listener.
+pub async fn test_shortcut_at(
+    sock_path: &std::path::Path,
+) -> Result<crate::activation::ShortcutTestOutcome, String> {
+    match send_ipc_at(sock_path, Request::ShortcutTest).await {
+        Ok(Response::ShortcutTest { pressed: true }) => {
+            Ok(crate::activation::ShortcutTestOutcome::Pressed)
+        }
+        Ok(Response::ShortcutTest { pressed: false }) => {
+            Ok(crate::activation::ShortcutTestOutcome::TimedOut)
+        }
+        Ok(Response::Error { message }) => Err(message),
+        Ok(other) => Err(format!("unexpected reply from the daemon: {other:?}")),
+        Err(error) => Err(format!(
+            "could not ask the running daemon to test the shortcut: {error}"
+        )),
+    }
+}
+
+/// Opens the desktop's shortcut editor on the daemon's own session when a
+/// daemon is running, falling back to the standalone session only when none
+/// is. A daemon that exists but fails the request is reported as an error -
+/// silently opening a competing session is exactly the bug this avoids.
+pub async fn configure_shortcut(
+    cancel: tokio::sync::oneshot::Receiver<()>,
+) -> Result<crate::activation::ReconfigureOutcome, String> {
+    match daemon_control_socket() {
+        Some(sock_path) => configure_shortcut_at(&sock_path, cancel).await,
+        None => crate::activation::reconfigure_shortcut(cancel).await,
+    }
+}
+
+/// [`configure_shortcut`] against an explicit daemon socket. Cancelling the
+/// wait sends a separate `CancelShortcutConfigure` request (a second
+/// connection), because the original connection is still waiting for the
+/// configure reply; the daemon settles that request on the unchanged trigger.
+/// The cancel round-trip completes before this returns, so a caller that
+/// starts a replacement dialog afterwards cannot have a stale cancel end it.
+pub async fn configure_shortcut_at(
+    sock_path: &std::path::Path,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
+) -> Result<crate::activation::ReconfigureOutcome, String> {
+    let response = send_ipc_at(sock_path, Request::ConfigureShortcut);
+    tokio::pin!(response);
+    let response = tokio::select! {
+        response = &mut response => response,
+        cancelled = &mut cancel => {
+            if cancelled.is_ok() {
+                let _ = send_ipc_at(sock_path, Request::CancelShortcutConfigure).await;
+            }
+            (&mut response).await
+        }
+    };
+    match response {
+        Ok(Response::ShortcutConfigured {
+            changed: true,
+            trigger_description,
+        }) => Ok(crate::activation::ReconfigureOutcome::Changed {
+            trigger_description,
+        }),
+        Ok(Response::ShortcutConfigured {
+            changed: false,
+            trigger_description,
+        }) => Ok(crate::activation::ReconfigureOutcome::Unchanged {
+            trigger_description,
+        }),
+        Ok(Response::Error { message }) => Err(message),
+        Ok(other) => Err(format!("unexpected reply from the daemon: {other:?}")),
+        Err(error) => Err(format!(
+            "could not ask the running daemon to configure the shortcut: {error}"
+        )),
+    }
+}
+
+/// The live daemon socket, or `None` when nothing is listening. A stale
+/// socket file is removed by the probe, matching `daemon_socket_exists`.
+fn daemon_control_socket() -> Option<std::path::PathBuf> {
+    let sock_path = crate::daemon::socket_path().ok()?;
+    socket_is_alive(&sock_path).then_some(sock_path)
 }
 
 fn socket_is_alive(sock_path: &std::path::Path) -> bool {
@@ -372,6 +469,23 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
         Response::RecordingStarted => vec![line("recording started")],
         Response::RecordingStopped => vec![line("recording stopped")],
         Response::Cancelled => vec![line("cancelled")],
+        Response::ShortcutTest { pressed: true } => {
+            vec![line("shortcut press detected - the daemon received it")]
+        }
+        Response::ShortcutTest { pressed: false } => vec![error_line(
+            "no shortcut press detected within 15s".to_string(),
+        )],
+        Response::ShortcutConfigured {
+            changed,
+            trigger_description,
+        } => {
+            let trigger = crate::activation::keybind_display(trigger_description);
+            if *changed {
+                vec![line(format!("shortcut changed to {trigger}"))]
+            } else {
+                vec![line(format!("shortcut unchanged ({trigger})"))]
+            }
+        }
         Response::Error { message } => vec![error_line(message.clone())],
         Response::Status {
             state,
@@ -380,6 +494,7 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
             config_error,
             shortcut_status,
             activation_error,
+            shortcut_trigger,
             build,
             ..
         } => {
@@ -394,13 +509,12 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
                 line(format!("activation mode:  {activation_mode}")),
                 line(format!(
                     "shortcut status:  {}",
-                    match shortcut_status {
-                        ipc::ShortcutStatus::Initializing => "initializing",
-                        ipc::ShortcutStatus::Available => "available",
-                        ipc::ShortcutStatus::Failed => "failed",
-                    }
+                    shortcut_status_label(shortcut_status)
                 )),
             ];
+            if let Some(trigger) = shortcut_trigger {
+                lines.push(line(format!("shortcut key:     {trigger}")));
+            }
             if let Some(error) = config_error {
                 lines.push(error_line(format!("config error:     {error}")));
             }
@@ -416,6 +530,19 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
             line(format!("result:   {text}")),
             line(format!("time:     {timestamp}")),
         ],
+    }
+}
+
+/// The user-facing label for the daemon's shortcut state. Kept in one place
+/// so text status, doctor and the dashboard cannot drift on what "available"
+/// means; it never implies a key is grabbed when the action is unbound or the
+/// listener failed.
+pub fn shortcut_status_label(status: &ipc::ShortcutStatus) -> &'static str {
+    match status {
+        ipc::ShortcutStatus::Initializing => "initializing",
+        ipc::ShortcutStatus::Available => "available",
+        ipc::ShortcutStatus::Unbound => "unbound (no key set)",
+        ipc::ShortcutStatus::Failed => "failed",
     }
 }
 
@@ -498,11 +625,10 @@ pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
     }
     lines.push(line(format!(
         "shortcut portal: {}",
-        match report.shortcut_status {
+        match &report.shortcut_status {
             None => "not tested (run `tonguetyped shortcut-test`)",
-            Some(ipc::ShortcutStatus::Initializing) => "initializing",
-            Some(ipc::ShortcutStatus::Available) => "available",
             Some(ipc::ShortcutStatus::Failed) => "unavailable",
+            Some(status) => shortcut_status_label(status),
         }
     )));
     if let Some(error) = &report.shortcut_portal_error {
@@ -758,5 +884,135 @@ mod tests {
 
         drop(held);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A fake daemon for one shortcut request: asserts the request type and
+    /// replies with `response`.
+    fn serve_one_shortcut_request(
+        listener: tokio::net::UnixListener,
+        expected: Request,
+        response: Response,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: Request = ipc::decode_frame(&line).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&request),
+                std::mem::discriminant(&expected),
+                "unexpected request: {request:?}"
+            );
+            let frame = ipc::encode_frame(&response).unwrap();
+            writer.write_all(frame.as_bytes()).await.unwrap();
+        })
+    }
+
+    #[tokio::test]
+    async fn shortcut_test_routes_to_the_daemon_socket() {
+        let root = unique_temp_dir("shortcut-test-ipc");
+        std::fs::create_dir_all(&root).unwrap();
+        let sock_path = root.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let server = serve_one_shortcut_request(
+            listener,
+            Request::ShortcutTest,
+            Response::ShortcutTest { pressed: true },
+        );
+
+        // No portal is involved on this path; a real daemon reply is enough.
+        assert_eq!(
+            test_shortcut_at(&sock_path).await.unwrap(),
+            crate::activation::ShortcutTestOutcome::Pressed
+        );
+
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_daemon_configure_settles_on_the_unchanged_trigger() {
+        let root = unique_temp_dir("shortcut-configure-ipc");
+        std::fs::create_dir_all(&root).unwrap();
+        let sock_path = root.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        let configure_path = sock_path.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                ipc::decode_frame::<Request>(&line).unwrap(),
+                Request::ConfigureShortcut
+            ));
+
+            // The cancel arrives on its own connection while the configure
+            // request is still waiting, exactly like the dashboard's
+            // "keep current" action.
+            let (cancel_stream, _) = listener.accept().await.unwrap();
+            let (cancel_reader, mut cancel_writer) = cancel_stream.into_split();
+            let mut cancel_reader = tokio::io::BufReader::new(cancel_reader);
+            let mut cancel_line = String::new();
+            cancel_reader.read_line(&mut cancel_line).await.unwrap();
+            assert!(matches!(
+                ipc::decode_frame::<Request>(&cancel_line).unwrap(),
+                Request::CancelShortcutConfigure
+            ));
+            cancel_writer
+                .write_all(ipc::encode_frame(&Response::Ok).unwrap().as_bytes())
+                .await
+                .unwrap();
+
+            let frame = ipc::encode_frame(&Response::ShortcutConfigured {
+                changed: false,
+                trigger_description: "Super+O".to_string(),
+            })
+            .unwrap();
+            writer.write_all(frame.as_bytes()).await.unwrap();
+        });
+
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let call =
+            tokio::spawn(async move { configure_shortcut_at(&configure_path, cancel_rx).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_tx.send(()).unwrap();
+
+        assert_eq!(
+            call.await.unwrap().unwrap(),
+            crate::activation::ReconfigureOutcome::Unchanged {
+                trigger_description: "Super+O".to_string(),
+            }
+        );
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unbound_shortcut_status_is_not_rendered_as_available() {
+        let response = Response::Status {
+            state: "idle".to_string(),
+            activation_mode: "toggle".to_string(),
+            operation_error: None,
+            config_error: None,
+            shortcut_status: ipc::ShortcutStatus::Unbound,
+            activation_error: None,
+            shortcut_trigger: None,
+            build: Some("0.2.2".to_string()),
+            model: None,
+            backend: None,
+            device: None,
+        };
+        let text = format_response_lines(&response)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("shortcut status:  unbound (no key set)"));
+        assert!(!text.contains("shortcut status:  available"));
     }
 }
