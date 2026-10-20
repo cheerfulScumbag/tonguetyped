@@ -1358,8 +1358,6 @@ impl App {
             Span::raw(" activate   "),
             Span::styled("d", accent),
             Span::raw(" download   "),
-            Span::styled("i", accent),
-            Span::raw(" inspect   "),
             Span::styled("/", accent),
             Span::raw(" filter"),
         ]));

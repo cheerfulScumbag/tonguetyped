@@ -1261,7 +1261,7 @@ impl TextFieldsScreen {
     pub(super) fn deck_lines(&self, width: usize) -> Vec<Line<'static>> {
         if self.disabled {
             return vec![Line::from(
-                "History is off. Press s to turn it on and edit these fields.",
+                "History is off. Press space to turn it on and edit these fields.",
             )];
         }
         let label_width = self
