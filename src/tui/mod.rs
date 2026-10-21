@@ -506,7 +506,7 @@ impl App {
         // clobbering it with a stale copy.
         if let Ok(reloaded) = Config::load() {
             self.config = reloaded;
-            self.sync_deck_history();
+            self.sync_deck_panes();
         }
     }
 
@@ -2524,20 +2524,9 @@ impl App {
     /// without first leaving would strand the dashboard on the primary
     /// screen once the console exits.
     fn run_setup_console(&mut self, terminal: &mut Terminal<Backend>) -> anyhow::Result<()> {
-        if let Err(error) = self.config.save() {
-            self.info_scroll.set(0);
-            self.remember_info_return();
-            self.screen = Screen::Info {
-                title: "Setup".to_string(),
-                lines: vec![OutputLine {
-                    text: format!(
-                        "Could not save the dashboard settings before opening setup: {error}"
-                    ),
-                    is_error: true,
-                }],
-            };
-            return Ok(());
-        }
+        // The console reloads config.toml itself, and every Deck pane persists
+        // its own edits immediately, so writing the dashboard's copy first
+        // would only clobber a newer on-disk config from another terminal.
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
@@ -2549,7 +2538,7 @@ impl App {
 
         if let Ok(reloaded) = Config::load() {
             self.config = reloaded;
-            self.sync_deck_history();
+            self.sync_deck_panes();
         }
         if let Err(error) = outcome {
             self.info_scroll.set(0);
@@ -2571,9 +2560,23 @@ impl App {
         self.deck_history = screens::TextFieldsScreen::history_retention(&self.config);
     }
 
+    /// Rebuilds the Deck's config-backed Output selection from the current
+    /// capabilities and config, so `Enter` cannot apply a row that no longer
+    /// matches the persisted method and reset its options.
+    fn sync_deck_output(&mut self) {
+        self.deck_output = screens::OutputScreen::new(&self.capabilities, &self.config);
+    }
+
+    /// Resyncs every Deck pane that snapshots config, so returning to the Deck
+    /// or reloading config never leaves a pane able to write back stale values.
+    fn sync_deck_panes(&mut self) {
+        self.sync_deck_history();
+        self.sync_deck_output();
+    }
+
     fn open_deck(&mut self) {
         self.screen = Screen::Deck;
-        self.sync_deck_history();
+        self.sync_deck_panes();
     }
 
     fn leave_to_return_screen(&mut self) {

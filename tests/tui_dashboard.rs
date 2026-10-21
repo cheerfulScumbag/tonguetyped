@@ -16,6 +16,7 @@
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
 use std::process::{Child as StdChild, Command as StdCommand, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -212,14 +213,39 @@ impl Session {
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().expect("clone reader");
         let writer = pair.master.take_writer().expect("take writer");
+        // `Terminal::clear` asks the terminal for its cursor position and waits
+        // for the report. A real terminal answers; this parser does not, so
+        // answer it here - otherwise any screen that clears after suspending
+        // (the guided setup console) blocks forever inside the dashboard.
+        let reporter_fd = unsafe { libc::dup(pair.master.as_raw_fd().expect("pty master fd")) };
+        assert!(
+            reporter_fd >= 0,
+            "duplicate the pty master for cursor reports"
+        );
+        let mut reporter = unsafe { std::fs::File::from_raw_fd(reporter_fd) };
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let parser_for_thread = parser.clone();
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
+            let mut tail: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => parser_for_thread.lock().unwrap().process(&chunk[..n]),
+                    Ok(n) => {
+                        let bytes = &chunk[..n];
+                        parser_for_thread.lock().unwrap().process(bytes);
+                        tail.extend_from_slice(bytes);
+                        while let Some(position) =
+                            tail.windows(4).position(|window| window == b"\x1b[6n")
+                        {
+                            tail.drain(..position + 4);
+                            let _ = reporter.write_all(b"\x1b[1;1R");
+                            let _ = reporter.flush();
+                        }
+                        if tail.len() > 8 {
+                            tail.drain(..tail.len() - 8);
+                        }
+                    }
                 }
             }
         });
@@ -1149,6 +1175,108 @@ fn pty_deck_history_form_resyncs_after_a_background_action_reloads_config() {
     );
 
     handle.join().unwrap();
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_output_selection_resyncs_after_settings_change_the_method() {
+    let sandbox = Sandbox::new("deck-output-resync");
+    sandbox.install_typing_helper("wtype");
+    sandbox.write_config("[output]\nmethod = \"none\"\ntyping_backend = \"wtype\"\n");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    // Change the saved method in the full Settings screen, as the finding's
+    // Deck -> g -> Transcript output path does.
+    open_settings(&mut session);
+    select_setting(&mut session, "Transcript output");
+    session.send(KEY_ENTER);
+    session.wait_for("Do not deliver", Duration::from_secs(3));
+    session.send(KEY_DOWN);
+    session.wait_for(
+        "> Type into the focused application",
+        Duration::from_secs(3),
+    );
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+    let saved: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        saved["output"]["method"].as_str(),
+        Some("type"),
+        "the settings screen should have saved the new method: {saved:?}"
+    );
+
+    // Returning to the Deck must resync the Output pane. If it keeps the
+    // startup selection ("none"), Enter applies that stale row: it reverts
+    // the method and resets typing_backend to "auto".
+    session.send(KEY_ESC);
+    session.wait_for("Settings", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    session.wait_for("enter setup", Duration::from_secs(3));
+    session.send(b"o");
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["output"]["method"].as_str(),
+        Some("type"),
+        "the Deck Output pane must not write back the method it was built with: {config:?}"
+    );
+    assert_eq!(
+        config["output"]["typing_backend"].as_str(),
+        Some("wtype"),
+        "applying a synced row must not reset the typing backend: {config:?}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_setup_console_preserves_an_external_config_rewrite() {
+    let sandbox = Sandbox::new("setup-presave");
+    sandbox.install_typing_helper("wtype");
+    sandbox.write_config("[output]\nmethod = \"type\"\ntyping_backend = \"wtype\"\n");
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    // Another terminal (or dashboard) rewrites the config while this
+    // dashboard is open. Launching the setup console must not overwrite it
+    // with this process's startup snapshot before the console reloads.
+    sandbox.write_config("[output]\nmethod = \"none\"\ntyping_backend = \"wtype\"\n");
+
+    session.send(b"p");
+    session.wait_for("Review", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Speech model", Duration::from_secs(15));
+    session.send(b"q");
+    // Re-entering the alternate screen clears it; nudge the Deck to redraw a
+    // changed pane so the assertion below reads the resumed dashboard.
+    session.send(b"s");
+    session.wait_for("5 destinations", Duration::from_secs(10));
+
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["output"]["method"].as_str(),
+        Some("none"),
+        "launching and cancelling setup must keep the newer on-disk config: {config:?}"
+    );
+
+    // The Output pane must also follow the config the console reloaded, not
+    // the method this dashboard started with.
+    session.send(b"o");
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    session.send(KEY_ENTER);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["output"]["method"].as_str(),
+        Some("none"),
+        "the Deck Output pane must use the config reloaded after setup: {config:?}"
+    );
+
     session.quit_and_wait();
 }
 
