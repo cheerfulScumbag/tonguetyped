@@ -1098,6 +1098,61 @@ fn pty_deck_output_step_saves_without_enter() {
 }
 
 #[test]
+fn pty_deck_history_form_resyncs_after_a_background_action_reloads_config() {
+    let sandbox = Sandbox::new("dhs");
+    sandbox.write_config("[history]\nenabled = true\nmax_entries = 1000\nmax_age_days = 30\n");
+    // A daemon socket that accepts the Toggle request and holds it open, so
+    // the Deck is still showing the History pane while the action is pending.
+    let socket = sandbox.socket_path();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        }
+    });
+
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(KEY_ENTER);
+    session.wait_for("Working: Toggle...", Duration::from_secs(3));
+    session.send(b"h");
+    let history = session.wait_for("Maximum entries", Duration::from_secs(3));
+    assert!(
+        history.contains("1000"),
+        "the Deck History pane should start from the saved limit:\n{history}"
+    );
+
+    // Another process (e.g. the CLI or setup console) lowers the persisted
+    // limit while the Deck action is still in flight. When the action result
+    // reloads config, the Deck's History form must follow it instead of later
+    // writing the stale 1000 back over the file.
+    sandbox.write_config("[history]\nenabled = true\nmax_entries = 500\nmax_age_days = 30\n");
+
+    session.wait_for("Connection reset by peer", Duration::from_secs(10));
+    session.send(KEY_ESC);
+    let deck = session.wait_for("Maximum entries", Duration::from_secs(3));
+    assert!(
+        deck.contains("500") && !deck.contains("1000"),
+        "returning to the Deck must resync the History form from config:\n{deck}"
+    );
+
+    session.send(KEY_ENTER);
+    session.wait_for("History retention saved.", Duration::from_secs(3));
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["history"]["max_entries"].as_integer(),
+        Some(500),
+        "saving the Deck History pane must not overwrite the reloaded limit: {config:?}"
+    );
+
+    handle.join().unwrap();
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_deck_models_download_key_installs_without_activating() {
     let sandbox = Sandbox::new("deck-download");
     for entry in tonguetyped::catalog::ENTRIES {

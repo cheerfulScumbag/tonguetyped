@@ -8,13 +8,19 @@
 //! service that must outlive this dashboard session (see that function's
 //! doc comment).
 //!
-//! The home screen is one Settings panel with one selection cursor, grouped
-//! into four labeled sections (Language & model, Capture & activation, Output,
-//! Behaviour) listing the fifteen configuration areas (Model, Inference
-//! backend, Translation, Decoding, Text processing, Microphone, Activation,
-//! Shortcut, Transcript output, Typing backend, Transcript folder, History
-//! retention, Startup, Overlay, Media pause) with their current values, plus a
-//! Commands row. The Commands row opens a dedicated Commands screen derived
+//! The dashboard opens with a skippable splash, then the split Deck: a header
+//! with the compact bubble mark and live status, a rail of five destinations
+//! (Speak, Models, Output, History, Setup), and one pane for the selected
+//! destination. The Setup pane reaches the guided setup console, the full
+//! Settings panel, and the Commands screen.
+//!
+//! The Settings panel is one selection cursor, grouped into four labeled
+//! sections (Language & model, Capture & activation, Output, App) listing the
+//! fifteen configuration areas (Model, Inference backend, Translation,
+//! Decoding, Text processing, Microphone, Activation, Shortcut, Transcript
+//! output, Typing backend, Transcript folder, History retention, Startup,
+//! Overlay, Media pause) with their current values, plus a Commands row. The
+//! Commands row opens a dedicated Commands screen derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
 //! Toggle. `model` and `autostart` are CLI commands but live in the Settings
@@ -381,8 +387,9 @@ struct OverlayPreview {
     pixels: Vec<u8>,
 }
 
-/// How often the home screen's status strip re-probes daemon liveness.
-/// `status_strip_line` renders on every tick of `run_loop`'s 66ms ticker, but
+/// How often the dashboard's daemon status re-probes liveness.
+/// `status_strip_line` and the Deck's header, rail, and Speak pane render on
+/// every tick of `run_loop`'s 66ms ticker, but
 /// the probe it displays (`commands::daemon_socket_exists`) opens a real
 /// `UnixStream` connection against the daemon's control socket - re-running
 /// that on every redraw would make the daemon's accept loop spawn a task per
@@ -2667,8 +2674,9 @@ impl App {
     }
 
     /// The dedicated Commands screen, reached from the Settings panel's
-    /// Commands row. It lists the same clap-derived commands the home screen
-    /// used to stack below the Settings panel, with the standard list grammar.
+    /// Commands row and the Deck's Setup pane. It lists the same clap-derived
+    /// commands the home screen used to stack below the Settings panel, with
+    /// the standard list grammar.
     fn render_commands(&self, frame: &mut Frame, area: Rect) {
         let rows: Vec<String> = self
             .command_items

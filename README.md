@@ -283,16 +283,37 @@ Run `tonguetyped` with no subcommand:
 tonguetyped
 ```
 
-The dashboard opens on a settings overview, grouped into four sections -
-**Language & model**, **Capture & activation**, **Output**, and **Behaviour** -
-with one row each for Model, Inference backend, Translation, Decoding, Text
-processing, Microphone, Activation, Shortcut, Transcript output, Typing backend,
-Transcript folder, History retention, Startup, Overlay, and Media pause. A
-Commands row below them opens a separate screen listing the remaining commands,
-where Up/Down selects a command and Enter runs it. Selecting a settings row
-opens a screen that edits just that area, with the same live microphone preview
-and shortcut dialog the setup wizard uses. The **Transcript output** screen also
-holds the **Save transcript history** toggle, which is off by default.
+A landing splash shows the TongueTyped bubble mark and tagline; any key skips
+it. The dashboard then opens on the **Split Deck**: a live rail listing five
+destinations - **Speak**, **Models**, **Output**, **History**, and **Setup** -
+with the daemon state and active model, and a pane for the selected
+destination. The dashboard is keyboard-only; there is no mouse support.
+
+Press `s`, `m`, `o`, `h`, or `p` to jump straight to a destination, Up/Down
+to move within the current pane, `?` for the key reference, and `q` to quit.
+**Speak** shows the activation instruction and a simulated mic level in a
+dark-blue wave field; `t` or Enter starts or stops dictation, `c` cancels, and
+`w` turns the wave motion on or off. **Models** lists the catalog with
+`live`/`final` wording and the selected model's detail; Enter or `a` activates
+the highlighted model, `d` downloads it without making it active, and `/`
+cycles the filter; a running download shows a progress gauge. **Output** picks
+the delivery method and toggles transcript history with Space; **History**
+toggles it with Space and edits the retention fields. Both save on Enter.
+**Setup** lists the five chapters (Model, Output, History, App, Review): Enter
+launches the existing guided setup console, `g` opens the full Settings screen
+below, and `c` opens Commands.
+
+The full Settings screen groups the fifteen configuration areas into four
+sections - **Language & model**, **Capture & activation**, **Output**, and
+**App** - with one row each for Model, Inference backend, Translation,
+Decoding, Text processing, Microphone, Activation, Shortcut, Transcript
+output, Typing backend, Transcript folder, History retention, Startup,
+Overlay, and Media pause. A Commands row below them opens a separate screen
+listing the remaining commands, where Up/Down selects a command and Enter runs
+it. Selecting a settings row opens a screen that edits just that area, with the
+same live microphone preview and shortcut dialog the setup wizard uses. The
+**Transcript output** screen also holds the **Save transcript history** toggle,
+which is off by default. Esc from the Settings overview returns to the Deck.
 
 The value steppers and choice lists share one navigation grammar: Up/Down
 moves between rows, Left/Right changes the highlighted choice in either
