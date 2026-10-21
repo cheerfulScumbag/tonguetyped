@@ -346,6 +346,7 @@ struct App {
     deck_setup_selected: usize,
     deck_wave_motion: Cell<bool>,
     deck_wave_phase: Cell<f32>,
+    deck_level_phase: Cell<f32>,
     splash_until: Cell<Option<Instant>>,
     return_screen: InfoReturn,
     command_items: Vec<HomeItem>,
@@ -420,6 +421,7 @@ impl App {
             deck_setup_selected: 0,
             deck_wave_motion: Cell::new(false),
             deck_wave_phase: Cell::new(0.0),
+            deck_level_phase: Cell::new(0.0),
             splash_until: Cell::new(Some(Instant::now() + Duration::from_millis(700))),
             return_screen: InfoReturn::Home,
             command_items: home_items(),
@@ -511,6 +513,8 @@ impl App {
         if let Screen::Microphone(screen) = &mut self.screen {
             screen.poll_preview();
         }
+        let level_phase = (self.deck_level_phase.get() + 0.07) % std::f32::consts::TAU;
+        self.deck_level_phase.set(level_phase);
         if matches!(self.screen, Screen::Deck) && self.deck_wave_motion.get() {
             let phase = (self.deck_wave_phase.get() + 0.09) % std::f32::consts::TAU;
             self.deck_wave_phase.set(phase);
@@ -792,8 +796,7 @@ impl App {
                             is_error: false,
                         },
                         OutputLine {
-                            text: "Models: a/d activate or download   / filter   enter activate"
-                                .to_string(),
+                            text: "Models: a or enter activate   d download   / filter".to_string(),
                             is_error: false,
                         },
                         OutputLine {
@@ -843,14 +846,14 @@ impl App {
                     self.deck_model_selected =
                         (self.deck_model_selected + 1).min(len.saturating_sub(1));
                 }
-                KeyCode::Enter | KeyCode::Char('a') | KeyCode::Char('d')
-                    if self.pending.is_none() =>
-                {
-                    let rows = self.deck_model_rows();
-                    if let Some(row) =
-                        rows.get(self.deck_model_selected.min(rows.len().saturating_sub(1)))
-                    {
-                        self.start_model_activation(row.id.to_string());
+                KeyCode::Enter | KeyCode::Char('a') if self.pending.is_none() => {
+                    if let Some(id) = self.deck_selected_model_id() {
+                        self.start_model_activation(id);
+                    }
+                }
+                KeyCode::Char('d') if self.pending.is_none() => {
+                    if let Some(id) = self.deck_selected_model_id() {
+                        self.start_model_download(id);
                     }
                 }
                 KeyCode::Char('/') => {
@@ -867,12 +870,12 @@ impl App {
                     self.deck_output.move_selection(1, &self.config);
                 }
                 KeyCode::Left => {
-                    if !self.deck_output.step(-1, &mut self.config) {
+                    if self.pending.is_some() || !self.deck_output.step(-1, &mut self.config) {
                         self.deck_output.move_selection(-1, &self.config);
                     }
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
-                    if !self.deck_output.step(1, &mut self.config) {
+                    if self.pending.is_some() || !self.deck_output.step(1, &mut self.config) {
                         self.deck_output.move_selection(1, &self.config);
                     }
                 }
@@ -1174,6 +1177,12 @@ impl App {
             .collect()
     }
 
+    fn deck_selected_model_id(&self) -> Option<String> {
+        let rows = self.deck_model_rows();
+        rows.get(self.deck_model_selected.min(rows.len().saturating_sub(1)))
+            .map(|row| row.id.to_string())
+    }
+
     fn deck_model_status(row: &commands::ModelRow) -> &'static str {
         if row.active {
             "active"
@@ -1195,18 +1204,6 @@ impl App {
         let muted = Style::default().fg(Color::DarkGray);
         let text = Style::default().fg(Color::Gray);
         let rows = self.deck_model_rows();
-        if rows.is_empty() {
-            let block = Block::default()
-                .borders(PANE_BORDERS)
-                .title(Line::from(Span::styled("MODELS", accent)));
-            frame.render_widget(
-                Paragraph::new("No models match this filter.")
-                    .style(text)
-                    .block(block),
-                area,
-            );
-            return;
-        }
         if let Some(progress) = self
             .pending
             .as_ref()
@@ -1246,6 +1243,18 @@ impl App {
                     Line::from(Span::styled("sha-256 checked after the download", muted)),
                 ]),
                 chunks[1],
+            );
+            return;
+        }
+        if rows.is_empty() {
+            let block = Block::default()
+                .borders(PANE_BORDERS)
+                .title(Line::from(Span::styled("MODELS", accent)));
+            frame.render_widget(
+                Paragraph::new("No models match this filter.")
+                    .style(text)
+                    .block(block),
+                area,
             );
             return;
         }
@@ -1489,11 +1498,11 @@ impl App {
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 
-    /// The Speak pane's simulated mic level. It is deterministic in the wave
-    /// phase, so it animates only while the user has motion on and stays a
-    /// readable steady value when the wave is paused.
+    /// The Speak pane's simulated mic level. It advances every tick from its
+    /// own phase, so the readout and the wave amplitude keep moving even when
+    /// the `w` motion toggle only gates the wave's translation.
     fn deck_wave_level(&self) -> f64 {
-        let phase = f64::from(self.deck_wave_phase.get());
+        let phase = f64::from(self.deck_level_phase.get());
         let slow = (phase * 0.55).sin();
         let flutter = (phase * 2.7).sin() * 0.12;
         (0.62 + slow * 0.22 + flutter).clamp(0.0, 1.0)
@@ -1923,8 +1932,9 @@ impl App {
             // highlight, like `↑`/`↓`.
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
                 let delta = Self::step_delta(key.code).unwrap_or(0);
+                let pending = self.pending.is_some();
                 if let Screen::TranscriptOutput(screen) = &mut self.screen {
-                    if !screen.step(delta, &mut self.config) {
+                    if pending || !screen.step(delta, &mut self.config) {
                         screen.move_selection(delta, &self.config);
                     }
                 }
@@ -2421,6 +2431,15 @@ impl App {
         self.spawn_pending(
             "Model activation",
             model_activation_task(id, progress.clone()),
+            Some(progress),
+        );
+    }
+
+    fn start_model_download(&mut self, id: String) {
+        let progress = Arc::new(Mutex::new((0u64, 0u64)));
+        self.spawn_pending(
+            "Model download",
+            model_download_task(id, progress.clone()),
             Some(progress),
         );
     }
@@ -3510,6 +3529,24 @@ async fn wait_for_daemon_ready(verb: &str) -> Vec<OutputLine> {
     }]
 }
 
+async fn model_download_task(id: String, progress: Arc<Mutex<(u64, u64)>>) -> Vec<OutputLine> {
+    let callback: crate::model::ProgressCallback = Arc::new(move |downloaded, total| {
+        if let Ok(mut guard) = progress.lock() {
+            *guard = (downloaded, total);
+        }
+    });
+    match commands::download_model(&id, Some(callback)).await {
+        Ok(outcome) => vec![OutputLine {
+            text: format!("model '{id}': {}", setup::outcome_label(outcome)),
+            is_error: false,
+        }],
+        Err(error) => vec![OutputLine {
+            text: error.to_string(),
+            is_error: true,
+        }],
+    }
+}
+
 async fn model_activation_task(id: String, progress: Arc<Mutex<(u64, u64)>>) -> Vec<OutputLine> {
     let callback: crate::model::ProgressCallback = Arc::new(move |downloaded, total| {
         if let Ok(mut guard) = progress.lock() {
@@ -3619,6 +3656,22 @@ mod tests {
                 terminal.draw(|frame| app.render(frame)).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn simulated_mic_level_keeps_moving_with_wave_motion_off() {
+        let mut app = App::new(Config::default());
+        app.splash_until.set(None);
+        app.deck_wave_motion.set(false);
+        let first = app.deck_wave_level();
+        for _ in 0..20 {
+            app.refresh_screens();
+        }
+        let second = app.deck_wave_level();
+        assert!(
+            (first - second).abs() > 0.01,
+            "the simulated mic level must advance while motion is off: {first} -> {second}"
+        );
     }
 
     #[test]

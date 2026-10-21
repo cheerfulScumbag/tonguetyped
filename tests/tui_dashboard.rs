@@ -1074,6 +1074,57 @@ fn pty_deck_panes_show_models_output_history_and_setup() {
 }
 
 #[test]
+fn pty_deck_models_download_key_installs_without_activating() {
+    let sandbox = Sandbox::new("deck-download");
+    for entry in tonguetyped::catalog::ENTRIES {
+        std::fs::write(
+            sandbox
+                .data_home
+                .join("tonguetyped/models")
+                .join(entry.filename),
+            [],
+        )
+        .unwrap();
+    }
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"m");
+    session.wait_for("STREAM", Duration::from_secs(3));
+    // The default (active) model is the initial cursor; move to an installed
+    // model that is not active, so an activation would be observable.
+    session.send(KEY_DOWN);
+    session.send(b"d");
+
+    let result = session.wait_for("already installed", Duration::from_secs(10));
+    assert!(
+        result.contains("Model download"),
+        "the download key should report a download result:\n{result}"
+    );
+    assert!(
+        !result.contains("activated"),
+        "the download key must not claim or perform activation:\n{result}"
+    );
+    assert!(
+        sandbox.config_contents().contains(&format!(
+            "active_model = \"{}\"",
+            tonguetyped::catalog::DEFAULT_MODEL_ID
+        )),
+        "the download key must not select the downloaded model:\n{}",
+        sandbox.config_contents()
+    );
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc on a download result should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_error() {
     let sandbox = Sandbox::new("action-feedback");
     let mut session = Session::spawn(&sandbox, 100, 32);
