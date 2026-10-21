@@ -290,7 +290,8 @@ with the daemon state and active model, and a pane for the selected
 destination. The dashboard is keyboard-only; there is no mouse support.
 
 Press `s`, `m`, `o`, `h`, or `p` to jump straight to a destination, Up/Down
-to move within the current pane, `?` for the key reference, and `q` to quit.
+to move through the pane's rows or fields (on **Speak** it moves between
+destinations), `?` for the key reference, and `q` to quit.
 **Speak** shows the activation instruction and a simulated mic level in a
 dark-blue wave field; `t` or Enter starts or stops dictation, `c` cancels, and
 `w` turns the wave motion on or off. **Models** lists the catalog with
@@ -315,9 +316,10 @@ same live microphone preview and shortcut dialog the setup wizard uses. The
 **Transcript output** screen also holds the **Save transcript history** toggle,
 which is off by default. Esc from the Settings overview returns to the Deck.
 
-The value steppers and choice lists share one navigation grammar: Up/Down
-moves between rows, Left/Right changes the highlighted choice in either
-direction, Enter saves, and Esc (or Backspace) goes back. On Microphone,
+On the full Settings screen, the value steppers and choice lists share one
+navigation grammar: Up/Down moves between rows, Left/Right changes the
+highlighted choice in either direction, Enter saves, and Esc (or Backspace)
+goes back. On Microphone,
 Activation, Translation, Typing backend, Startup, Media pause, Overlay, and the
 text forms, backing out also commits the highlighted value. Model, Inference
 backend, Transcript output, Shortcut, and Daemon apply only on Enter. Free-text
@@ -665,9 +667,10 @@ Whether a model can do this is a property of the model, not a setting, so the
 live decode runs the way Handy does it. Whether the words are *shown* is your
 call: choose a live-capable style's `live-text` look (see "Overlay" above) to
 see them. `tonguetyped model list` marks the streaming models with a `live` tag
-under **STREAMING** (or `live (en)` for the English-only ones), and the
-dashboard's model screen marks them `live` in its LIVE column; the rest of the
-catalog produces no live text and shows only the recording indicator.
+under **STREAMING** (or `live (en)` for the English-only ones), the dashboard's
+**Models** pane labels them `live` in its STREAM column, and the full Model
+settings screen marks them `live` in its LIVE column; the rest of the catalog
+produces no live text and shows only the recording indicator.
 
 Four things to know before choosing a streaming model:
 
