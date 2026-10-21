@@ -348,6 +348,7 @@ struct App {
     deck_wave_phase: Cell<f32>,
     splash_until: Cell<Option<Instant>>,
     info_return: InfoReturn,
+    commands_return: InfoReturn,
     command_items: Vec<HomeItem>,
     home_selected: usize,
     /// Cursor on the dedicated Commands screen, separate from the home cursor.
@@ -422,6 +423,7 @@ impl App {
             deck_wave_phase: Cell::new(0.0),
             splash_until: Cell::new(Some(Instant::now() + Duration::from_millis(700))),
             info_return: InfoReturn::Home,
+            commands_return: InfoReturn::Home,
             command_items: home_items(),
             home_selected: 0,
             command_selected: 0,
@@ -485,7 +487,9 @@ impl App {
             }],
         };
         self.info_scroll.set(0);
-        self.remember_info_return();
+        if !matches!(self.screen, Screen::Info { .. }) {
+            self.remember_info_return();
+        }
         self.screen = Screen::Info {
             title: title.to_string(),
             lines,
@@ -681,14 +685,18 @@ impl App {
     }
 
     /// The dedicated Commands screen: `↑`/`↓` (and `←`/`→`) move the cursor,
-    /// `Enter` runs the highlighted command, and `Esc`/`Backspace` return home.
+    /// `Enter` runs the highlighted command, and `Esc`/`Backspace` return to
+    /// whichever screen opened it.
     fn handle_commands_key(
         &mut self,
         key: KeyEvent,
         terminal: &mut Terminal<Backend>,
     ) -> anyhow::Result<()> {
         if Self::is_back_key(key.code) {
-            self.screen = Screen::Home;
+            self.screen = match self.commands_return {
+                InfoReturn::Deck => Screen::Deck,
+                InfoReturn::Home => Screen::Home,
+            };
             return Ok(());
         }
         match key.code {
@@ -932,13 +940,14 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.deck_setup_selected = (self.deck_setup_selected + 1).min(4);
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter if self.pending.is_none() => {
                     self.dispatch_command("setup", terminal)?;
                 }
                 KeyCode::Char('g') => {
                     self.screen = Screen::Home;
                 }
                 KeyCode::Char('c') => {
+                    self.commands_return = InfoReturn::Deck;
                     self.screen = Screen::Commands;
                 }
                 _ => {}
@@ -969,6 +978,7 @@ impl App {
                 Constraint::Length(rail_width),
                 Constraint::Length(1),
                 Constraint::Min(0),
+                Constraint::Length(1),
             ])
             .split(chunks[1]);
         frame.render_widget(
@@ -1032,7 +1042,7 @@ impl App {
             let mut spans = Vec::new();
             if is_selected {
                 let text = format!("{marker}{label}");
-                let used = marker.len() + label.len();
+                let used = marker.chars().count() + label.chars().count();
                 spans.push(Span::styled(text, selected));
                 if used < inner_width {
                     spans.push(Span::styled(" ".repeat(inner_width - used), selected));
@@ -1048,7 +1058,7 @@ impl App {
                     format!("  {description}"),
                     if is_selected { selected } else { muted },
                 )];
-                let used = 2 + description.len();
+                let used = 2 + description.chars().count();
                 if is_selected && used < inner_width {
                     desc.push(Span::styled(" ".repeat(inner_width - used), selected));
                 }
@@ -1210,16 +1220,17 @@ impl App {
             } else {
                 (downloaded as f64 / total as f64).clamp(0.0, 1.0)
             };
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(2)])
-                .split(area);
             let block = Block::default()
                 .borders(PANE_BORDERS)
                 .title(Line::from(Span::styled("DOWNLOAD", accent)));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(2)])
+                .split(inner);
             frame.render_widget(
                 Gauge::default()
-                    .block(block)
                     .gauge_style(Style::default().fg(Color::Rgb(0, 255, 0)))
                     .ratio(ratio),
                 chunks[0],
@@ -1561,6 +1572,7 @@ impl App {
         if index < SettingId::ALL.len() {
             self.open_setting(SettingId::ALL[index]);
         } else {
+            self.commands_return = InfoReturn::Home;
             self.screen = Screen::Commands;
         }
     }

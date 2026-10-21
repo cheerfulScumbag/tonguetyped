@@ -242,6 +242,40 @@ impl Session {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// The character drawn in one cell of the real 2D terminal grid, so a test
+    /// can assert where a border lands rather than only which text is present.
+    fn char_at(&self, row: u16, col: u16) -> char {
+        let parser = self.parser.lock().unwrap();
+        parser
+            .screen()
+            .cell(row, col)
+            .and_then(|cell| cell.contents().chars().next())
+            .unwrap_or(' ')
+    }
+
+    /// Waits for one terminal cell to reach the expected state, so a resize
+    /// assertion does not race the app's next repaint.
+    fn wait_for_cell(
+        &self,
+        row: u16,
+        col: u16,
+        expected: impl Fn(char) -> bool,
+        timeout: Duration,
+    ) -> char {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let cell = self.char_at(row, col);
+            if expected(cell) {
+                return cell;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cell ({row}, {col}) stayed {cell:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn wait_for(&self, needle: &str, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
         loop {
@@ -790,7 +824,7 @@ fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
     );
     let footer = deck
         .lines()
-        .find(|line| line.contains("enter start"))
+        .find(|line| line.contains("q quit"))
         .expect("the deck footer should be drawn");
     assert!(
         !footer.contains('[') && !footer.contains(']'),
@@ -798,11 +832,44 @@ fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
     );
     let rail = deck
         .lines()
-        .find(|line| line.contains("SPEAK"))
-        .expect("the rail should be drawn");
+        .find(|line| line.contains("\u{25b8} SPEAK"))
+        .expect("the selected rail row should be drawn");
     assert!(
         !rail.contains('[') && !rail.contains(']'),
         "the deck rail must not use bracketed keycaps:\n{rail}"
+    );
+    // 80x24: 18-column rail + 1-column gutter + 60-column pane + 1-column
+    // right margin. The body border row sits under the seven-row header.
+    assert_ne!(
+        session.char_at(7, 78),
+        ' ',
+        "the pane's right border should land in column 78 at 80x24"
+    );
+    assert_eq!(
+        session.char_at(7, 79),
+        ' ',
+        "a one-column right margin should follow the pane at 80x24"
+    );
+
+    // 120x40: 24-column rail + 1-column gutter + 94-column pane + 1-column
+    // right margin.
+    session.resize(120, 40);
+    let border = session.wait_for_cell(7, 118, |cell| cell != ' ', Duration::from_secs(3));
+    assert_ne!(
+        border, ' ',
+        "the pane's right border should land in column 118 at 120x40"
+    );
+    assert_eq!(
+        session.char_at(7, 119),
+        ' ',
+        "a one-column right margin should follow the pane at 120x40"
+    );
+    session.resize(80, 24);
+    session.wait_for_cell(7, 79, |cell| cell == ' ', Duration::from_secs(3));
+    assert_ne!(
+        session.char_at(7, 78),
+        ' ',
+        "the pane's right border should land back in column 78 at 80x24"
     );
 
     session.send(b"p");
@@ -831,6 +898,73 @@ fn pty_deck_action_result_returns_to_the_deck() {
     assert!(
         deck.contains("SPEAK"),
         "Esc from a Deck action result should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_commands_return_to_the_deck() {
+    let sandbox = Sandbox::new("deck-commands-return");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"p");
+    session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+    session.send(b"c");
+    session.wait_for("Home \u{203a} Commands", Duration::from_secs(3));
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from Commands opened on the Deck should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_action_result_under_help_returns_to_the_deck() {
+    let sandbox = Sandbox::new("dh");
+    let socket = sandbox.socket_path();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        }
+    });
+
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(KEY_ENTER);
+    session.wait_for("Working: Toggle...", Duration::from_secs(3));
+    session.send(b"?");
+    let help = session.wait_for("Keys", Duration::from_secs(3));
+    assert!(
+        help.contains("Speak: t toggle"),
+        "the help overlay should open over the pending action:\n{help}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut result = session.visible_text();
+    while result.contains("Keys") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        result = session.visible_text();
+    }
+    assert!(
+        result.contains("Toggle") && !result.contains("Keys"),
+        "the pending result should replace the help overlay:\n{result}"
+    );
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc on a result that replaced Deck help should return to the Deck:\n{deck}"
     );
 
     session.quit_and_wait();
