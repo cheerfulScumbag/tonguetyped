@@ -343,7 +343,6 @@ struct App {
     deck_model_filter: usize,
     deck_output: screens::OutputScreen,
     deck_history: screens::TextFieldsScreen,
-    deck_setup_selected: usize,
     deck_wave_motion: Cell<bool>,
     deck_wave_phase: Cell<f32>,
     deck_level_phase: Cell<f32>,
@@ -418,7 +417,6 @@ impl App {
             deck_model_filter: 0,
             deck_output,
             deck_history,
-            deck_setup_selected: 0,
             deck_wave_motion: Cell::new(false),
             deck_wave_phase: Cell::new(0.0),
             deck_level_phase: Cell::new(0.0),
@@ -501,6 +499,7 @@ impl App {
         // clobbering it with a stale copy.
         if let Ok(reloaded) = Config::load() {
             self.config = reloaded;
+            self.sync_deck_history();
         }
     }
 
@@ -695,10 +694,7 @@ impl App {
         terminal: &mut Terminal<Backend>,
     ) -> anyhow::Result<()> {
         if Self::is_back_key(key.code) {
-            self.screen = match self.return_screen {
-                InfoReturn::Deck => Screen::Deck,
-                InfoReturn::Home => Screen::Home,
-            };
+            self.leave_to_return_screen();
             return Ok(());
         }
         match key.code {
@@ -730,7 +726,7 @@ impl App {
     fn handle_home_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => self.screen = Screen::Deck,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => self.open_deck(),
             KeyCode::Up | KeyCode::Char('k') => self.move_home_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_home_selection(1),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.pending.is_none() => {
@@ -769,7 +765,7 @@ impl App {
             }
             KeyCode::Char('h') => {
                 self.deck_selected = 3;
-                self.deck_history = screens::TextFieldsScreen::history_retention(&self.config);
+                self.sync_deck_history();
                 return Ok(());
             }
             KeyCode::Char('p') => {
@@ -872,11 +868,17 @@ impl App {
                 KeyCode::Left => {
                     if self.pending.is_some() || !self.deck_output.step(-1, &mut self.config) {
                         self.deck_output.move_selection(-1, &self.config);
+                    } else {
+                        self.deck_output.result =
+                            Some(self.config.save().map_err(|error| error.to_string()));
                     }
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
                     if self.pending.is_some() || !self.deck_output.step(1, &mut self.config) {
                         self.deck_output.move_selection(1, &self.config);
+                    } else {
+                        self.deck_output.result =
+                            Some(self.config.save().map_err(|error| error.to_string()));
                     }
                 }
                 KeyCode::Enter if self.pending.is_none() => {
@@ -935,12 +937,6 @@ impl App {
                 }
             }
             _ => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.deck_setup_selected = self.deck_setup_selected.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.deck_setup_selected = (self.deck_setup_selected + 1).min(4);
-                }
                 KeyCode::Enter if self.pending.is_none() => {
                     self.dispatch_command("setup", terminal)?;
                 }
@@ -999,7 +995,7 @@ impl App {
                 1 => "↑↓ model   enter activate   d download   / filter   ? help   q quit",
                 2 => "↑↓ row   ←/→ change   enter save   space history   ? help   q quit",
                 3 => "↑↓ field   type edit   enter save   space on/off   ? help   q quit",
-                _ => "↑↓ chapter   enter setup   g settings   c commands   q quit",
+                _ => "enter setup   g settings   c commands   q quit",
             }),
         };
         let status = match self.deck_selected {
@@ -1264,16 +1260,89 @@ impl App {
         let start = selected.saturating_sub(visible.saturating_sub(1));
         let end = (start + visible).min(rows.len());
         let inner_width = usize::from(area.width.saturating_sub(1));
+        let wide = area.width >= 90;
+        let index_width = rows.len().to_string().chars().count().max(1);
+        let quant_width = rows
+            .iter()
+            .map(|row| row.quant.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("QUANT".len());
+        let size_width = rows
+            .iter()
+            .map(|row| commands::human_size(row.size_bytes).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("SIZE".len());
+        let lang_width = rows
+            .iter()
+            .map(|row| row.info.language_summary().chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("LANG".len());
+        let stream_width = "STREAM".len();
+        let status_width = rows
+            .iter()
+            .map(|row| Self::deck_model_status(row).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("STATUS".len());
+        let model_target = rows
+            .iter()
+            .map(|row| row.id.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("MODEL".len());
+        let fixed_width = if wide {
+            1 + index_width
+                + 2
+                + quant_width
+                + 1
+                + size_width
+                + 1
+                + lang_width
+                + 1
+                + stream_width
+                + 1
+                + status_width
+        } else {
+            1 + index_width + 2 + size_width + 1 + stream_width + 1 + status_width
+        };
+        let model_width = model_target
+            .min(inner_width.saturating_sub(fixed_width))
+            .max("MODEL".len());
         let mut lines: Vec<Line> = Vec::new();
-        let header = if area.width >= 90 {
+        let header = if wide {
             format!(
-                " {:>2} {:<28} {:<6} {:>7} {:<5} {:<8} {:<10}",
-                "#", "MODEL", "QUANT", "SIZE", "LANG", "STREAM", "STATUS"
+                " {:>iw$} {:<mw$} {:<qw$} {:>sw$} {:<lw$} {:<stw$} {:<st$}",
+                "#",
+                "MODEL",
+                "QUANT",
+                "SIZE",
+                "LANG",
+                "STREAM",
+                "STATUS",
+                iw = index_width,
+                mw = model_width,
+                qw = quant_width,
+                sw = size_width,
+                lw = lang_width,
+                stw = stream_width,
+                st = status_width
             )
         } else {
             format!(
-                " {:>2} {:<24} {:>7} {:<5} {:<9}",
-                "#", "MODEL", "SIZE", "STREAM", "STATUS"
+                " {:>iw$} {:<mw$} {:>sw$} {:<stw$} {:<st$}",
+                "#",
+                "MODEL",
+                "SIZE",
+                "STREAM",
+                "STATUS",
+                iw = index_width,
+                mw = model_width,
+                sw = size_width,
+                stw = stream_width,
+                st = status_width
             )
         };
         lines.push(Line::from(Span::styled(header, muted)));
@@ -1287,28 +1356,40 @@ impl App {
             };
             let status = Self::deck_model_status(row);
             let size = commands::human_size(row.size_bytes);
-            let id = row.id.chars().take(28).collect::<String>();
+            let id: String = row.id.chars().take(model_width).collect();
             let mut spans: Vec<Span> = Vec::new();
             if is_selected {
-                let row_text = if area.width >= 90 {
+                let row_text = if wide {
                     format!(
-                        "{marker}{:>2} {:<28} {:<6} {:>7} {:<5} {:<8} {:<10}",
+                        "{marker}{:>iw$} {:<mw$} {:<qw$} {:>sw$} {:<lw$} {:<stw$} {:<st$}",
                         index + 1,
                         id,
                         row.quant,
                         size,
                         row.info.language_summary(),
                         stream,
-                        status
+                        status,
+                        iw = index_width,
+                        mw = model_width,
+                        qw = quant_width,
+                        sw = size_width,
+                        lw = lang_width,
+                        stw = stream_width,
+                        st = status_width
                     )
                 } else {
                     format!(
-                        "{marker}{:>2} {:<24} {:>7} {:<5} {:<9}",
+                        "{marker}{:>iw$} {:<mw$} {:>sw$} {:<stw$} {:<st$}",
                         index + 1,
                         id,
                         size,
                         stream,
-                        status
+                        status,
+                        iw = index_width,
+                        mw = model_width,
+                        sw = size_width,
+                        stw = stream_width,
+                        st = status_width
                     )
                 };
                 let used = row_text.chars().count();
@@ -1317,29 +1398,45 @@ impl App {
                     spans.push(Span::styled(" ".repeat(inner_width - used), selected_style));
                 }
             } else {
-                spans.push(Span::styled(format!("{marker}{:>2} ", index + 1), accent));
-                if area.width >= 90 {
+                spans.push(Span::styled(
+                    format!("{marker}{:>iw$} ", index + 1, iw = index_width),
+                    accent,
+                ));
+                if wide {
                     spans.push(Span::raw(format!(
-                        "{:<28} {:<6} {:>7} ",
-                        id, row.quant, size
+                        "{:<mw$} {:<qw$} {:>sw$} ",
+                        id,
+                        row.quant,
+                        size,
+                        mw = model_width,
+                        qw = quant_width,
+                        sw = size_width
                     )));
                     spans.push(Span::styled(
-                        format!("{:<5} ", row.info.language_summary()),
+                        format!("{:<lw$} ", row.info.language_summary(), lw = lang_width),
                         muted,
                     ));
                 } else {
-                    spans.push(Span::raw(format!("{:<24} {:>7} ", id, size)));
+                    spans.push(Span::raw(format!(
+                        "{:<mw$} {:>sw$} ",
+                        id,
+                        size,
+                        mw = model_width,
+                        sw = size_width
+                    )));
                 }
-                let stream_width = if area.width >= 90 { 8 } else { 5 };
                 spans.push(Span::styled(
-                    format!("{stream:<stream_width$} "),
+                    format!("{stream:<stw$} ", stw = stream_width),
                     if stream == "live" {
                         Style::default().fg(Color::Green)
                     } else {
                         muted
                     },
                 ));
-                spans.push(Span::styled(status, muted));
+                spans.push(Span::styled(
+                    format!("{status:<st$}", st = status_width),
+                    muted,
+                ));
             }
             lines.push(Line::from(spans));
         }
@@ -1445,10 +1542,6 @@ impl App {
         let accent = Style::default()
             .fg(Color::Rgb(0, 255, 0))
             .add_modifier(Modifier::BOLD);
-        let selected_style = Style::default()
-            .fg(Color::Rgb(182, 255, 182))
-            .bg(Color::Rgb(50, 0, 77))
-            .add_modifier(Modifier::BOLD);
         let muted = Style::default().fg(Color::DarkGray);
         let text = Style::default().fg(Color::Gray);
         let chapters = [
@@ -1458,34 +1551,14 @@ impl App {
             ("4", "App", "startup / overlay / media"),
             ("5", "Review", "apply"),
         ];
-        let inner_width = usize::from(area.width.saturating_sub(1));
         let mut lines = Vec::new();
-        for (index, (number, title, description)) in chapters.iter().enumerate() {
-            let is_selected = index == self.deck_setup_selected.min(chapters.len() - 1);
-            let marker = if is_selected { "▸ " } else { "  " };
-            let label = format!("{marker}{number}  {title}");
-            if is_selected {
-                let used = label.chars().count();
-                let mut spans = vec![Span::styled(label, selected_style)];
-                if used < inner_width {
-                    spans.push(Span::styled(" ".repeat(inner_width - used), selected_style));
-                }
-                lines.push(Line::from(spans));
-                let desc = format!("   {description}");
-                let used = desc.chars().count();
-                let mut spans = vec![Span::styled(desc, selected_style)];
-                if used < inner_width {
-                    spans.push(Span::styled(" ".repeat(inner_width - used), selected_style));
-                }
-                lines.push(Line::from(spans));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::raw(marker),
-                    Span::styled(number.to_string(), accent),
-                    Span::raw(format!("  {title}")),
-                ]));
-                lines.push(Line::from(Span::styled(format!("   {description}"), muted)));
-            }
+        for (number, title, description) in chapters {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(number.to_string(), accent),
+                Span::raw(format!("  {title}")),
+            ]));
+            lines.push(Line::from(Span::styled(format!("   {description}"), muted)));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -2197,10 +2270,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter => {
-                self.screen = match self.return_screen {
-                    InfoReturn::Deck => Screen::Deck,
-                    InfoReturn::Home => Screen::Home,
-                }
+                self.leave_to_return_screen();
             }
             KeyCode::Up | KeyCode::Char('k') => self.adjust_info_scroll(-1),
             KeyCode::Down | KeyCode::Char('j') => self.adjust_info_scroll(1),
@@ -2346,10 +2416,7 @@ impl App {
 
     fn handle_daemon_key(&mut self, key: KeyEvent) {
         if Self::is_back_key(key.code) {
-            self.screen = match self.return_screen {
-                InfoReturn::Deck => Screen::Deck,
-                InfoReturn::Home => Screen::Home,
-            };
+            self.leave_to_return_screen();
             return;
         }
         match key.code {
@@ -2450,6 +2517,20 @@ impl App {
     /// without first leaving would strand the dashboard on the primary
     /// screen once the console exits.
     fn run_setup_console(&mut self, terminal: &mut Terminal<Backend>) -> anyhow::Result<()> {
+        if let Err(error) = self.config.save() {
+            self.info_scroll.set(0);
+            self.remember_info_return();
+            self.screen = Screen::Info {
+                title: "Setup".to_string(),
+                lines: vec![OutputLine {
+                    text: format!(
+                        "Could not save the dashboard settings before opening setup: {error}"
+                    ),
+                    is_error: true,
+                }],
+            };
+            return Ok(());
+        }
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
@@ -2461,6 +2542,7 @@ impl App {
 
         if let Ok(reloaded) = Config::load() {
             self.config = reloaded;
+            self.sync_deck_history();
         }
         if let Err(error) = outcome {
             self.info_scroll.set(0);
@@ -2474,6 +2556,24 @@ impl App {
             };
         }
         Ok(())
+    }
+
+    /// Rebuilds the Deck's config-backed History form from the current config,
+    /// so a save can never write values older than the persisted file.
+    fn sync_deck_history(&mut self) {
+        self.deck_history = screens::TextFieldsScreen::history_retention(&self.config);
+    }
+
+    fn open_deck(&mut self) {
+        self.screen = Screen::Deck;
+        self.sync_deck_history();
+    }
+
+    fn leave_to_return_screen(&mut self) {
+        match self.return_screen {
+            InfoReturn::Deck => self.open_deck(),
+            InfoReturn::Home => self.screen = Screen::Home,
+        }
     }
 
     /// The Info pane returns to whichever screen created it: the Deck keeps

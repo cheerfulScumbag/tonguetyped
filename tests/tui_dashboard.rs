@@ -1074,6 +1074,30 @@ fn pty_deck_panes_show_models_output_history_and_setup() {
 }
 
 #[test]
+fn pty_deck_output_step_saves_without_enter() {
+    let sandbox = Sandbox::new("deck-step-save");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"o");
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.send(KEY_RIGHT);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["history"]["enabled"].as_bool(),
+        Some(true),
+        "stepping the history toggle must persist it before a reload: {config:?}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_deck_models_download_key_installs_without_activating() {
     let sandbox = Sandbox::new("deck-download");
     for entry in tonguetyped::catalog::ENTRIES {
