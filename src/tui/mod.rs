@@ -347,8 +347,7 @@ struct App {
     deck_wave_motion: Cell<bool>,
     deck_wave_phase: Cell<f32>,
     splash_until: Cell<Option<Instant>>,
-    info_return: InfoReturn,
-    commands_return: InfoReturn,
+    return_screen: InfoReturn,
     command_items: Vec<HomeItem>,
     home_selected: usize,
     /// Cursor on the dedicated Commands screen, separate from the home cursor.
@@ -422,8 +421,7 @@ impl App {
             deck_wave_motion: Cell::new(false),
             deck_wave_phase: Cell::new(0.0),
             splash_until: Cell::new(Some(Instant::now() + Duration::from_millis(700))),
-            info_return: InfoReturn::Home,
-            commands_return: InfoReturn::Home,
+            return_screen: InfoReturn::Home,
             command_items: home_items(),
             home_selected: 0,
             command_selected: 0,
@@ -693,7 +691,7 @@ impl App {
         terminal: &mut Terminal<Backend>,
     ) -> anyhow::Result<()> {
         if Self::is_back_key(key.code) {
-            self.screen = match self.commands_return {
+            self.screen = match self.return_screen {
                 InfoReturn::Deck => Screen::Deck,
                 InfoReturn::Home => Screen::Home,
             };
@@ -947,7 +945,7 @@ impl App {
                     self.screen = Screen::Home;
                 }
                 KeyCode::Char('c') => {
-                    self.commands_return = InfoReturn::Deck;
+                    self.return_screen = InfoReturn::Deck;
                     self.screen = Screen::Commands;
                 }
                 _ => {}
@@ -1572,7 +1570,7 @@ impl App {
         if index < SettingId::ALL.len() {
             self.open_setting(SettingId::ALL[index]);
         } else {
-            self.commands_return = InfoReturn::Home;
+            self.return_screen = InfoReturn::Home;
             self.screen = Screen::Commands;
         }
     }
@@ -1633,6 +1631,9 @@ impl App {
     /// whether the write succeeded, so a leave handler can stay on the screen
     /// (with the error visible) instead of navigating away from a failed save.
     fn save_settings_config(&mut self) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
         let result = self.config.save().map_err(|error| error.to_string());
         let saved = result.is_ok();
         match &mut self.screen {
@@ -1717,7 +1718,7 @@ impl App {
             },
             _ => true,
         };
-        if leave && self.save_settings_config() {
+        if leave && (self.pending.is_some() || self.save_settings_config()) {
             self.screen = Screen::Home;
         }
     }
@@ -2186,7 +2187,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter => {
-                self.screen = match self.info_return {
+                self.screen = match self.return_screen {
                     InfoReturn::Deck => Screen::Deck,
                     InfoReturn::Home => Screen::Home,
                 }
@@ -2335,7 +2336,10 @@ impl App {
 
     fn handle_daemon_key(&mut self, key: KeyEvent) {
         if Self::is_back_key(key.code) {
-            self.screen = Screen::Home;
+            self.screen = match self.return_screen {
+                InfoReturn::Deck => Screen::Deck,
+                InfoReturn::Home => Screen::Home,
+            };
             return;
         }
         match key.code {
@@ -2454,11 +2458,12 @@ impl App {
     }
 
     /// The Info pane returns to whichever screen created it: the Deck keeps
-    /// its own help and action results, while Home (including its settings and
-    /// Commands screens) keeps its own.
+    /// its own help and action results, Commands and its daemon screen keep the
+    /// destination that opened Commands, and Home's settings screens keep Home.
     fn remember_info_return(&mut self) {
-        self.info_return = match &self.screen {
+        self.return_screen = match &self.screen {
             Screen::Deck => InfoReturn::Deck,
+            Screen::Commands | Screen::Daemon(_) => self.return_screen,
             _ => InfoReturn::Home,
         };
     }

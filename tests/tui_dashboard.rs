@@ -925,6 +925,58 @@ fn pty_deck_commands_return_to_the_deck() {
 }
 
 #[test]
+fn pty_deck_commands_detail_and_result_screens_return_to_the_deck() {
+    let sandbox = Sandbox::new("deck-commands-detail-return");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    let select_deck_command = |session: &mut Session, name: &str| {
+        session.send(b"p");
+        session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+        session.send(b"c");
+        session.wait_for("Home \u{203a} Commands", Duration::from_secs(3));
+        for _ in 0..COMMAND_NAMES.len() {
+            session.send(KEY_UP);
+        }
+        session.wait_for("> setup", Duration::from_secs(3));
+        let index = COMMAND_NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .unwrap();
+        for _ in 0..index {
+            session.send(KEY_DOWN);
+        }
+        session.wait_for(&format!("> {name}"), Duration::from_secs(3));
+    };
+
+    select_deck_command(&mut session, "daemon");
+    session.send(KEY_ENTER);
+    session.wait_for("Restart", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from a daemon screen opened on the Deck should return to the Deck:\n{deck}"
+    );
+
+    select_deck_command(&mut session, "status");
+    session.send(KEY_ENTER);
+    let result = session.wait_for("daemon is not running", Duration::from_secs(5));
+    assert!(
+        result.contains("Status"),
+        "expected the Status action's title:\n{result}"
+    );
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from a command result opened on the Deck should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_deck_action_result_under_help_returns_to_the_deck() {
     let sandbox = Sandbox::new("dh");
     let socket = sandbox.socket_path();
