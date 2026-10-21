@@ -242,6 +242,40 @@ impl Session {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// The character drawn in one cell of the real 2D terminal grid, so a test
+    /// can assert where a border lands rather than only which text is present.
+    fn char_at(&self, row: u16, col: u16) -> char {
+        let parser = self.parser.lock().unwrap();
+        parser
+            .screen()
+            .cell(row, col)
+            .and_then(|cell| cell.contents().chars().next())
+            .unwrap_or(' ')
+    }
+
+    /// Waits for one terminal cell to reach the expected state, so a resize
+    /// assertion does not race the app's next repaint.
+    fn wait_for_cell(
+        &self,
+        row: u16,
+        col: u16,
+        expected: impl Fn(char) -> bool,
+        timeout: Duration,
+    ) -> char {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let cell = self.char_at(row, col);
+            if expected(cell) {
+                return cell;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cell ({row}, {col}) stayed {cell:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn wait_for(&self, needle: &str, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
         loop {
@@ -324,6 +358,31 @@ const COMMAND_NAMES: [&str; 9] = [
     "shortcut-test",
 ];
 
+/// Opens the Settings panel from the split-deck home. The old dashboard
+/// opened directly on Settings; the approved split deck starts on the rail.
+/// Tests that need the settings list call this first.
+fn open_settings(session: &mut Session) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let screen = loop {
+        let text = session.visible_text();
+        if text.contains("Settings") || text.contains("5 destinations") {
+            break text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "could not reach Settings; current screen:\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if screen.contains("Settings") {
+        return;
+    }
+    session.send(b"p");
+    session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+    session.send(b"g");
+    session.wait_for("Settings", Duration::from_secs(3));
+}
+
 /// Home index of the Settings row labelled `label`.
 fn setting_row(label: &str) -> usize {
     SETTING_LABELS
@@ -340,6 +399,10 @@ const FIRST_COMMAND_ROW: usize = SETTING_LABELS.len();
 /// Opens the dedicated Commands screen from Home (the Settings panel's last
 /// row) and waits for its title.
 fn open_commands(session: &mut Session) {
+    open_settings(session);
+    for _ in 0..=SETTING_LABELS.len() {
+        session.send(KEY_UP);
+    }
     for _ in 0..SETTING_LABELS.len() {
         session.send(KEY_DOWN);
     }
@@ -370,6 +433,10 @@ fn select_command(session: &mut Session, name: &str) {
 /// Moves the home selection from the first Settings row ("Model") down to
 /// the row labeled `label`, and waits until it is drawn selected.
 fn select_setting(session: &mut Session, label: &str) -> String {
+    open_settings(session);
+    for _ in 0..SETTING_LABELS.len() {
+        session.send(KEY_UP);
+    }
     let row = SETTING_LABELS
         .iter()
         .position(|candidate| *candidate == label)
@@ -409,7 +476,8 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
     // sections and moves the CLI commands onto their own screen, reached from
     // the Settings panel's "Commands" row. The grouped panel must still fit one
     // normal terminal with no pagination.
-    let screen = session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
+    let screen = session.visible_text();
     assert!(
         screen.contains("████████╗"),
         "a 100-column terminal should fit the full block-art logo:\n{screen}"
@@ -420,12 +488,7 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
             "home screen is missing settings row {label:?}; got:\n{screen}"
         );
     }
-    for section in [
-        "Language & model",
-        "Capture & activation",
-        "Output",
-        "Behaviour",
-    ] {
+    for section in ["Language & model", "Capture & activation", "Output", "App"] {
         assert!(
             screen.contains(section),
             "home screen is missing section header {section:?}:\n{screen}"
@@ -479,7 +542,8 @@ fn pty_bare_invocation_opens_the_dashboard_with_settings_and_every_command_on_a_
 fn pty_home_notice_points_an_upgraded_history_setting_at_the_opt_out() {
     let sandbox = Sandbox::new("history-notice");
     sandbox.write_config("[history]\nenabled = true\n");
-    let session = Session::spawn(&sandbox, 100, 40);
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    open_settings(&mut session);
 
     let home = session.wait_for("Saving transcripts is on", Duration::from_secs(5));
     assert!(
@@ -498,7 +562,8 @@ fn pty_fresh_install_defaults_history_off_and_shows_the_toggle() {
     let sandbox = Sandbox::new("fresh-history-off");
     let mut session = Session::spawn(&sandbox, 100, 40);
 
-    let home = session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
+    let home = session.visible_text();
     assert!(
         !home.contains("Saving transcripts is on"),
         "a fresh install must not claim transcripts are being saved:\n{home}"
@@ -530,6 +595,7 @@ fn pty_opting_out_of_history_persists_across_a_daemon_restart() {
     sandbox.write_config("[history]\nenabled = true\n");
     let daemon = start_daemon(&sandbox);
     let mut session = Session::spawn(&sandbox, 100, 40);
+    open_settings(&mut session);
     session.wait_for("Saving transcripts is on", Duration::from_secs(5));
 
     select_setting(&mut session, "Transcript output");
@@ -555,8 +621,9 @@ fn pty_opting_out_of_history_persists_across_a_daemon_restart() {
 
     drop(daemon);
     let daemon = start_daemon(&sandbox);
-    let session = Session::spawn(&sandbox, 100, 40);
-    let home = session.wait_for("Settings", Duration::from_secs(5));
+    let mut session = Session::spawn(&sandbox, 100, 40);
+    open_settings(&mut session);
+    let home = session.visible_text();
     assert!(
         !home.contains("Saving transcripts is on"),
         "the restart must not bring the opt-out notice back:\n{home}"
@@ -573,7 +640,7 @@ fn pty_opting_out_of_history_persists_across_a_daemon_restart() {
 fn pty_home_selection_walks_the_settings_then_opens_the_commands_screen() {
     let sandbox = Sandbox::new("cross-panel-nav");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // "Model" (first settings row) is selected by default.
     let initial = session.visible_text();
@@ -625,10 +692,10 @@ fn non_terminal_bare_invocation_fails_fast_instead_of_hanging() {
 }
 
 #[test]
-fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_home_screen() {
+fn pty_arrow_keys_move_the_home_selection_marker_and_escape_returns_to_the_deck() {
     let sandbox = Sandbox::new("nav");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // "Model" (first settings row) is selected by default.
     let initial = session.visible_text();
@@ -648,17 +715,16 @@ fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_ho
     session.send(KEY_UP);
     session.wait_for("> Microphone", Duration::from_secs(3));
 
-    // Escape on the home screen must not quit or navigate anywhere.
+    // Escape returns to the split deck instead of quitting.
     session.send(KEY_ESC);
-    std::thread::sleep(Duration::from_millis(300));
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
     assert!(
         session.child.try_wait().unwrap().is_none(),
-        "Esc must not quit the home screen"
+        "Esc must not quit the dashboard"
     );
-    let still_home = session.visible_text();
     assert!(
-        still_home.contains("> Microphone"),
-        "Esc must be a no-op on home:\n{still_home}"
+        deck.contains("SPEAK"),
+        "Esc from Settings should return to the split deck:\n{deck}"
     );
 
     session.quit_and_wait();
@@ -667,7 +733,13 @@ fn pty_arrow_keys_move_the_home_selection_marker_and_escape_is_a_no_op_on_the_ho
 #[test]
 fn pty_logo_recenters_for_wide_and_narrow_terminals_without_clipping() {
     let sandbox = Sandbox::new("resize");
-    let session = Session::spawn(&sandbox, 140, 32);
+    let mut session = Session::spawn(&sandbox, 140, 32);
+    let deck = session.wait_for("5 destinations", Duration::from_secs(5));
+    assert!(
+        deck.contains("TONGUETYPED"),
+        "the split deck should show the Bubble header wordmark:\n{deck}"
+    );
+    open_settings(&mut session);
     let wide = session.wait_for("Commands", Duration::from_secs(5));
     assert!(
         wide.contains("████████╗"),
@@ -693,10 +765,449 @@ fn pty_logo_recenters_for_wide_and_narrow_terminals_without_clipping() {
 }
 
 #[test]
+fn pty_splash_shows_the_chafa_bubble_then_the_deck() {
+    let sandbox = Sandbox::new("splash");
+    let session = Session::spawn(&sandbox, 80, 24);
+    let splash = session.wait_for("press any key", Duration::from_secs(2));
+    assert!(
+        splash.contains("TONGUETYPED"),
+        "the splash should show the chafa bubble and wordmark:\n{splash}"
+    );
+    let deck = session.wait_for("5 destinations", Duration::from_secs(3));
+    assert!(
+        deck.contains("LIVE") && deck.contains("SPEAK"),
+        "the splash should give way to the split deck:\n{deck}"
+    );
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_splash_consumes_the_dismissal_key() {
+    let sandbox = Sandbox::new("splash-key");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("press any key", Duration::from_secs(2));
+    session.send(b"q");
+    let deck = session.wait_for("5 destinations", Duration::from_secs(3));
+    assert!(
+        session.child.try_wait().unwrap().is_none(),
+        "'q' must only dismiss the splash, not quit the dashboard"
+    );
+    assert!(
+        deck.contains("SPEAK"),
+        "the splash should give way to the deck after one key:\n{deck}"
+    );
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
+    let sandbox = Sandbox::new("deck");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    let deck = session.wait_for("5 destinations", Duration::from_secs(5));
+    assert!(
+        deck.contains("TONGUETYPED"),
+        "missing Bubble wordmark:\n{deck}"
+    );
+    for destination in ["SPEAK", "MODELS", "OUTPUT", "HISTORY", "SETUP"] {
+        assert!(
+            deck.contains(destination),
+            "missing rail destination {destination:?}:\n{deck}"
+        );
+    }
+    assert!(
+        deck.contains("enter start") && deck.contains("↑↓ move"),
+        "the footer should keep the single-letter key map:\n{deck}"
+    );
+    assert!(
+        deck.contains("mic") && deck.contains("simulated"),
+        "the Speak pane should show its simulated mic level:\n{deck}"
+    );
+    let footer = deck
+        .lines()
+        .find(|line| line.contains("q quit"))
+        .expect("the deck footer should be drawn");
+    assert!(
+        !footer.contains('[') && !footer.contains(']'),
+        "the deck footer must not use bracketed keycaps:\n{footer}"
+    );
+    let rail = deck
+        .lines()
+        .find(|line| line.contains("\u{25b8} SPEAK"))
+        .expect("the selected rail row should be drawn");
+    assert!(
+        !rail.contains('[') && !rail.contains(']'),
+        "the deck rail must not use bracketed keycaps:\n{rail}"
+    );
+    // 80x24: 18-column rail + 1-column gutter + 60-column pane + 1-column
+    // right margin. The body border row sits under the seven-row header.
+    assert_ne!(
+        session.char_at(7, 78),
+        ' ',
+        "the pane's right border should land in column 78 at 80x24"
+    );
+    assert_eq!(
+        session.char_at(7, 79),
+        ' ',
+        "a one-column right margin should follow the pane at 80x24"
+    );
+
+    // 120x40: 24-column rail + 1-column gutter + 94-column pane + 1-column
+    // right margin.
+    session.resize(120, 40);
+    let border = session.wait_for_cell(7, 118, |cell| cell != ' ', Duration::from_secs(3));
+    assert_ne!(
+        border, ' ',
+        "the pane's right border should land in column 118 at 120x40"
+    );
+    assert_eq!(
+        session.char_at(7, 119),
+        ' ',
+        "a one-column right margin should follow the pane at 120x40"
+    );
+    session.resize(80, 24);
+    session.wait_for_cell(7, 79, |cell| cell == ' ', Duration::from_secs(3));
+    assert_ne!(
+        session.char_at(7, 78),
+        ' ',
+        "the pane's right border should land back in column 78 at 80x24"
+    );
+
+    session.send(b"p");
+    session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+    session.send(b"g");
+    session.wait_for("Settings", Duration::from_secs(3));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_action_result_returns_to_the_deck() {
+    let sandbox = Sandbox::new("deck-info-return");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(KEY_ENTER);
+    let result = session.wait_for("daemon is not running", Duration::from_secs(5));
+    assert!(
+        result.contains("Toggle"),
+        "expected the Toggle action's title:\n{result}"
+    );
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("5 destinations", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from a Deck action result should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_commands_return_to_the_deck() {
+    let sandbox = Sandbox::new("deck-commands-return");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"p");
+    session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+    session.send(b"c");
+    session.wait_for("Home \u{203a} Commands", Duration::from_secs(3));
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from Commands opened on the Deck should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_commands_detail_and_result_screens_return_to_the_deck() {
+    let sandbox = Sandbox::new("deck-commands-detail-return");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    let select_deck_command = |session: &mut Session, name: &str| {
+        session.send(b"p");
+        session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+        session.send(b"c");
+        session.wait_for("Home \u{203a} Commands", Duration::from_secs(3));
+        for _ in 0..COMMAND_NAMES.len() {
+            session.send(KEY_UP);
+        }
+        session.wait_for("> setup", Duration::from_secs(3));
+        let index = COMMAND_NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .unwrap();
+        for _ in 0..index {
+            session.send(KEY_DOWN);
+        }
+        session.wait_for(&format!("> {name}"), Duration::from_secs(3));
+    };
+
+    select_deck_command(&mut session, "daemon");
+    session.send(KEY_ENTER);
+    session.wait_for("Restart", Duration::from_secs(3));
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from a daemon screen opened on the Deck should return to the Deck:\n{deck}"
+    );
+
+    select_deck_command(&mut session, "status");
+    session.send(KEY_ENTER);
+    let result = session.wait_for("daemon is not running", Duration::from_secs(5));
+    assert!(
+        result.contains("Status"),
+        "expected the Status action's title:\n{result}"
+    );
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from a command result opened on the Deck should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_action_result_under_help_returns_to_the_deck() {
+    let sandbox = Sandbox::new("dh");
+    let socket = sandbox.socket_path();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        }
+    });
+
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(KEY_ENTER);
+    session.wait_for("Working: Toggle...", Duration::from_secs(3));
+    session.send(b"?");
+    let help = session.wait_for("Keys", Duration::from_secs(3));
+    assert!(
+        help.contains("Speak: t toggle"),
+        "the help overlay should open over the pending action:\n{help}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut result = session.visible_text();
+    while result.contains("Keys") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        result = session.visible_text();
+    }
+    assert!(
+        result.contains("Toggle") && !result.contains("Keys"),
+        "the pending result should replace the help overlay:\n{result}"
+    );
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc on a result that replaced Deck help should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_panes_show_models_output_history_and_setup() {
+    let sandbox = Sandbox::new("deck-panes");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"m");
+    let models = session.wait_for("STREAM", Duration::from_secs(3));
+    assert!(
+        models.contains("STREAM") && (models.contains("live") || models.contains("final")),
+        "the model pane should show the stream column:\n{models}"
+    );
+    assert!(
+        models.contains("more") || models.contains("above"),
+        "the model pane should show the more-below cue:\n{models}"
+    );
+    assert!(
+        models.contains("activate") && models.contains("download"),
+        "the model pane should show its actions:\n{models}"
+    );
+
+    session.send(b"o");
+    let output = session.wait_for("Save transcript history", Duration::from_secs(3));
+    assert!(
+        output.contains("Save transcript history") || output.contains("Do not deliver"),
+        "the output pane should show the delivery choices:\n{output}"
+    );
+
+    session.send(b"h");
+    let history = session.wait_for("History is off", Duration::from_secs(3));
+    assert!(
+        history.contains("History is off") || history.contains("Maximum entries"),
+        "the history pane should show the history state:\n{history}"
+    );
+    session.send(b" ");
+    let history_on = session.wait_for("Maximum entries", Duration::from_secs(3));
+    assert!(
+        history_on.contains("Maximum age"),
+        "turning history on should reveal both fields:\n{history_on}"
+    );
+
+    session.send(b"p");
+    let setup = session.wait_for("Review", Duration::from_secs(3));
+    assert!(
+        setup.contains("Model") && setup.contains("Review"),
+        "the setup pane should show the five chapters:\n{setup}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_output_step_saves_without_enter() {
+    let sandbox = Sandbox::new("deck-step-save");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"o");
+    session.wait_for("Save transcript history", Duration::from_secs(3));
+    for _ in 0..4 {
+        session.send(KEY_DOWN);
+    }
+    session.send(KEY_RIGHT);
+    session.wait_for("Transcript output saved.", Duration::from_secs(3));
+
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["history"]["enabled"].as_bool(),
+        Some(true),
+        "stepping the history toggle must persist it before a reload: {config:?}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_history_form_resyncs_after_a_background_action_reloads_config() {
+    let sandbox = Sandbox::new("dhs");
+    sandbox.write_config("[history]\nenabled = true\nmax_entries = 1000\nmax_age_days = 30\n");
+    // A daemon socket that accepts the Toggle request and holds it open, so
+    // the Deck is still showing the History pane while the action is pending.
+    let socket = sandbox.socket_path();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        }
+    });
+
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(KEY_ENTER);
+    session.wait_for("Working: Toggle...", Duration::from_secs(3));
+    session.send(b"h");
+    let history = session.wait_for("Maximum entries", Duration::from_secs(3));
+    assert!(
+        history.contains("1000"),
+        "the Deck History pane should start from the saved limit:\n{history}"
+    );
+
+    // Another process (e.g. the CLI or setup console) lowers the persisted
+    // limit while the Deck action is still in flight. When the action result
+    // reloads config, the Deck's History form must follow it instead of later
+    // writing the stale 1000 back over the file.
+    sandbox.write_config("[history]\nenabled = true\nmax_entries = 500\nmax_age_days = 30\n");
+
+    session.wait_for("Connection reset by peer", Duration::from_secs(10));
+    session.send(KEY_ESC);
+    let deck = session.wait_for("Maximum entries", Duration::from_secs(3));
+    assert!(
+        deck.contains("500") && !deck.contains("1000"),
+        "returning to the Deck must resync the History form from config:\n{deck}"
+    );
+
+    session.send(KEY_ENTER);
+    session.wait_for("History retention saved.", Duration::from_secs(3));
+    let config: toml::Value = toml::from_str(&sandbox.config_contents()).unwrap();
+    assert_eq!(
+        config["history"]["max_entries"].as_integer(),
+        Some(500),
+        "saving the Deck History pane must not overwrite the reloaded limit: {config:?}"
+    );
+
+    handle.join().unwrap();
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_models_download_key_installs_without_activating() {
+    let sandbox = Sandbox::new("deck-download");
+    for entry in tonguetyped::catalog::ENTRIES {
+        std::fs::write(
+            sandbox
+                .data_home
+                .join("tonguetyped/models")
+                .join(entry.filename),
+            [],
+        )
+        .unwrap();
+    }
+    let mut session = Session::spawn(&sandbox, 100, 32);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(b"m");
+    session.wait_for("STREAM", Duration::from_secs(3));
+    // The default (active) model is the initial cursor; move to an installed
+    // model that is not active, so an activation would be observable.
+    session.send(KEY_DOWN);
+    session.send(b"d");
+
+    let result = session.wait_for("already installed", Duration::from_secs(10));
+    assert!(
+        result.contains("Model download"),
+        "the download key should report a download result:\n{result}"
+    );
+    assert!(
+        !result.contains("activated"),
+        "the download key must not claim or perform activation:\n{result}"
+    );
+    assert!(
+        sandbox.config_contents().contains(&format!(
+            "active_model = \"{}\"",
+            tonguetyped::catalog::DEFAULT_MODEL_ID
+        )),
+        "the download key must not select the downloaded model:\n{}",
+        sandbox.config_contents()
+    );
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("LIVE", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc on a download result should return to the Deck:\n{deck}"
+    );
+
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_selecting_an_ipc_action_without_a_running_daemon_shows_an_actionable_error() {
     let sandbox = Sandbox::new("action-feedback");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // Run "status" from the dedicated Commands screen. No daemon is running in
     // this sandbox, so the dashboard must show a visible, actionable error -
@@ -745,7 +1256,7 @@ fn pty_commands_screen_shows_in_flight_feedback_while_a_command_runs() {
     });
 
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_command(&mut session, "status");
     session.send(KEY_ENTER);
@@ -770,7 +1281,7 @@ fn pty_commands_screen_shows_in_flight_feedback_while_a_command_runs() {
 fn pty_daemon_home_item_opens_a_start_stop_restart_screen_instead_of_starting_immediately() {
     let sandbox = Sandbox::new("daemon-screen");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // "daemon" opens a sub-screen offering Start/Stop/Restart, not immediately
     // launching the daemon the way the old single-action binding did.
@@ -828,7 +1339,7 @@ fn pty_model_screen_lists_the_catalog_and_activation_reports_confirmed_failure_f
     // requiring a multi-gigabyte network download in a test.
     let sandbox = Sandbox::new("model-activation");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // "Model" is the first Settings row and is already selected.
     session.wait_for("> Model", Duration::from_secs(3));
@@ -860,7 +1371,7 @@ fn pty_model_screen_lists_the_catalog_and_activation_reports_confirmed_failure_f
 fn pty_activation_setting_changes_mode_and_persists_it() {
     let sandbox = Sandbox::new("activation-setting");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Activation");
     session.send(KEY_ENTER);
@@ -877,7 +1388,7 @@ fn pty_activation_setting_changes_mode_and_persists_it() {
     // Reopening the screen shows the new mode selected, and the same choice
     // was written to config.toml.
     session.send(KEY_ESC);
-    session.wait_for("Settings", Duration::from_secs(3));
+    open_settings(&mut session);
     session.send(KEY_ENTER);
     session.wait_for(
         "> Press once to start and again to stop",
@@ -895,7 +1406,7 @@ fn pty_backspace_and_left_right_work_on_a_settings_screen() {
     // key away and commits on leave.
     let sandbox = Sandbox::new("backspace-nav");
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Activation");
     session.send(KEY_ENTER);
@@ -927,7 +1438,7 @@ fn pty_backspace_and_left_right_work_on_a_settings_screen() {
 fn pty_overlay_setting_steps_position_both_ways_and_persists_on_leave() {
     let sandbox = Sandbox::new("overlay-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // Overlay is a Settings row.
     for _ in 0..setting_row("Overlay") {
@@ -992,6 +1503,7 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
     )
     .unwrap();
     let mut session = Session::spawn(&sandbox, 100, 40);
+    open_settings(&mut session);
 
     let home = session.wait_for("Overlay            disabled", Duration::from_secs(5));
     assert!(
@@ -1024,7 +1536,7 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
 
     // Leaving commits the pending enable state.
     session.send(KEY_ESC);
-    session.wait_for("Settings", Duration::from_secs(3));
+    open_settings(&mut session);
     assert!(sandbox.config_contents().contains("enabled = true"));
 
     session.quit_and_wait();
@@ -1034,7 +1546,7 @@ fn pty_overlay_disabled_hides_sub_rows_until_enabled() {
 fn pty_transcript_folder_setting_persists_an_absolute_path() {
     let sandbox = Sandbox::new("folder-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // Saving transcripts is opt-in, so turn it on from the Transcript output
     // screen before the folder is edited. The history row sits after the four
@@ -1095,7 +1607,8 @@ fn pty_transcript_folder_setting_persists_an_absolute_path() {
 fn pty_decoding_setting_persists_the_prompt_and_overrides_and_rejects_bad_numbers() {
     let sandbox = Sandbox::new("decoding-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    let home = session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
+    let home = session.visible_text();
     assert!(
         home.contains("Decoding           model defaults"),
         "an untouched config should read as model defaults:\n{home}"
@@ -1151,7 +1664,7 @@ fn pty_decoding_setting_persists_the_prompt_and_overrides_and_rejects_bad_number
 fn pty_translation_setting_persists_the_choice() {
     let sandbox = Sandbox::new("translation-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Translation");
     session.send(KEY_ENTER);
@@ -1178,7 +1691,7 @@ fn pty_translation_setting_persists_the_choice() {
 fn pty_text_processing_screen_toggles_passes_and_persists_replacements() {
     let sandbox = Sandbox::new("text-processing-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Text processing");
     session.send(KEY_ENTER);
@@ -1234,7 +1747,7 @@ fn pty_text_processing_screen_round_trips_replacement_separator_and_backslash() 
     // must not silently rewrite them.
     sandbox.write_config("[text.replacements]\n\"a\" = \"x; b => y\"\n\"c\\\\d\" = \"\\\\;\"\n");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Text processing");
     session.send(KEY_ENTER);
@@ -1264,7 +1777,7 @@ fn pty_text_processing_screen_rejects_invalid_input_without_saving() {
     let sandbox = Sandbox::new("text-processing-invalid");
     sandbox.write_config("");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Text processing");
     session.send(KEY_ENTER);
@@ -1323,7 +1836,7 @@ fn pty_text_processing_screen_rejects_invalid_input_without_saving() {
 fn pty_history_retention_setting_persists_both_limits() {
     let sandbox = Sandbox::new("retention-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // Retention is only editable while saving transcripts is on. Enable it
     // from the Transcript output screen's history row.
@@ -1387,7 +1900,7 @@ fn pty_history_retention_setting_persists_both_limits() {
 fn pty_shortcut_screen_offers_the_system_dialog_and_reports_portal_failures_inline() {
     let sandbox = Sandbox::new("shortcut-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Shortcut");
     session.send(KEY_ENTER);
@@ -1412,7 +1925,7 @@ fn pty_shortcut_screen_offers_the_system_dialog_and_reports_portal_failures_inli
 
     // The screen remains navigable afterwards.
     session.send(KEY_ESC);
-    session.wait_for("Settings", Duration::from_secs(3));
+    open_settings(&mut session);
     session.quit_and_wait();
 }
 
@@ -1421,7 +1934,7 @@ fn pty_text_processing_toggle_does_not_stick_after_a_failed_save() {
     let sandbox = Sandbox::new("text-processing-toggle-revert");
     sandbox.write_config("");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Text processing");
     session.send(KEY_ENTER);
@@ -1463,7 +1976,7 @@ fn pty_text_processing_toggle_does_not_stick_after_a_failed_save() {
 fn pty_microphone_screen_lists_devices_with_a_level_panel() {
     let sandbox = Sandbox::new("microphone-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Microphone");
     session.send(KEY_ENTER);
@@ -1491,7 +2004,7 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
     let sandbox = Sandbox::new("output-setting");
     sandbox.install_typing_helper("wtype");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Transcript output");
     session.send(KEY_ENTER);
@@ -1512,7 +2025,7 @@ fn pty_transcript_output_and_typing_backend_screens_apply_and_persist() {
 
     // Typing backend is the sixth Settings row.
     session.send(KEY_ESC);
-    session.wait_for("Settings", Duration::from_secs(3));
+    open_settings(&mut session);
     session.send(KEY_DOWN);
     session.wait_for("> Typing backend", Duration::from_secs(3));
     session.send(KEY_ENTER);
@@ -1541,7 +2054,7 @@ fn pty_transcript_output_configures_paste_and_enter() {
     sandbox.install_typing_helper("wtype");
     sandbox.install_typing_helper("wl-copy");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
     // Locate the row from `SETTING_LABELS` rather than assuming a fixed
     // offset: the list grows when the base branch adds Settings areas, and
     // this test runs against the merged tree.
@@ -1637,7 +2150,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
     // KDE/GNOME only).
     let sandbox = Sandbox::on("output-no-helper", "weston");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Transcript output");
     session.send(KEY_ENTER);
@@ -1680,7 +2193,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
 
     // The Typing backend screen explains the empty helper list too.
     session.send(KEY_ESC);
-    session.wait_for("Settings", Duration::from_secs(3));
+    open_settings(&mut session);
     session.send(KEY_DOWN);
     session.wait_for("> Typing backend", Duration::from_secs(3));
     session.send(KEY_ENTER);
@@ -1699,7 +2212,7 @@ fn pty_transcript_output_explains_a_missing_helper_and_refuses_typing() {
 fn pty_startup_setting_reuses_the_existing_autostart_toggle() {
     let sandbox = Sandbox::new("startup-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     select_setting(&mut session, "Startup");
     session.send(KEY_ENTER);
@@ -1724,7 +2237,8 @@ fn pty_inference_backend_setting_saves_and_reloads_like_the_model_screen() {
     // it, reloads a running daemon if there is one, and reports the outcome.
     let sandbox = Sandbox::new("inference-backend-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    let home = session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
+    let home = session.visible_text();
     assert!(
         home.contains("Inference backend  auto"),
         "the row should show the configured preference:\n{home}"
@@ -1784,7 +2298,7 @@ fn pty_model_screen_saves_a_pinned_inference_backend_and_reports_it() {
     // the stub still can't be loaded on it rather than claiming success.
     let sandbox = Sandbox::new("backend-selection");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
 
     // "Model" is the first Settings row and is already selected.
     session.wait_for("> Model", Duration::from_secs(3));
@@ -1848,7 +2362,7 @@ fn open_last_result(tag: &str, transcript: &str) -> (Sandbox, Daemon, Session) {
     let daemon = start_daemon(&sandbox);
 
     let mut session = Session::spawn(&sandbox, 100, 32);
-    session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
     select_command(&mut session, "last-result");
     session.send(KEY_ENTER);
     session.wait_for("Last result", Duration::from_secs(10));
@@ -1914,7 +2428,8 @@ fn pty_last_result_can_be_scrolled_to_text_taller_than_the_pane() {
 fn pty_media_pause_setting_defaults_off_and_persists_when_enabled() {
     let sandbox = Sandbox::new("media-pause-setting");
     let mut session = Session::spawn(&sandbox, 100, 40);
-    let home = session.wait_for("Settings", Duration::from_secs(5));
+    open_settings(&mut session);
+    let home = session.visible_text();
     assert!(
         home.contains("Media pause        keep playing"),
         "media pause should default to off:\n{home}"

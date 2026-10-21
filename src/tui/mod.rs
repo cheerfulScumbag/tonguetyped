@@ -8,13 +8,19 @@
 //! service that must outlive this dashboard session (see that function's
 //! doc comment).
 //!
-//! The home screen is one Settings panel with one selection cursor, grouped
-//! into four labeled sections (Language & model, Capture & activation, Output,
-//! Behaviour) listing the fifteen configuration areas (Model, Inference
-//! backend, Translation, Decoding, Text processing, Microphone, Activation,
-//! Shortcut, Transcript output, Typing backend, Transcript folder, History
-//! retention, Startup, Overlay, Media pause) with their current values, plus a
-//! Commands row. The Commands row opens a dedicated Commands screen derived
+//! The dashboard opens with a skippable splash, then the split Deck: a header
+//! with the compact bubble mark and live status, a rail of five destinations
+//! (Speak, Models, Output, History, Setup), and one pane for the selected
+//! destination. The Setup pane reaches the guided setup console, the full
+//! Settings panel, and the Commands screen.
+//!
+//! The Settings panel is one selection cursor, grouped into four labeled
+//! sections (Language & model, Capture & activation, Output, App) listing the
+//! fifteen configuration areas (Model, Inference backend, Translation,
+//! Decoding, Text processing, Microphone, Activation, Shortcut, Transcript
+//! output, Typing backend, Transcript folder, History retention, Startup,
+//! Overlay, Media pause) with their current values, plus a Commands row. The
+//! Commands row opens a dedicated Commands screen derived
 //! from `crate::cli::Cli`'s clap metadata (`Cli::command().get_subcommands()`)
 //! with the directional recording commands intentionally omitted in favor of
 //! Toggle. `model` and `autostart` are CLI commands but live in the Settings
@@ -39,9 +45,10 @@ use crossterm::terminal::{
 };
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::cell::{Cell, RefCell};
@@ -248,7 +255,7 @@ const SETTING_SECTIONS: [(&str, &[SettingId]); 4] = [
         ],
     ),
     (
-        "Behaviour",
+        "App",
         &[
             SettingId::Startup,
             SettingId::Overlay,
@@ -297,7 +304,14 @@ fn home_items() -> Vec<HomeItem> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum InfoReturn {
+    Deck,
+    Home,
+}
+
 enum Screen {
+    Deck,
     Home,
     Commands,
     Info {
@@ -330,6 +344,16 @@ struct App {
     config: Config,
     capabilities: Capabilities,
     screen: Screen,
+    deck_selected: usize,
+    deck_model_selected: usize,
+    deck_model_filter: usize,
+    deck_output: screens::OutputScreen,
+    deck_history: screens::TextFieldsScreen,
+    deck_wave_motion: Cell<bool>,
+    deck_wave_phase: Cell<f32>,
+    deck_level_phase: Cell<f32>,
+    splash_until: Cell<Option<Instant>>,
+    return_screen: InfoReturn,
     command_items: Vec<HomeItem>,
     home_selected: usize,
     /// Cursor on the dedicated Commands screen, separate from the home cursor.
@@ -363,8 +387,9 @@ struct OverlayPreview {
     pixels: Vec<u8>,
 }
 
-/// How often the home screen's status strip re-probes daemon liveness.
-/// `status_strip_line` renders on every tick of `run_loop`'s 66ms ticker, but
+/// How often the dashboard's daemon status re-probes liveness.
+/// `status_strip_line` and the Deck's header, rail, and Speak pane render on
+/// every tick of `run_loop`'s 66ms ticker, but
 /// the probe it displays (`commands::daemon_socket_exists`) opens a real
 /// `UnixStream` connection against the daemon's control socket - re-running
 /// that on every redraw would make the daemon's accept loop spawn a task per
@@ -377,12 +402,33 @@ const DAEMON_STATUS_REFRESH: Duration = Duration::from_secs(1);
 /// dominating the screen the way the old side panel did.
 const PREVIEW_BAND_HEIGHT: u16 = 8;
 
+/// The deck pane sits to the right of the one-column gutter, so its left edge
+/// is already separated and only the other three sides are bordered. That
+/// keeps the pane content at the approved 60 columns at 80x24 and 94 at
+/// 120x40 instead of losing a column to a second separator.
+const PANE_BORDERS: Borders = Borders::TOP.union(Borders::RIGHT).union(Borders::BOTTOM);
+
 impl App {
     fn new(config: Config) -> Self {
+        let capabilities = Capabilities::discover_or_default();
+        let rows = commands::model_rows(&config);
+        let active_model = rows.iter().position(|row| row.active).unwrap_or(0);
+        let deck_output = screens::OutputScreen::new(&capabilities, &config);
+        let deck_history = screens::TextFieldsScreen::history_retention(&config);
         Self {
             config,
-            capabilities: Capabilities::discover_or_default(),
-            screen: Screen::Home,
+            capabilities,
+            screen: Screen::Deck,
+            deck_selected: 0,
+            deck_model_selected: active_model,
+            deck_model_filter: 0,
+            deck_output,
+            deck_history,
+            deck_wave_motion: Cell::new(false),
+            deck_wave_phase: Cell::new(0.0),
+            deck_level_phase: Cell::new(0.0),
+            splash_until: Cell::new(Some(Instant::now() + Duration::from_millis(700))),
+            return_screen: InfoReturn::Home,
             command_items: home_items(),
             home_selected: 0,
             command_selected: 0,
@@ -446,6 +492,9 @@ impl App {
             }],
         };
         self.info_scroll.set(0);
+        if !matches!(self.screen, Screen::Info { .. }) {
+            self.remember_info_return();
+        }
         self.screen = Screen::Info {
             title: title.to_string(),
             lines,
@@ -457,6 +506,7 @@ impl App {
         // clobbering it with a stale copy.
         if let Ok(reloaded) = Config::load() {
             self.config = reloaded;
+            self.sync_deck_history();
         }
     }
 
@@ -469,7 +519,21 @@ impl App {
         if let Screen::Microphone(screen) = &mut self.screen {
             screen.poll_preview();
         }
+        let level_phase = (self.deck_level_phase.get() + 0.07) % std::f32::consts::TAU;
+        self.deck_level_phase.set(level_phase);
+        if matches!(self.screen, Screen::Deck) && self.deck_wave_motion.get() {
+            let phase = (self.deck_wave_phase.get() + 0.09) % std::f32::consts::TAU;
+            self.deck_wave_phase.set(phase);
+        }
         self.poll_shortcut_handles();
+    }
+
+    fn render_splash(&self, frame: &mut Frame, area: Rect) {
+        let lines = logo::splash_lines(area.width);
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(Color::Rgb(3, 8, 20))),
+            area,
+        );
     }
 
     fn poll_shortcut_handles(&mut self) {
@@ -595,7 +659,12 @@ impl App {
             self.should_quit = true;
             return Ok(());
         }
+        if self.splash_until.get().is_some() {
+            self.splash_until.set(None);
+            return Ok(());
+        }
         match &self.screen {
+            Screen::Deck => self.handle_deck_key(key, terminal)?,
             Screen::Home => self.handle_home_key(key)?,
             Screen::Commands => self.handle_commands_key(key, terminal)?,
             Screen::Info { .. } => self.handle_info_key(key),
@@ -624,14 +693,15 @@ impl App {
     }
 
     /// The dedicated Commands screen: `↑`/`↓` (and `←`/`→`) move the cursor,
-    /// `Enter` runs the highlighted command, and `Esc`/`Backspace` return home.
+    /// `Enter` runs the highlighted command, and `Esc`/`Backspace` return to
+    /// whichever screen opened it.
     fn handle_commands_key(
         &mut self,
         key: KeyEvent,
         terminal: &mut Terminal<Backend>,
     ) -> anyhow::Result<()> {
         if Self::is_back_key(key.code) {
-            self.screen = Screen::Home;
+            self.leave_to_return_screen();
             return Ok(());
         }
         match key.code {
@@ -663,6 +733,7 @@ impl App {
     fn handle_home_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => self.open_deck(),
             KeyCode::Up | KeyCode::Char('k') => self.move_home_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_home_selection(1),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.pending.is_none() => {
@@ -674,10 +745,921 @@ impl App {
         Ok(())
     }
 
+    fn handle_deck_key(
+        &mut self,
+        key: KeyEvent,
+        terminal: &mut Terminal<Backend>,
+    ) -> anyhow::Result<()> {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+                return Ok(());
+            }
+            KeyCode::Char('s') => {
+                self.deck_selected = 0;
+                return Ok(());
+            }
+            KeyCode::Char('m') => {
+                self.deck_selected = 1;
+                self.deck_model_selected = self
+                    .deck_model_selected
+                    .min(self.deck_model_rows().len().saturating_sub(1));
+                return Ok(());
+            }
+            KeyCode::Char('o') => {
+                self.deck_selected = 2;
+                return Ok(());
+            }
+            KeyCode::Char('h') => {
+                self.deck_selected = 3;
+                self.sync_deck_history();
+                return Ok(());
+            }
+            KeyCode::Char('p') => {
+                self.deck_selected = 4;
+                return Ok(());
+            }
+            KeyCode::Char('w') => {
+                self.deck_wave_motion.set(!self.deck_wave_motion.get());
+                return Ok(());
+            }
+            KeyCode::Char('?') => {
+                self.remember_info_return();
+                self.screen = Screen::Info {
+                    title: "Keys".to_string(),
+                    lines: vec![
+                        OutputLine {
+                            text: "↑↓ move   s m o h p jump   enter open   ? help   q quit"
+                                .to_string(),
+                            is_error: false,
+                        },
+                        OutputLine {
+                            text: "Speak: t toggle recording   c cancel   w wave on/off"
+                                .to_string(),
+                            is_error: false,
+                        },
+                        OutputLine {
+                            text: "Models: a or enter activate   d download   / filter".to_string(),
+                            is_error: false,
+                        },
+                        OutputLine {
+                            text: "Output/History: space toggles history   enter saves".to_string(),
+                            is_error: false,
+                        },
+                        OutputLine {
+                            text: "Setup: enter guided setup   g settings   c commands".to_string(),
+                            is_error: false,
+                        },
+                        OutputLine {
+                            text: "No mouse required.".to_string(),
+                            is_error: false,
+                        },
+                    ],
+                };
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        match self.deck_selected {
+            0 => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.deck_selected = self.deck_selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.deck_selected = (self.deck_selected + 1).min(4);
+                }
+                KeyCode::Enter if self.pending.is_none() => {
+                    self.dispatch_command("toggle", terminal)?;
+                }
+                KeyCode::Char('t') if self.pending.is_none() => {
+                    self.dispatch_command("toggle", terminal)?;
+                }
+                KeyCode::Char('c') if self.pending.is_none() => {
+                    self.dispatch_command("cancel", terminal)?;
+                }
+                _ => {}
+            },
+            1 => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.deck_model_selected = self.deck_model_selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let len = self.deck_model_rows().len();
+                    self.deck_model_selected =
+                        (self.deck_model_selected + 1).min(len.saturating_sub(1));
+                }
+                KeyCode::Enter | KeyCode::Char('a') if self.pending.is_none() => {
+                    if let Some(id) = self.deck_selected_model_id() {
+                        self.start_model_activation(id);
+                    }
+                }
+                KeyCode::Char('d') if self.pending.is_none() => {
+                    if let Some(id) = self.deck_selected_model_id() {
+                        self.start_model_download(id);
+                    }
+                }
+                KeyCode::Char('/') => {
+                    self.deck_model_filter = (self.deck_model_filter + 1) % 3;
+                    self.deck_model_selected = 0;
+                }
+                _ => {}
+            },
+            2 => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.deck_output.move_selection(-1, &self.config);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.deck_output.move_selection(1, &self.config);
+                }
+                KeyCode::Left => {
+                    if self.pending.is_some() || !self.deck_output.step(-1, &mut self.config) {
+                        self.deck_output.move_selection(-1, &self.config);
+                    } else {
+                        self.deck_output.result =
+                            Some(self.config.save().map_err(|error| error.to_string()));
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    if self.pending.is_some() || !self.deck_output.step(1, &mut self.config) {
+                        self.deck_output.move_selection(1, &self.config);
+                    } else {
+                        self.deck_output.result =
+                            Some(self.config.save().map_err(|error| error.to_string()));
+                    }
+                }
+                KeyCode::Enter if self.pending.is_none() => {
+                    let result = self.deck_output.apply(&mut self.config);
+                    if result.is_ok() {
+                        self.deck_output.result =
+                            Some(self.config.save().map_err(|error| error.to_string()));
+                    } else {
+                        self.deck_output.result = Some(result);
+                    }
+                }
+                KeyCode::Char(' ') if self.pending.is_none() => {
+                    self.config.history.enabled = !self.config.history.enabled;
+                    self.deck_output.result =
+                        Some(self.config.save().map_err(|error| error.to_string()));
+                }
+                _ => {}
+            },
+            3 => {
+                if key.code == KeyCode::Char(' ') {
+                    if self.pending.is_none() {
+                        self.config.history.enabled = !self.config.history.enabled;
+                        self.deck_history =
+                            screens::TextFieldsScreen::history_retention(&self.config);
+                        self.deck_history.result =
+                            Some(self.config.save().map_err(|error| error.to_string()));
+                    }
+                    return Ok(());
+                }
+                if key.code == KeyCode::Enter {
+                    if self.pending.is_none() {
+                        let result = self.deck_history.apply(&mut self.config);
+                        if result.is_ok() {
+                            self.deck_history.result =
+                                Some(self.config.save().map_err(|error| error.to_string()));
+                        } else {
+                            self.deck_history.result = Some(result);
+                        }
+                    }
+                    return Ok(());
+                }
+                if self.deck_history.disabled {
+                    return Ok(());
+                }
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Up | KeyCode::BackTab => self.deck_history.move_selection(-1),
+                    KeyCode::Down | KeyCode::Tab => self.deck_history.move_selection(1),
+                    KeyCode::Left => self.deck_history.selected_field_mut().move_left(),
+                    KeyCode::Right => self.deck_history.selected_field_mut().move_right(),
+                    KeyCode::Home => self.deck_history.selected_field_mut().home(),
+                    KeyCode::End => self.deck_history.selected_field_mut().end(),
+                    KeyCode::Backspace => self.deck_history.selected_field_mut().backspace(),
+                    KeyCode::Char(c) if !ctrl => self.deck_history.selected_field_mut().insert(c),
+                    _ => {}
+                }
+            }
+            _ => match key.code {
+                KeyCode::Enter if self.pending.is_none() => {
+                    self.dispatch_command("setup", terminal)?;
+                }
+                KeyCode::Char('g') => {
+                    self.screen = Screen::Home;
+                }
+                KeyCode::Char('c') => {
+                    self.return_screen = InfoReturn::Deck;
+                    self.screen = Screen::Commands;
+                }
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
+    fn render_deck(&self, frame: &mut Frame, area: Rect) {
+        let header = logo::bubble_header(
+            self.daemon_running_cached(),
+            &self.config.model.active_model,
+        );
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(logo::BUBBLE_HEIGHT),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ])
+            .split(area);
+        frame.render_widget(Paragraph::new(header), chunks[0]);
+
+        let rail_width = if area.width >= 120 { 24 } else { 18 };
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(rail_width),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(chunks[1]);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Rgb(32, 12, 48))),
+            body[1],
+        );
+        self.render_deck_rail(frame, body[0]);
+        self.render_deck_pane(frame, body[2]);
+
+        let footer = match &self.pending {
+            Some(pending) => Line::from(Span::styled(
+                format!("Working: {}...", pending.title),
+                Style::default().fg(Color::Yellow),
+            )),
+            None => Line::from(match self.deck_selected {
+                0 => "↑↓ move   enter start   t toggle   w wave   ? help   q quit",
+                1 => "↑↓ model   enter activate   d download   / filter   ? help   q quit",
+                2 => "↑↓ row   ←/→ change   enter save   space history   ? help   q quit",
+                3 => "↑↓ field   type edit   enter save   space on/off   ? help   q quit",
+                _ => "enter setup   g settings   c commands   q quit",
+            }),
+        };
+        let status = match self.deck_selected {
+            0 => "5 destinations · single letter jumps · no mouse required",
+            1 => "live = streaming partial text · final = one transcript · / cycles filter",
+            2 => "space toggles transcript history · the pane saves on enter",
+            3 => "space toggles history · numeric fields save on enter",
+            _ => "guided setup is five chapters · settings and commands stay reachable",
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                footer,
+                Line::from(Span::styled(status, Style::default().fg(Color::DarkGray))),
+            ]),
+            chunks[2],
+        );
+    }
+
+    fn render_deck_rail(&self, frame: &mut Frame, area: Rect) {
+        let labels = [
+            ("SPEAK", "hold / toggle"),
+            ("MODELS", "download / activate"),
+            ("OUTPUT", "deliver text"),
+            ("HISTORY", "local retention"),
+            ("SETUP", "guided configuration"),
+        ];
+        let selected = Style::default()
+            .fg(Color::Rgb(182, 255, 182))
+            .bg(Color::Rgb(50, 0, 77))
+            .add_modifier(Modifier::BOLD);
+        let accent = Style::default()
+            .fg(Color::Rgb(0, 255, 0))
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(Color::DarkGray);
+        let inner_width = usize::from(area.width.saturating_sub(2));
+        let show_desc = area.height >= 20;
+        let mut lines: Vec<Line> = Vec::new();
+        for (index, (label, description)) in labels.iter().enumerate() {
+            let is_selected = index == self.deck_selected;
+            let marker = if is_selected { "▸ " } else { "  " };
+            let mut spans = Vec::new();
+            if is_selected {
+                let text = format!("{marker}{label}");
+                let used = marker.chars().count() + label.chars().count();
+                spans.push(Span::styled(text, selected));
+                if used < inner_width {
+                    spans.push(Span::styled(" ".repeat(inner_width - used), selected));
+                }
+            } else {
+                spans.push(Span::raw(marker));
+                spans.push(Span::styled(label[0..1].to_string(), accent));
+                spans.push(Span::styled(label[1..].to_string(), muted));
+            }
+            lines.push(Line::from(spans));
+            if show_desc {
+                let mut desc = vec![Span::styled(
+                    format!("  {description}"),
+                    if is_selected { selected } else { muted },
+                )];
+                let used = 2 + description.chars().count();
+                if is_selected && used < inner_width {
+                    desc.push(Span::styled(" ".repeat(inner_width - used), selected));
+                }
+                lines.push(Line::from(desc));
+                lines.push(Line::from(""));
+            }
+        }
+        lines.push(Line::from(""));
+        let (daemon_text, daemon_style) = if self.daemon_running_cached() {
+            ("running", Style::default().fg(Color::Green))
+        } else {
+            ("stopped", Style::default().fg(Color::Red))
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  daemon ", muted),
+            Span::styled(daemon_text, daemon_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  model  ", muted),
+            Span::styled(
+                self.config.model.active_model.clone(),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(Span::styled(
+                "LIVE",
+                Style::default().fg(Color::DarkGray),
+            )));
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn render_deck_pane(&self, frame: &mut Frame, area: Rect) {
+        match self.deck_selected {
+            0 => self.render_deck_speak(frame, area),
+            1 => self.render_deck_models(frame, area),
+            2 => self.render_deck_output(frame, area),
+            3 => self.render_deck_history(frame, area),
+            _ => self.render_deck_setup(frame, area),
+        }
+    }
+
+    fn render_deck_speak(&self, frame: &mut Frame, area: Rect) {
+        let accent = Style::default()
+            .fg(Color::Rgb(0, 255, 0))
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(Color::DarkGray);
+        let text = Style::default().fg(Color::Gray);
+        let (daemon_text, daemon_style) = if self.daemon_running_cached() {
+            ("running", Style::default().fg(Color::Green))
+        } else {
+            ("stopped", Style::default().fg(Color::Red))
+        };
+        let level = self.deck_wave_level();
+        let lines = vec![
+            Line::from(vec![Span::styled("● ", daemon_style), Span::raw("idle")]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "hold the shortcut, or press once to toggle",
+                text,
+            )),
+            Line::from(vec![
+                Span::styled("mic ", muted),
+                Span::styled(format!("{:>3}%", (level * 100.0).round() as u32), accent),
+                Span::styled(" simulated", muted),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("daemon ", muted),
+                Span::styled(daemon_text, daemon_style),
+                Span::styled(" · model ", muted),
+                Span::styled(
+                    self.config.model.active_model.clone(),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("enter", accent),
+                Span::raw(" start   "),
+                Span::styled("c", accent),
+                Span::raw(" cancel   "),
+                Span::styled("w", accent),
+                Span::raw(if self.deck_wave_motion.get() {
+                    " wave on"
+                } else {
+                    " wave off"
+                }),
+            ]),
+        ];
+        if self.deck_selected == 0 {
+            self.render_wave_field(
+                frame,
+                area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 1,
+                }),
+            );
+        }
+        let block = Block::default()
+            .borders(PANE_BORDERS)
+            .title(Line::from(Span::styled("SPEAK", accent)));
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn deck_model_rows(&self) -> Vec<commands::ModelRow> {
+        commands::model_rows(&self.config)
+            .into_iter()
+            .filter(|row| match self.deck_model_filter {
+                1 => row.info.is_english_only(),
+                2 => row.installed,
+                _ => true,
+            })
+            .collect()
+    }
+
+    fn deck_selected_model_id(&self) -> Option<String> {
+        let rows = self.deck_model_rows();
+        rows.get(self.deck_model_selected.min(rows.len().saturating_sub(1)))
+            .map(|row| row.id.to_string())
+    }
+
+    fn deck_model_status(row: &commands::ModelRow) -> &'static str {
+        if row.active {
+            "active"
+        } else if row.installed {
+            "installed"
+        } else {
+            "download"
+        }
+    }
+
+    fn render_deck_models(&self, frame: &mut Frame, area: Rect) {
+        let accent = Style::default()
+            .fg(Color::Rgb(0, 255, 0))
+            .add_modifier(Modifier::BOLD);
+        let selected_style = Style::default()
+            .fg(Color::Rgb(182, 255, 182))
+            .bg(Color::Rgb(50, 0, 77))
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(Color::DarkGray);
+        let text = Style::default().fg(Color::Gray);
+        let rows = self.deck_model_rows();
+        if let Some(progress) = self
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.progress.clone())
+        {
+            let (downloaded, total) = progress.lock().map(|guard| *guard).unwrap_or((0, 0));
+            let ratio = if total == 0 {
+                0.0
+            } else {
+                (downloaded as f64 / total as f64).clamp(0.0, 1.0)
+            };
+            let block = Block::default()
+                .borders(PANE_BORDERS)
+                .title(Line::from(Span::styled("DOWNLOAD", accent)));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(2)])
+                .split(inner);
+            frame.render_widget(
+                Gauge::default()
+                    .gauge_style(Style::default().fg(Color::Rgb(0, 255, 0)))
+                    .ratio(ratio),
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        format!(
+                            "{} / {}",
+                            commands::human_size(downloaded),
+                            commands::human_size(total)
+                        ),
+                        text,
+                    )),
+                    Line::from(Span::styled("sha-256 checked after the download", muted)),
+                ]),
+                chunks[1],
+            );
+            return;
+        }
+        if rows.is_empty() {
+            let block = Block::default()
+                .borders(PANE_BORDERS)
+                .title(Line::from(Span::styled("MODELS", accent)));
+            frame.render_widget(
+                Paragraph::new("No models match this filter.")
+                    .style(text)
+                    .block(block),
+                area,
+            );
+            return;
+        }
+
+        let selected = self.deck_model_selected.min(rows.len() - 1);
+        let visible: usize = if area.height >= 26 { 10 } else { 5 };
+        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let end = (start + visible).min(rows.len());
+        let inner_width = usize::from(area.width.saturating_sub(1));
+        let wide = area.width >= 90;
+        let index_width = rows.len().to_string().chars().count().max(1);
+        let quant_width = rows
+            .iter()
+            .map(|row| row.quant.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("QUANT".len());
+        let size_width = rows
+            .iter()
+            .map(|row| commands::human_size(row.size_bytes).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("SIZE".len());
+        let lang_width = rows
+            .iter()
+            .map(|row| row.info.language_summary().chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("LANG".len());
+        let stream_width = "STREAM".len();
+        let status_width = rows
+            .iter()
+            .map(|row| Self::deck_model_status(row).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("STATUS".len());
+        let model_target = rows
+            .iter()
+            .map(|row| row.id.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("MODEL".len());
+        let fixed_width = if wide {
+            1 + index_width
+                + 2
+                + quant_width
+                + 1
+                + size_width
+                + 1
+                + lang_width
+                + 1
+                + stream_width
+                + 1
+                + status_width
+        } else {
+            1 + index_width + 2 + size_width + 1 + stream_width + 1 + status_width
+        };
+        let model_width = model_target
+            .min(inner_width.saturating_sub(fixed_width))
+            .max("MODEL".len());
+        let mut lines: Vec<Line> = Vec::new();
+        let header = if wide {
+            format!(
+                " {:>iw$} {:<mw$} {:<qw$} {:>sw$} {:<lw$} {:<stw$} {:<st$}",
+                "#",
+                "MODEL",
+                "QUANT",
+                "SIZE",
+                "LANG",
+                "STREAM",
+                "STATUS",
+                iw = index_width,
+                mw = model_width,
+                qw = quant_width,
+                sw = size_width,
+                lw = lang_width,
+                stw = stream_width,
+                st = status_width
+            )
+        } else {
+            format!(
+                " {:>iw$} {:<mw$} {:>sw$} {:<stw$} {:<st$}",
+                "#",
+                "MODEL",
+                "SIZE",
+                "STREAM",
+                "STATUS",
+                iw = index_width,
+                mw = model_width,
+                sw = size_width,
+                stw = stream_width,
+                st = status_width
+            )
+        };
+        lines.push(Line::from(Span::styled(header, muted)));
+        for (index, row) in rows.iter().enumerate().take(end).skip(start) {
+            let is_selected = index == selected;
+            let marker = if is_selected { "▸" } else { " " };
+            let stream = if row.info.supports_streaming() {
+                "live"
+            } else {
+                "final"
+            };
+            let status = Self::deck_model_status(row);
+            let size = commands::human_size(row.size_bytes);
+            let id: String = row.id.chars().take(model_width).collect();
+            let mut spans: Vec<Span> = Vec::new();
+            if is_selected {
+                let row_text = if wide {
+                    format!(
+                        "{marker}{:>iw$} {:<mw$} {:<qw$} {:>sw$} {:<lw$} {:<stw$} {:<st$}",
+                        index + 1,
+                        id,
+                        row.quant,
+                        size,
+                        row.info.language_summary(),
+                        stream,
+                        status,
+                        iw = index_width,
+                        mw = model_width,
+                        qw = quant_width,
+                        sw = size_width,
+                        lw = lang_width,
+                        stw = stream_width,
+                        st = status_width
+                    )
+                } else {
+                    format!(
+                        "{marker}{:>iw$} {:<mw$} {:>sw$} {:<stw$} {:<st$}",
+                        index + 1,
+                        id,
+                        size,
+                        stream,
+                        status,
+                        iw = index_width,
+                        mw = model_width,
+                        sw = size_width,
+                        stw = stream_width,
+                        st = status_width
+                    )
+                };
+                let used = row_text.chars().count();
+                spans.push(Span::styled(row_text, selected_style));
+                if used < inner_width {
+                    spans.push(Span::styled(" ".repeat(inner_width - used), selected_style));
+                }
+            } else {
+                spans.push(Span::styled(
+                    format!("{marker}{:>iw$} ", index + 1, iw = index_width),
+                    accent,
+                ));
+                if wide {
+                    spans.push(Span::raw(format!(
+                        "{:<mw$} {:<qw$} {:>sw$} ",
+                        id,
+                        row.quant,
+                        size,
+                        mw = model_width,
+                        qw = quant_width,
+                        sw = size_width
+                    )));
+                    spans.push(Span::styled(
+                        format!("{:<lw$} ", row.info.language_summary(), lw = lang_width),
+                        muted,
+                    ));
+                } else {
+                    spans.push(Span::raw(format!(
+                        "{:<mw$} {:>sw$} ",
+                        id,
+                        size,
+                        mw = model_width,
+                        sw = size_width
+                    )));
+                }
+                spans.push(Span::styled(
+                    format!("{stream:<stw$} ", stw = stream_width),
+                    if stream == "live" {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        muted
+                    },
+                ));
+                spans.push(Span::styled(
+                    format!("{status:<st$}", st = status_width),
+                    muted,
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        let above = start;
+        let more = rows.len() - end;
+        if above > 0 || more > 0 {
+            let mut parts = Vec::new();
+            if above > 0 {
+                parts.push(format!("↑ {above} above"));
+            }
+            if more > 0 {
+                parts.push(format!("↓ {more} more"));
+            }
+            lines.push(Line::from(Span::styled(parts.join("   "), muted)));
+        }
+        lines.push(Line::from(Span::styled(
+            "─".repeat(inner_width),
+            Style::default().fg(Color::DarkGray),
+        )));
+        let row = &rows[selected];
+        lines.push(Line::from(vec![
+            Span::styled("selected ", muted),
+            Span::styled(row.id.to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!(
+                    " · {} · {}",
+                    row.quant,
+                    commands::human_size(row.size_bytes)
+                ),
+                text,
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} · {}",
+                row.info.language_summary(),
+                if row.info.supports_streaming() {
+                    "live partial text"
+                } else {
+                    "final transcript only"
+                }
+            ),
+            text,
+        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                if row.installed {
+                    "installed"
+                } else {
+                    "not installed"
+                },
+                muted,
+            ),
+            Span::styled("   ", muted),
+            Span::styled("a", accent),
+            Span::raw(" activate   "),
+            Span::styled("d", accent),
+            Span::raw(" download   "),
+            Span::styled("/", accent),
+            Span::raw(" filter"),
+        ]));
+        let block = Block::default()
+            .borders(PANE_BORDERS)
+            .title(Line::from(Span::styled("MODELS", accent)));
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn render_deck_output(&self, frame: &mut Frame, area: Rect) {
+        let accent = Style::default()
+            .fg(Color::Rgb(0, 255, 0))
+            .add_modifier(Modifier::BOLD);
+        let inner_width = usize::from(area.width.saturating_sub(1));
+        let mut lines = self.deck_output.deck_lines(&self.config, inner_width);
+        lines.push(Line::from(""));
+        lines.push(self.deck_output.warning_line());
+        lines.push(self.deck_output.result_line());
+        let block = Block::default()
+            .borders(PANE_BORDERS)
+            .title(Line::from(Span::styled("OUTPUT", accent)));
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn render_deck_history(&self, frame: &mut Frame, area: Rect) {
+        let accent = Style::default()
+            .fg(Color::Rgb(0, 255, 0))
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(Color::DarkGray);
+        let inner_width = usize::from(area.width.saturating_sub(1));
+        let mut lines = self.deck_history.deck_lines(inner_width);
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            self.deck_history.hint_line(),
+            muted,
+        )));
+        lines.push(self.deck_history.result_line("History retention saved."));
+        let block = Block::default()
+            .borders(PANE_BORDERS)
+            .title(Line::from(Span::styled("HISTORY", accent)));
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn render_deck_setup(&self, frame: &mut Frame, area: Rect) {
+        let accent = Style::default()
+            .fg(Color::Rgb(0, 255, 0))
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(Color::DarkGray);
+        let text = Style::default().fg(Color::Gray);
+        let chapters = [
+            ("1", "Model", "choose or download"),
+            ("2", "Output", "delivery"),
+            ("3", "History", "local retention"),
+            ("4", "App", "startup / overlay / media"),
+            ("5", "Review", "apply"),
+        ];
+        let mut lines = Vec::new();
+        for (number, title, description) in chapters {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(number.to_string(), accent),
+                Span::raw(format!("  {title}")),
+            ]));
+            lines.push(Line::from(Span::styled(format!("   {description}"), muted)));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "enter guided setup   g settings   c commands",
+            text,
+        )));
+        let block = Block::default()
+            .borders(PANE_BORDERS)
+            .title(Line::from(Span::styled("SETUP", accent)));
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    /// The Speak pane's simulated mic level. It advances every tick from its
+    /// own phase, so the readout and the wave amplitude keep moving even when
+    /// the `w` motion toggle only gates the wave's translation.
+    fn deck_wave_level(&self) -> f64 {
+        let phase = f64::from(self.deck_level_phase.get());
+        let slow = (phase * 0.55).sin();
+        let flutter = (phase * 2.7).sin() * 0.12;
+        (0.62 + slow * 0.22 + flutter).clamp(0.0, 1.0)
+    }
+
+    fn render_wave_field(&self, frame: &mut Frame, area: Rect) {
+        if area.width < 20 || area.height < 5 {
+            return;
+        }
+        let rows = 8usize;
+        let cols = 16usize;
+        let phase = f64::from(self.deck_wave_phase.get());
+        let level = self.deck_wave_level();
+        let amplitude = 0.05 + level * 0.09;
+        let canvas = Canvas::default()
+            .x_bounds([-1.6, 1.6])
+            .y_bounds([-1.0, 1.0])
+            .paint(|ctx| {
+                let line = Color::Rgb(18, 70, 140);
+                for row in 0..rows {
+                    let z = row as f64 / (rows - 1) as f64;
+                    let base = -0.7 + z * 1.2;
+                    for col in 0..cols - 1 {
+                        let x1 = col as f64 / (cols - 1) as f64 * 3.2 - 1.6;
+                        let x2 = (col + 1) as f64 / (cols - 1) as f64 * 3.2 - 1.6;
+                        let wave = |x: f64| {
+                            (x * 2.4 + z * 3.0 + phase).sin() * amplitude * (1.0 - z * 0.5)
+                        };
+                        ctx.draw(&CanvasLine {
+                            x1,
+                            y1: base + wave(x1),
+                            x2,
+                            y2: base + wave(x2),
+                            color: line,
+                        });
+                    }
+                }
+                for col in 0..cols {
+                    let x = col as f64 / (cols - 1) as f64 * 3.2 - 1.6;
+                    for row in 0..rows - 1 {
+                        let z1 = row as f64 / (rows - 1) as f64;
+                        let z2 = (row + 1) as f64 / (rows - 1) as f64;
+                        let y1 = -0.7
+                            + z1 * 1.2
+                            + (x * 2.4 + z1 * 3.0 + phase).sin() * amplitude * (1.0 - z1 * 0.5);
+                        let y2 = -0.7
+                            + z2 * 1.2
+                            + (x * 2.4 + z2 * 3.0 + phase).sin() * amplitude * (1.0 - z2 * 0.5);
+                        ctx.draw(&CanvasLine {
+                            x1: x,
+                            y1,
+                            x2: x,
+                            y2,
+                            color: line,
+                        });
+                    }
+                }
+                let stars = [
+                    (-1.3, 0.82),
+                    (-0.7, 0.55),
+                    (0.2, 0.9),
+                    (0.9, 0.64),
+                    (1.4, 0.35),
+                ];
+                ctx.draw(&Points {
+                    coords: &stars,
+                    color: Color::Rgb(70, 150, 230),
+                });
+            });
+        frame.render_widget(canvas, area);
+    }
+
     fn open_home_row(&mut self, index: usize) {
         if index < SettingId::ALL.len() {
             self.open_setting(SettingId::ALL[index]);
         } else {
+            self.return_screen = InfoReturn::Home;
             self.screen = Screen::Commands;
         }
     }
@@ -738,6 +1720,9 @@ impl App {
     /// whether the write succeeded, so a leave handler can stay on the screen
     /// (with the error visible) instead of navigating away from a failed save.
     fn save_settings_config(&mut self) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
         let result = self.config.save().map_err(|error| error.to_string());
         let saved = result.is_ok();
         match &mut self.screen {
@@ -822,7 +1807,7 @@ impl App {
             },
             _ => true,
         };
-        if leave && self.save_settings_config() {
+        if leave && (self.pending.is_some() || self.save_settings_config()) {
             self.screen = Screen::Home;
         }
     }
@@ -1027,8 +2012,9 @@ impl App {
             // highlight, like `↑`/`↓`.
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
                 let delta = Self::step_delta(key.code).unwrap_or(0);
+                let pending = self.pending.is_some();
                 if let Screen::TranscriptOutput(screen) = &mut self.screen {
-                    if !screen.step(delta, &mut self.config) {
+                    if pending || !screen.step(delta, &mut self.config) {
                         screen.move_selection(delta, &self.config);
                     }
                 }
@@ -1290,7 +2276,9 @@ impl App {
     fn handle_info_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter => self.screen = Screen::Home,
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Enter => {
+                self.leave_to_return_screen();
+            }
             KeyCode::Up | KeyCode::Char('k') => self.adjust_info_scroll(-1),
             KeyCode::Down | KeyCode::Char('j') => self.adjust_info_scroll(1),
             KeyCode::PageUp => self.adjust_info_scroll(-5),
@@ -1435,7 +2423,7 @@ impl App {
 
     fn handle_daemon_key(&mut self, key: KeyEvent) {
         if Self::is_back_key(key.code) {
-            self.screen = Screen::Home;
+            self.leave_to_return_screen();
             return;
         }
         match key.code {
@@ -1521,12 +2509,35 @@ impl App {
         );
     }
 
+    fn start_model_download(&mut self, id: String) {
+        let progress = Arc::new(Mutex::new((0u64, 0u64)));
+        self.spawn_pending(
+            "Model download",
+            model_download_task(id, progress.clone()),
+            Some(progress),
+        );
+    }
+
     /// Runs the pre-existing setup console (`setup::run_console`) by
     /// temporarily leaving the dashboard's own alternate screen - terminals
     /// track one alternate-screen buffer, not a stack, so re-entering it
     /// without first leaving would strand the dashboard on the primary
     /// screen once the console exits.
     fn run_setup_console(&mut self, terminal: &mut Terminal<Backend>) -> anyhow::Result<()> {
+        if let Err(error) = self.config.save() {
+            self.info_scroll.set(0);
+            self.remember_info_return();
+            self.screen = Screen::Info {
+                title: "Setup".to_string(),
+                lines: vec![OutputLine {
+                    text: format!(
+                        "Could not save the dashboard settings before opening setup: {error}"
+                    ),
+                    is_error: true,
+                }],
+            };
+            return Ok(());
+        }
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
@@ -1538,9 +2549,11 @@ impl App {
 
         if let Ok(reloaded) = Config::load() {
             self.config = reloaded;
+            self.sync_deck_history();
         }
         if let Err(error) = outcome {
             self.info_scroll.set(0);
+            self.remember_info_return();
             self.screen = Screen::Info {
                 title: "Setup".to_string(),
                 lines: vec![OutputLine {
@@ -1552,9 +2565,46 @@ impl App {
         Ok(())
     }
 
+    /// Rebuilds the Deck's config-backed History form from the current config,
+    /// so a save can never write values older than the persisted file.
+    fn sync_deck_history(&mut self) {
+        self.deck_history = screens::TextFieldsScreen::history_retention(&self.config);
+    }
+
+    fn open_deck(&mut self) {
+        self.screen = Screen::Deck;
+        self.sync_deck_history();
+    }
+
+    fn leave_to_return_screen(&mut self) {
+        match self.return_screen {
+            InfoReturn::Deck => self.open_deck(),
+            InfoReturn::Home => self.screen = Screen::Home,
+        }
+    }
+
+    /// The Info pane returns to whichever screen created it: the Deck keeps
+    /// its own help and action results, Commands and its daemon screen keep the
+    /// destination that opened Commands, and Home's settings screens keep Home.
+    fn remember_info_return(&mut self) {
+        self.return_screen = match &self.screen {
+            Screen::Deck => InfoReturn::Deck,
+            Screen::Commands | Screen::Daemon(_) => self.return_screen,
+            _ => InfoReturn::Home,
+        };
+    }
+
     fn render(&self, frame: &mut Frame) {
         let area = frame.area();
+        if let Some(until) = self.splash_until.get() {
+            if Instant::now() < until {
+                self.render_splash(frame, area);
+                return;
+            }
+            self.splash_until.set(None);
+        }
         match &self.screen {
+            Screen::Deck => self.render_deck(frame, area),
             Screen::Home => self.render_home(frame, area),
             Screen::Commands => self.render_commands(frame, area),
             Screen::Info { title, lines } => {
@@ -1624,8 +2674,9 @@ impl App {
     }
 
     /// The dedicated Commands screen, reached from the Settings panel's
-    /// Commands row. It lists the same clap-derived commands the home screen
-    /// used to stack below the Settings panel, with the standard list grammar.
+    /// Commands row and the Deck's Setup pane. It lists the same clap-derived
+    /// commands the home screen used to stack below the Settings panel, with
+    /// the standard list grammar.
     fn render_commands(&self, frame: &mut Frame, area: Rect) {
         let rows: Vec<String> = self
             .command_items
@@ -2586,6 +3637,24 @@ async fn wait_for_daemon_ready(verb: &str) -> Vec<OutputLine> {
     }]
 }
 
+async fn model_download_task(id: String, progress: Arc<Mutex<(u64, u64)>>) -> Vec<OutputLine> {
+    let callback: crate::model::ProgressCallback = Arc::new(move |downloaded, total| {
+        if let Ok(mut guard) = progress.lock() {
+            *guard = (downloaded, total);
+        }
+    });
+    match commands::download_model(&id, Some(callback)).await {
+        Ok(outcome) => vec![OutputLine {
+            text: format!("model '{id}': {}", setup::outcome_label(outcome)),
+            is_error: false,
+        }],
+        Err(error) => vec![OutputLine {
+            text: error.to_string(),
+            is_error: true,
+        }],
+    }
+}
+
 async fn model_activation_task(id: String, progress: Arc<Mutex<(u64, u64)>>) -> Vec<OutputLine> {
     let callback: crate::model::ProgressCallback = Arc::new(move |downloaded, total| {
         if let Ok(mut guard) = progress.lock() {
@@ -2681,6 +3750,37 @@ async fn backend_activation_task(name: &'static str) -> Vec<OutputLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deck_renders_at_80x24_and_100x38() {
+        use ratatui::backend::TestBackend;
+        for (width, height) in [(80, 24), (120, 40), (100, 38), (40, 24)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new(Config::default());
+            app.splash_until.set(None);
+            for selected in 0..5 {
+                app.deck_selected = selected;
+                terminal.draw(|frame| app.render(frame)).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn simulated_mic_level_keeps_moving_with_wave_motion_off() {
+        let mut app = App::new(Config::default());
+        app.splash_until.set(None);
+        app.deck_wave_motion.set(false);
+        let first = app.deck_wave_level();
+        for _ in 0..20 {
+            app.refresh_screens();
+        }
+        let second = app.deck_wave_level();
+        assert!(
+            (first - second).abs() > 0.01,
+            "the simulated mic level must advance while motion is off: {first} -> {second}"
+        );
+    }
 
     #[test]
     fn overlay_preview_draws_a_grid_of_half_block_cells() {

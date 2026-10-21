@@ -2,7 +2,7 @@
 //! `main.rs`) so `tui::home_items` can introspect the exact same subcommand names
 //! and `about` text that `--help` renders (`Cli::command()`), instead of
 //! maintaining a second, driftable copy of each command's name/description
-//! for the dashboard's first page.
+//! for the dashboard's Commands screen.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;

@@ -231,6 +231,21 @@ pub fn select_model(id: &str) -> anyhow::Result<()> {
     config.save()
 }
 
+/// Downloads (if needed) and verifies `id` without selecting it as the active
+/// model or touching a running daemon. The dashboard's Models pane uses this
+/// for its download-only key, which must never change the active model.
+pub async fn download_model(
+    id: &str,
+    on_progress: Option<ProgressCallback>,
+) -> anyhow::Result<DownloadOutcome> {
+    if crate::catalog::find(id).is_none() {
+        anyhow::bail!("unknown catalog model: {id}");
+    }
+    let manager = DownloadManager::new()?;
+    let (_, outcome) = manager.install_catalog_model(id, on_progress).await?;
+    Ok(outcome)
+}
+
 /// Everything that happened while activating a catalog model from the
 /// dashboard: download/verify, save the selection, reload a running daemon,
 /// and confirm the new model actually loads. A failure at any step after the
@@ -265,11 +280,7 @@ pub async fn activate_model(
     id: &str,
     on_progress: Option<ProgressCallback>,
 ) -> anyhow::Result<ModelActivation> {
-    if crate::catalog::find(id).is_none() {
-        anyhow::bail!("unknown catalog model: {id}");
-    }
-    let manager = DownloadManager::new()?;
-    let (_, download) = manager.install_catalog_model(id, on_progress).await?;
+    let download = download_model(id, on_progress).await?;
 
     select_model(id)?;
     let (daemon_reload, confirmation) = reload_and_confirm().await?;
