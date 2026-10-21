@@ -328,25 +328,25 @@ const COMMAND_NAMES: [&str; 9] = [
 /// opened directly on Settings; the approved split deck starts on the rail.
 /// Tests that need the settings list call this first.
 fn open_settings(session: &mut Session) {
-    for _ in 0..4 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let screen = loop {
         let text = session.visible_text();
-        if text.contains("Settings") {
-            return;
+        if text.contains("Settings") || text.contains("5 destinations") {
+            break text;
         }
-        if text.contains("LIVE") {
-            session.send(b"p");
-            session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
-            session.send(b"g");
-            session.wait_for("Settings", Duration::from_secs(3));
-            return;
-        }
-        session.send(KEY_ESC);
-        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            Instant::now() < deadline,
+            "could not reach Settings; current screen:\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if screen.contains("Settings") {
+        return;
     }
-    panic!(
-        "could not reach Settings; current screen:\n{}",
-        session.visible_text()
-    );
+    session.send(b"p");
+    session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
+    session.send(b"g");
+    session.wait_for("Settings", Duration::from_secs(3));
 }
 
 /// Home index of the Settings row labelled `label`.
@@ -748,6 +748,24 @@ fn pty_splash_shows_the_chafa_bubble_then_the_deck() {
 }
 
 #[test]
+fn pty_splash_consumes_the_dismissal_key() {
+    let sandbox = Sandbox::new("splash-key");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("press any key", Duration::from_secs(2));
+    session.send(b"q");
+    let deck = session.wait_for("5 destinations", Duration::from_secs(3));
+    assert!(
+        session.child.try_wait().unwrap().is_none(),
+        "'q' must only dismiss the splash, not quit the dashboard"
+    );
+    assert!(
+        deck.contains("SPEAK"),
+        "the splash should give way to the deck after one key:\n{deck}"
+    );
+    session.quit_and_wait();
+}
+
+#[test]
 fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
     let sandbox = Sandbox::new("deck");
     let mut session = Session::spawn(&sandbox, 80, 24);
@@ -767,14 +785,53 @@ fn pty_split_deck_shows_the_bubble_header_and_single_letter_rail() {
         "the footer should keep the single-letter key map:\n{deck}"
     );
     assert!(
-        !deck.contains("[") || !deck.contains("]"),
-        "the deck must not use bracketed keycaps:\n{deck}"
+        deck.contains("mic") && deck.contains("simulated"),
+        "the Speak pane should show its simulated mic level:\n{deck}"
+    );
+    let footer = deck
+        .lines()
+        .find(|line| line.contains("enter start"))
+        .expect("the deck footer should be drawn");
+    assert!(
+        !footer.contains('[') && !footer.contains(']'),
+        "the deck footer must not use bracketed keycaps:\n{footer}"
+    );
+    let rail = deck
+        .lines()
+        .find(|line| line.contains("SPEAK"))
+        .expect("the rail should be drawn");
+    assert!(
+        !rail.contains('[') && !rail.contains(']'),
+        "the deck rail must not use bracketed keycaps:\n{rail}"
     );
 
     session.send(b"p");
     session.wait_for("\u{25b8} SETUP", Duration::from_secs(3));
     session.send(b"g");
     session.wait_for("Settings", Duration::from_secs(3));
+
+    session.quit_and_wait();
+}
+
+#[test]
+fn pty_deck_action_result_returns_to_the_deck() {
+    let sandbox = Sandbox::new("deck-info-return");
+    let mut session = Session::spawn(&sandbox, 80, 24);
+    session.wait_for("5 destinations", Duration::from_secs(5));
+
+    session.send(KEY_ENTER);
+    let result = session.wait_for("daemon is not running", Duration::from_secs(5));
+    assert!(
+        result.contains("Toggle"),
+        "expected the Toggle action's title:\n{result}"
+    );
+
+    session.send(KEY_ESC);
+    let deck = session.wait_for("5 destinations", Duration::from_secs(3));
+    assert!(
+        deck.contains("SPEAK"),
+        "Esc from a Deck action result should return to the Deck:\n{deck}"
+    );
 
     session.quit_and_wait();
 }

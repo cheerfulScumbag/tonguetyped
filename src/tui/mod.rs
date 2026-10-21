@@ -395,6 +395,12 @@ const DAEMON_STATUS_REFRESH: Duration = Duration::from_secs(1);
 /// dominating the screen the way the old side panel did.
 const PREVIEW_BAND_HEIGHT: u16 = 8;
 
+/// The deck pane sits to the right of the one-column gutter, so its left edge
+/// is already separated and only the other three sides are bordered. That
+/// keeps the pane content at the approved 60 columns at 80x24 and 94 at
+/// 120x40 instead of losing a column to a second separator.
+const PANE_BORDERS: Borders = Borders::TOP.union(Borders::RIGHT).union(Borders::BOTTOM);
+
 impl App {
     fn new(config: Config) -> Self {
         let capabilities = Capabilities::discover_or_default();
@@ -479,6 +485,7 @@ impl App {
             }],
         };
         self.info_scroll.set(0);
+        self.remember_info_return();
         self.screen = Screen::Info {
             title: title.to_string(),
             lines,
@@ -512,9 +519,7 @@ impl App {
     fn render_splash(&self, frame: &mut Frame, area: Rect) {
         let lines = logo::splash_lines(area.width);
         frame.render_widget(
-            Paragraph::new(lines)
-                .alignment(ratatui::layout::Alignment::Center)
-                .style(Style::default().bg(Color::Rgb(3, 8, 20))),
+            Paragraph::new(lines).style(Style::default().bg(Color::Rgb(3, 8, 20))),
             area,
         );
     }
@@ -644,6 +649,7 @@ impl App {
         }
         if self.splash_until.get().is_some() {
             self.splash_until.set(None);
+            return Ok(());
         }
         match &self.screen {
             Screen::Deck => self.handle_deck_key(key, terminal)?,
@@ -765,7 +771,7 @@ impl App {
                 return Ok(());
             }
             KeyCode::Char('?') => {
-                self.info_return = InfoReturn::Deck;
+                self.remember_info_return();
                 self.screen = Screen::Info {
                     title: "Keys".to_string(),
                     lines: vec![
@@ -864,7 +870,7 @@ impl App {
                         self.deck_output.move_selection(1, &self.config);
                     }
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter if self.pending.is_none() => {
                     let result = self.deck_output.apply(&mut self.config);
                     if result.is_ok() {
                         self.deck_output.result =
@@ -873,7 +879,7 @@ impl App {
                         self.deck_output.result = Some(result);
                     }
                 }
-                KeyCode::Char(' ') => {
+                KeyCode::Char(' ') if self.pending.is_none() => {
                     self.config.history.enabled = !self.config.history.enabled;
                     self.deck_output.result =
                         Some(self.config.save().map_err(|error| error.to_string()));
@@ -882,19 +888,24 @@ impl App {
             },
             3 => {
                 if key.code == KeyCode::Char(' ') {
-                    self.config.history.enabled = !self.config.history.enabled;
-                    self.deck_history = screens::TextFieldsScreen::history_retention(&self.config);
-                    self.deck_history.result =
-                        Some(self.config.save().map_err(|error| error.to_string()));
+                    if self.pending.is_none() {
+                        self.config.history.enabled = !self.config.history.enabled;
+                        self.deck_history =
+                            screens::TextFieldsScreen::history_retention(&self.config);
+                        self.deck_history.result =
+                            Some(self.config.save().map_err(|error| error.to_string()));
+                    }
                     return Ok(());
                 }
                 if key.code == KeyCode::Enter {
-                    let result = self.deck_history.apply(&mut self.config);
-                    if result.is_ok() {
-                        self.deck_history.result =
-                            Some(self.config.save().map_err(|error| error.to_string()));
-                    } else {
-                        self.deck_history.result = Some(result);
+                    if self.pending.is_none() {
+                        let result = self.deck_history.apply(&mut self.config);
+                        if result.is_ok() {
+                            self.deck_history.result =
+                                Some(self.config.save().map_err(|error| error.to_string()));
+                        } else {
+                            self.deck_history.result = Some(result);
+                        }
                     }
                     return Ok(());
                 }
@@ -960,6 +971,10 @@ impl App {
                 Constraint::Min(0),
             ])
             .split(chunks[1]);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Rgb(32, 12, 48))),
+            body[1],
+        );
         self.render_deck_rail(frame, body[0]);
         self.render_deck_pane(frame, body[2]);
 
@@ -1088,6 +1103,7 @@ impl App {
         } else {
             ("stopped", Style::default().fg(Color::Red))
         };
+        let level = self.deck_wave_level();
         let lines = vec![
             Line::from(vec![Span::styled("● ", daemon_style), Span::raw("idle")]),
             Line::from(""),
@@ -1095,6 +1111,11 @@ impl App {
                 "hold the shortcut, or press once to toggle",
                 text,
             )),
+            Line::from(vec![
+                Span::styled("mic ", muted),
+                Span::styled(format!("{:>3}%", (level * 100.0).round() as u32), accent),
+                Span::styled(" simulated", muted),
+            ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("daemon ", muted),
@@ -1129,7 +1150,7 @@ impl App {
             );
         }
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(PANE_BORDERS)
             .title(Line::from(Span::styled("SPEAK", accent)));
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
@@ -1168,7 +1189,7 @@ impl App {
         let rows = self.deck_model_rows();
         if rows.is_empty() {
             let block = Block::default()
-                .borders(Borders::ALL)
+                .borders(PANE_BORDERS)
                 .title(Line::from(Span::styled("MODELS", accent)));
             frame.render_widget(
                 Paragraph::new("No models match this filter.")
@@ -1194,7 +1215,7 @@ impl App {
                 .constraints([Constraint::Min(3), Constraint::Length(2)])
                 .split(area);
             let block = Block::default()
-                .borders(Borders::ALL)
+                .borders(PANE_BORDERS)
                 .title(Line::from(Span::styled("DOWNLOAD", accent)));
             frame.render_widget(
                 Gauge::default()
@@ -1224,16 +1245,16 @@ impl App {
         let visible: usize = if area.height >= 26 { 10 } else { 5 };
         let start = selected.saturating_sub(visible.saturating_sub(1));
         let end = (start + visible).min(rows.len());
-        let inner_width = usize::from(area.width.saturating_sub(2));
+        let inner_width = usize::from(area.width.saturating_sub(1));
         let mut lines: Vec<Line> = Vec::new();
         let header = if area.width >= 90 {
             format!(
-                "{:>2} {:<28} {:<6} {:>7} {:<5} {:<8} {:<10}",
+                " {:>2} {:<28} {:<6} {:>7} {:<5} {:<8} {:<10}",
                 "#", "MODEL", "QUANT", "SIZE", "LANG", "STREAM", "STATUS"
             )
         } else {
             format!(
-                "{:>2} {:<24} {:>7} {:<5} {:<9}",
+                " {:>2} {:<24} {:>7} {:<5} {:<9}",
                 "#", "MODEL", "SIZE", "STREAM", "STATUS"
             )
         };
@@ -1291,8 +1312,9 @@ impl App {
                 } else {
                     spans.push(Span::raw(format!("{:<24} {:>7} ", id, size)));
                 }
+                let stream_width = if area.width >= 90 { 8 } else { 5 };
                 spans.push(Span::styled(
-                    format!("{stream:<5} "),
+                    format!("{stream:<stream_width$} "),
                     if stream == "live" {
                         Style::default().fg(Color::Green)
                     } else {
@@ -1362,7 +1384,7 @@ impl App {
             Span::raw(" filter"),
         ]));
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(PANE_BORDERS)
             .title(Line::from(Span::styled("MODELS", accent)));
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
@@ -1371,13 +1393,13 @@ impl App {
         let accent = Style::default()
             .fg(Color::Rgb(0, 255, 0))
             .add_modifier(Modifier::BOLD);
-        let inner_width = usize::from(area.width.saturating_sub(2));
+        let inner_width = usize::from(area.width.saturating_sub(1));
         let mut lines = self.deck_output.deck_lines(&self.config, inner_width);
         lines.push(Line::from(""));
         lines.push(self.deck_output.warning_line());
         lines.push(self.deck_output.result_line());
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(PANE_BORDERS)
             .title(Line::from(Span::styled("OUTPUT", accent)));
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
@@ -1387,7 +1409,7 @@ impl App {
             .fg(Color::Rgb(0, 255, 0))
             .add_modifier(Modifier::BOLD);
         let muted = Style::default().fg(Color::DarkGray);
-        let inner_width = usize::from(area.width.saturating_sub(2));
+        let inner_width = usize::from(area.width.saturating_sub(1));
         let mut lines = self.deck_history.deck_lines(inner_width);
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -1396,7 +1418,7 @@ impl App {
         )));
         lines.push(self.deck_history.result_line("History retention saved."));
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(PANE_BORDERS)
             .title(Line::from(Span::styled("HISTORY", accent)));
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
@@ -1418,7 +1440,7 @@ impl App {
             ("4", "App", "startup / overlay / media"),
             ("5", "Review", "apply"),
         ];
-        let inner_width = usize::from(area.width.saturating_sub(2));
+        let inner_width = usize::from(area.width.saturating_sub(1));
         let mut lines = Vec::new();
         for (index, (number, title, description)) in chapters.iter().enumerate() {
             let is_selected = index == self.deck_setup_selected.min(chapters.len() - 1);
@@ -1453,9 +1475,19 @@ impl App {
             text,
         )));
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(PANE_BORDERS)
             .title(Line::from(Span::styled("SETUP", accent)));
         frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    /// The Speak pane's simulated mic level. It is deterministic in the wave
+    /// phase, so it animates only while the user has motion on and stays a
+    /// readable steady value when the wave is paused.
+    fn deck_wave_level(&self) -> f64 {
+        let phase = f64::from(self.deck_wave_phase.get());
+        let slow = (phase * 0.55).sin();
+        let flutter = (phase * 2.7).sin() * 0.12;
+        (0.62 + slow * 0.22 + flutter).clamp(0.0, 1.0)
     }
 
     fn render_wave_field(&self, frame: &mut Frame, area: Rect) {
@@ -1465,7 +1497,7 @@ impl App {
         let rows = 8usize;
         let cols = 16usize;
         let phase = f64::from(self.deck_wave_phase.get());
-        let level = f64::from(crate::audio::latest_level()).clamp(0.0, 1.0);
+        let level = self.deck_wave_level();
         let amplitude = 0.05 + level * 0.09;
         let canvas = Canvas::default()
             .x_bounds([-1.6, 1.6])
@@ -2397,6 +2429,7 @@ impl App {
         }
         if let Err(error) = outcome {
             self.info_scroll.set(0);
+            self.remember_info_return();
             self.screen = Screen::Info {
                 title: "Setup".to_string(),
                 lines: vec![OutputLine {
@@ -2406,6 +2439,16 @@ impl App {
             };
         }
         Ok(())
+    }
+
+    /// The Info pane returns to whichever screen created it: the Deck keeps
+    /// its own help and action results, while Home (including its settings and
+    /// Commands screens) keeps its own.
+    fn remember_info_return(&mut self) {
+        self.info_return = match &self.screen {
+            Screen::Deck => InfoReturn::Deck,
+            _ => InfoReturn::Home,
+        };
     }
 
     fn render(&self, frame: &mut Frame) {

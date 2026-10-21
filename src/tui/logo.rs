@@ -247,16 +247,20 @@ pub fn splash_lines(width: u16) -> Vec<Line<'static>> {
     let muted = Style::default().fg(Color::DarkGray);
     let mut lines: Vec<Line> = Vec::new();
     if width >= art_width {
+        let margin = usize::from((width - art_width) / 2);
         for art in SPLASH_ART {
-            let text_width = art.chars().count() as u16;
-            let margin = usize::from(width.saturating_sub(text_width) / 2);
             let mut spans = vec![Span::raw(" ".repeat(margin))];
+            let mut used = 0usize;
             for ch in art.chars() {
+                used += 1;
                 if ch == ' ' {
                     spans.push(Span::raw(" "));
                 } else {
                     spans.push(Span::styled(ch.to_string(), green));
                 }
+            }
+            for _ in used..usize::from(art_width) {
+                spans.push(Span::raw(" "));
             }
             lines.push(Line::from(spans));
         }
