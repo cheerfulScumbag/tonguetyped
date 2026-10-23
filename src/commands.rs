@@ -94,13 +94,28 @@ fn socket_is_alive(sock_path: &std::path::Path) -> bool {
 /// reimplement or shell out to a *different* program, and no daemon logic
 /// lives here.
 pub fn spawn_daemon() -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+    // A new session detaches the daemon from the launching terminal, so
+    // closing that terminal (its SIGHUP) does not take the daemon down too.
+    // SAFETY: `setsid` is async-signal-safe and touches no memory the forked
+    // child shares with the parent.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()?;
     Ok(())
 }
 

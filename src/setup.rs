@@ -4,46 +4,26 @@ use std::sync::{Arc, Mutex};
 
 mod console;
 
-/// The speech model the daemon needs a file for before dictation will work -
-/// the catalog entry `setup`'s "Speech model" step selects, requested on
-/// whichever backend (CPU, or an accelerator) ends up active. Missing it
-/// forces `InferenceEngine::load` to fail outright (no separate CPU-only
-/// fallback file exists anymore - see `src/inference.rs`), so the console
-/// step below always fetches it when absent.
-pub(crate) struct ModelRequirement {
-    pub label: String,
-    pub already_present: bool,
-    id: String,
-}
-
-pub(crate) fn model_requirements(config: &Config) -> Vec<ModelRequirement> {
-    vec![ModelRequirement {
-        label: config.model.active_model.clone(),
-        already_present: crate::catalog::is_installed(&config.model.active_model),
-        id: config.model.active_model.clone(),
-    }]
-}
-
 /// Shared state a background provisioning thread reports into, polled by the
-/// setup console's render loop (same shape as `console::ConsoleState`'s
-/// microphone level meter, which polls an `Arc<Mutex<f32>>` the same way).
+/// setup console's render loop (same shape as the console's microphone level
+/// meter, which polls an `Arc<Mutex<f32>>` the same way).
 pub(crate) struct ProvisionHandle {
     pub progress: Arc<Mutex<(u64, u64)>>,
     pub result: Arc<Mutex<Option<Result<crate::model::DownloadOutcome, String>>>>,
 }
 
-/// Spawns a background thread that fetches `requirement` and reports its
+/// Spawns a background thread that fetches catalog model `id` and reports its
 /// progress through the returned handle. Runs its own single-threaded tokio
 /// runtime (matching `feedback.rs`'s D-Bus calls) rather than borrowing the
 /// caller's, since the setup console's render loop is synchronous and must
 /// keep polling `ProvisionHandle` while this download is in flight.
-pub(crate) fn provision_model_async(requirement: ModelRequirement) -> ProvisionHandle {
+pub(crate) fn provision_model_async(id: String) -> ProvisionHandle {
     let progress = Arc::new(Mutex::new((0u64, 0u64)));
     let result = Arc::new(Mutex::new(None));
     let progress_for_thread = progress.clone();
     let result_for_thread = result.clone();
     std::thread::spawn(move || {
-        let outcome = fetch_requirement(requirement.id, progress_for_thread);
+        let outcome = fetch_requirement(id, progress_for_thread);
         if let Ok(mut guard) = result_for_thread.lock() {
             *guard = Some(outcome.map_err(|error| error.to_string()));
         }
@@ -101,8 +81,8 @@ fn run_shortcut_test() -> Result<crate::activation::ShortcutTestOutcome, String>
 
 /// Shared state a background shortcut-reconfigure thread reports into,
 /// polled by the setup console's render loop - same shape as
-/// `ProvisionHandle` above and `console::ConsoleState`'s microphone level
-/// meter, needed for the same reason: the console's render loop is
+/// `ProvisionHandle` above and the console's microphone level meter, needed
+/// for the same reason: the console's render loop is
 /// synchronous and must keep drawing while the portal's native "press your
 /// new shortcut" dialog (`activation::reconfigure_shortcut`) is open.
 pub(crate) struct ReconfigureHandle {
@@ -393,6 +373,8 @@ impl Ui {
 
 pub(crate) enum SetupOutcome {
     Saved,
+    /// The interactive console closed with nothing to write.
+    Unchanged,
     Cancelled,
 }
 
@@ -418,7 +400,10 @@ pub fn run() -> anyhow::Result<()> {
         let outcome = console::run(capabilities)?;
         match outcome {
             SetupOutcome::Cancelled => {
-                writeln!(stdout, "\nSetup cancelled. No changes were made.")?;
+                writeln!(stdout, "\nSetup cancelled. Unsaved changes were discarded.")?;
+            }
+            SetupOutcome::Unchanged => {
+                writeln!(stdout, "\nNo changes were made.")?;
             }
             SetupOutcome::Saved => {
                 writeln!(stdout, "\nConfiguration saved.")?;
@@ -876,47 +861,6 @@ fn is_cancel(answer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // `model_requirements` resolves paths through `directories::BaseDirs`,
-    // which reads `XDG_DATA_HOME` - a process-wide env var `cargo test`'s
-    // default parallel test threads would otherwise race on (same shape as
-    // `overlay.rs`'s `WAYLAND_DISPLAY_LOCK` guarding `WAYLAND_DISPLAY`).
-    static XDG_DATA_HOME_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn model_requirements_flips_to_present_once_the_file_exists() {
-        let _guard = XDG_DATA_HOME_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let root = std::env::temp_dir().join(format!(
-            "tonguetyped-model-requirements-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let previous = std::env::var("XDG_DATA_HOME").ok();
-        std::env::set_var("XDG_DATA_HOME", &root);
-
-        let config = Config::default();
-        let requirements = model_requirements(&config);
-        assert_eq!(requirements[0].label, config.model.active_model);
-        assert!(!requirements[0].already_present);
-
-        let model_path = crate::catalog::model_path(&config.model.active_model).unwrap();
-        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
-        std::fs::write(&model_path, b"stub").unwrap();
-        assert!(model_requirements(&config)[0].already_present);
-
-        match previous {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn menu_retries_invalid_input_and_accepts_cancellation() {

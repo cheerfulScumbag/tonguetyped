@@ -1,8 +1,8 @@
-//! Real-pseudo-terminal behavior tests for the Shortcut step's Ctrl+R
-//! "reconfigure via the system dialog" addition (`src/setup/console.rs`).
+//! Real-pseudo-terminal behavior tests for the setup console's Ctrl+R
+//! "reconfigure via the system dialog" shortcut path (`src/setup/console.rs`).
 //! Same `Sandbox`/`Session`/`vt100::Parser` pattern as
-//! `tests/setup_console_overlay.rs` - drives the actual compiled binary
-//! through a PTY, never the console's internal functions directly.
+//! `tests/setup_console.rs` - drives the actual compiled binary through a
+//! PTY, never the console's internal functions directly.
 //!
 //! Most of these point `DBUS_SESSION_BUS_ADDRESS` at a nonexistent socket, the
 //! same isolation `tests/daemon_startup.rs`'s shortcut-test coverage already
@@ -239,64 +239,55 @@ impl Session {
     }
 }
 
+impl Session {
+    fn wait_for_exit(&mut self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                panic!(
+                    "setup console did not exit in time; screen:\n{}",
+                    self.visible_text()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
 }
 
-const KEY_ENTER: &[u8] = b"\r";
 const KEY_ESC: &[u8] = b"\x1b";
 const KEY_CTRL_R: &[u8] = b"\x12";
 
-/// Advances one list step with Enter, resending it until `next` renders: a
-/// single keypress can occasionally be lost to the pty's line discipline
-/// before the console's raw mode settles, which otherwise flakes these tests.
-fn advance_to_step(session: &mut Session, next: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        session.send(KEY_ENTER);
-        if session.try_wait_for(next, Duration::from_secs(1)).is_some() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "timed out advancing to {next:?}; current screen:\n{}",
-                session.visible_text()
-            );
-        }
-    }
-}
-
-fn advance_to_shortcut_step(session: &mut Session) {
-    session.wait_for("Speech model", Duration::from_secs(10));
-    advance_to_step(session, "Inference backend");
-    advance_to_step(session, "Translate speech into English");
-    advance_to_step(session, "Vocabulary prompt");
-    advance_to_step(session, "Microphone");
-    advance_to_step(session, "Activation");
-    advance_to_step(session, "Shortcut");
+/// Waits for the console's first frame, then lets raw mode settle so the
+/// first keypress is not lost to the pty's line discipline.
+fn wait_until_ready(session: &Session) {
+    session.wait_for("Shortcut", Duration::from_secs(15));
+    std::thread::sleep(Duration::from_millis(300));
 }
 
 #[test]
-fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
+fn pty_ctrl_r_surfaces_a_failed_reconfigure_and_keeps_setup_usable() {
     let _serial = serialize();
     let sandbox = Sandbox::new("reconfigure");
     let mut session = Session::spawn(&sandbox, 100, 32);
-
-    advance_to_shortcut_step(&mut session);
-    let shortcut_screen = session.visible_text();
+    wait_until_ready(&session);
+    let screen = session.visible_text();
     assert!(
-        shortcut_screen.contains("Ctrl+R dialog"),
-        "Shortcut step hint should advertise the Ctrl+R dialog path:\n{shortcut_screen}"
+        !screen.contains("Super+O"),
+        "setup must not pre-fill or imply an app-chosen default:\n{screen}"
     );
     assert!(
-        !shortcut_screen.contains("Super+O"),
-        "Shortcut step must not pre-fill or imply an app-chosen default:\n{shortcut_screen}"
-    );
-    assert!(
-        shortcut_screen.contains("Shortcut: (none set yet)"),
-        "with nothing bound the step should say so:\n{shortcut_screen}"
+        screen.contains("Shortcut  (none set yet)"),
+        "with nothing bound the row should say so:\n{screen}"
     );
 
     // Trigger the real `activation::reconfigure_shortcut` code path. With no
@@ -305,43 +296,17 @@ fn pty_shortcut_step_hints_at_ctrl_r_and_surfaces_a_failed_reconfigure() {
     // well under a second rather than waiting anywhere near the real
     // 120s dialog timeout.
     session.send(KEY_CTRL_R);
-    let failed_screen = session.wait_for("Reconfigure failed:", Duration::from_secs(10));
+    let failed = session.wait_for("Error:", Duration::from_secs(10));
     assert!(
-        failed_screen.contains("Shortcut: (none set yet)"),
-        "a failed reconfigure must not fabricate a bound trigger:\n{failed_screen}"
+        failed.contains("Shortcut  (none set yet)"),
+        "a failed reconfigure must not fabricate a bound trigger:\n{failed}"
     );
 
-    // The console must still be fully usable afterwards: Enter now advances
-    // past Shortcut instead of staying stuck behind the cleared handle.
-    advance_to_step(&mut session, "Transcript output");
-
-    // Esc back twice (Output -> Shortcut) and confirm the failure message
-    // doesn't linger into a plain re-visit of the step.
+    // Setup stays usable: tabs still switch and Esc at the root leaves.
+    session.send(b"2");
+    session.wait_for("Speech models", Duration::from_secs(5));
     session.send(KEY_ESC);
-    let revisited_screen = session.wait_for("Shortcut", Duration::from_secs(5));
-    assert!(
-        revisited_screen.contains("Reconfigure failed:"),
-        "feedback from the last reconfigure attempt should still be visible on re-entry:\n{revisited_screen}"
-    );
-}
-
-#[test]
-fn pty_shortcut_step_continues_when_no_shortcut_is_bound() {
-    let _serial = serialize();
-    let sandbox = Sandbox::new("no-binding");
-    let mut session = Session::spawn(&sandbox, 100, 32);
-
-    advance_to_shortcut_step(&mut session);
-    session.wait_for("Ctrl+R dialog", Duration::from_secs(5));
-
-    // Enter continues without setting anything - the binding is the desktop's
-    // to own, so the wizard must not block on a key it never chose.
-    advance_to_step(&mut session, "Transcript output");
-    let next_screen = session.visible_text();
-    assert!(
-        !next_screen.contains("Invalid shortcut"),
-        "continuing with no binding must never be rejected:\n{next_screen}"
-    );
+    session.wait_for_exit(Duration::from_secs(5));
 }
 
 #[test]
@@ -355,24 +320,23 @@ fn pty_repeated_ctrl_r_reconfigure_never_hangs_on_the_cached_portal_connection()
     let bus = PrivateBus::start();
     let sandbox = Sandbox::with_bus("repeat-reconfigure", &bus.address);
     let mut session = Session::spawn(&sandbox, 100, 32);
-
-    advance_to_shortcut_step(&mut session);
+    wait_until_ready(&session);
 
     session.send(KEY_CTRL_R);
-    session.wait_for("Reconfigure failed:", Duration::from_secs(15));
+    session.wait_for("Error:", Duration::from_secs(15));
 
     // The empty-bus error is instant, so if the second attempt has not settled
-    // after a few seconds it is stuck on "A shortcut settings window is open",
-    // not slow.
+    // after a few seconds it is stuck on "A shortcut window is open", not
+    // slow.
     session.send(KEY_CTRL_R);
     std::thread::sleep(Duration::from_secs(4));
     let second = session.visible_text();
     assert!(
-        !second.contains("A shortcut settings window is open"),
+        !second.contains("A shortcut window is open"),
         "a repeat Ctrl+R must not hang on the cached portal connection:\n{second}"
     );
     assert!(
-        second.contains("Reconfigure failed:"),
+        second.contains("Error:"),
         "a repeat Ctrl+R must report the portal failure:\n{second}"
     );
 }

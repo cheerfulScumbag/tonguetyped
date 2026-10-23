@@ -3402,27 +3402,10 @@ fn preview_cell_size(
     (cols.clamp(1, max_cols), rows)
 }
 
-/// Rasterises an overlay style into terminal preview cells, fitted into a
-/// `max_cols` x `max_rows` box. Shared with the setup wizard's Overlay steps so
-/// both show the same picture. Rasterising per call is fine for the wizard's
-/// event-driven redraw; the dashboard caches this in `OverlayPreview`.
-pub(crate) fn overlay_preview_cells(
-    style: &str,
-    look: &str,
-    shape: &str,
-    max_cols: u16,
-    max_rows: u16,
-) -> Vec<Line<'static>> {
-    let (width, height, pixels) =
-        crate::overlay::render_frame_pixels(style, Some("recording"), 0.0, look, shape, &[]);
-    let (cols, rows) = preview_cell_size(width, height, max_cols, max_rows);
-    preview_lines_from_pixels(width, height, &pixels, cols, rows)
-}
-
 /// Places a `width` x `height` box inside `area` at the overlay position named
 /// by `position` (one of `overlay::POSITION_VALUES`), so the preview shows the
 /// overlay landing where the real one will. An unknown name centres the box.
-pub(crate) fn placed_rect(area: Rect, width: u16, height: u16, position: &str) -> Rect {
+fn placed_rect(area: Rect, width: u16, height: u16, position: &str) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
     let left = area.x;
