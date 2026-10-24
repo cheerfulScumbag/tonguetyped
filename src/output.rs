@@ -963,8 +963,18 @@ fn is_executable_file(path: &std::path::Path) -> bool {
 
 /// Whether `/dev/uinput` can be opened by this user, the capability `dotool`
 /// needs. See [`uinput_version_at`] for the probe and why it creates nothing.
+///
+/// `TONGUETYPED_UINPUT_DEVICE` overrides the path, the same seam the wtype,
+/// enigo, and libei probes already have through `WAYLAND_DISPLAY`, `DISPLAY`,
+/// and `DBUS_SESSION_BUS_ADDRESS`: real session state the end-to-end sandbox
+/// points away from the operator's session, so a pinned `dotool` backend
+/// resolves deterministically in tests instead of on whichever kernel
+/// permissions the host happens to have.
 fn uinput_ready() -> bool {
-    uinput_version_at(std::path::Path::new("/dev/uinput")).is_some()
+    let path = std::env::var_os("TONGUETYPED_UINPUT_DEVICE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/uinput"));
+    uinput_version_at(&path).is_some()
 }
 
 /// Opens `path` read-write and returns the uinput ABI version, or `Some(0)`

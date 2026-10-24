@@ -58,6 +58,13 @@ impl Sandbox {
             &bin.join("dotool"),
             &dotool_script(&root.join("dotool.log")),
         );
+        // A plain file the dotool probe can open read-write stands in for a
+        // writable `/dev/uinput`: whether the real device is writable varies
+        // by host (the operator's machine vs. a CI runner with no `input`
+        // group access), so the probe's permission check is routed here
+        // instead of leaking the real session's kernel-device state into the
+        // test.
+        std::fs::write(root.join("uinput"), b"").unwrap();
         Self { root }
     }
 
@@ -75,6 +82,7 @@ impl Sandbox {
                 "DBUS_SESSION_BUS_ADDRESS",
                 "unix:path=/nonexistent-tonguetyped-test",
             )
+            .env("TONGUETYPED_UINPUT_DEVICE", self.root.join("uinput"))
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY")
             .output()
