@@ -178,6 +178,10 @@ struct ProductionRuntime {
     /// of taking the inference lock (which the in-flight run holds), so
     /// cancellation never blocks on the very lock it needs to release.
     cancel_token: Mutex<Option<crate::inference::CancelToken>>,
+    /// The typing backend resolved at daemon load and refreshed on config
+    /// reload or a changed display. Shared with `Coordinator` so `status`
+    /// reports the same decision delivery uses.
+    typing: Arc<Mutex<crate::output::TypingPlan>>,
 }
 
 /// How long `shutdown` waits to acquire the inference lock before giving up and
@@ -327,7 +331,7 @@ impl Drop for IdleUnloadTimer {
 }
 
 impl ProductionRuntime {
-    fn new() -> anyhow::Result<Self> {
+    fn new(typing: Arc<Mutex<crate::output::TypingPlan>>) -> anyhow::Result<Self> {
         let inference = Arc::new(Mutex::new(EngineLifecycle::default()));
         let idle_unload = IdleUnloadTimer::new(Arc::clone(&inference))?;
         Ok(Self {
@@ -335,6 +339,7 @@ impl ProductionRuntime {
             idle_unload,
             shutdown_started: AtomicBool::new(false),
             cancel_token: Mutex::new(None),
+            typing,
         })
     }
 
@@ -683,7 +688,36 @@ impl CoordinatorRuntime for ProductionRuntime {
     }
 
     fn output(&self, text: &str, config: &Config) -> anyhow::Result<crate::output::Delivery> {
-        crate::output::output_text(text, &config.output)
+        // `none` and `clipboard` never touch a typing backend, so they must
+        // not pay for (or retry) a capability probe.
+        if !config.output.method.inserts_text() {
+            return crate::output::output_text(text, &config.output);
+        }
+        // The plan is resolved at daemon load and refreshed on config reload.
+        // Re-resolve here only when the config no longer matches, the display
+        // changed, or the last answer was "nothing works": a probe that ran
+        // before the compositor or portal was ready must not disable typing
+        // for the life of the daemon.
+        let needs_reprobe = self
+            .typing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .needs_reprobe(&config.output);
+        let plan = if needs_reprobe {
+            let resolved = crate::output::resolve_typing(&config.output);
+            let mut plan = self
+                .typing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *plan = resolved;
+            plan.clone()
+        } else {
+            self.typing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+        crate::output::output_text_with_plan(text, &config.output, &plan)
     }
 
     fn suspend_idle_unload(&self) -> anyhow::Result<()> {
@@ -905,6 +939,11 @@ struct CoordinatorStateInner {
     shortcut_status: crate::ipc::ShortcutStatus,
     worker_active: bool,
     active_timing: Option<Arc<Mutex<LatencyOperation>>>,
+    /// Clipboard fallbacks since the daemon started, and the last reason. These
+    /// make a lost typing path visible in `status` instead of only in a 1.8 s
+    /// overlay flash.
+    output_fallbacks: u64,
+    last_output_failure: Option<String>,
 }
 
 #[derive(Clone)]
@@ -923,17 +962,26 @@ pub struct Coordinator {
     clock: Arc<dyn Clock>,
     latency_sink: Arc<dyn LatencySink>,
     worker_finished: Arc<tokio::sync::watch::Sender<()>>,
+    typing: Arc<Mutex<crate::output::TypingPlan>>,
     /// The daemon's activation supervisor handle, set once at daemon startup.
     /// `None` in tests and in a process that never bound a session.
     activation: std::sync::OnceLock<crate::activation::ActivationHandle>,
 }
 
 impl Coordinator {
-    pub fn new(config: Config) -> anyhow::Result<Self> {
-        Self::with_runtime_and_feedback(
+    /// Builds the daemon coordinator with the typing backend already resolved.
+    /// `typing` is shared with [`ProductionRuntime`], which refreshes it when
+    /// the display changes and reports it through `status`.
+    pub fn new(config: Config, typing: crate::output::TypingPlan) -> anyhow::Result<Self> {
+        let typing = Arc::new(Mutex::new(typing));
+        let runtime = Arc::new(ProductionRuntime::new(Arc::clone(&typing))?);
+        Self::with_typing_plan(
             config,
-            Arc::new(ProductionRuntime::new()?),
+            runtime,
             Arc::new(DesktopFeedback::new()),
+            Arc::new(MonotonicClock::new()),
+            Arc::new(TracingLatencySink),
+            typing,
         )
     }
 
@@ -965,6 +1013,20 @@ impl Coordinator {
         clock: Arc<dyn Clock>,
         latency_sink: Arc<dyn LatencySink>,
     ) -> anyhow::Result<Self> {
+        let typing = Arc::new(Mutex::new(crate::output::TypingPlan::unprobed(
+            &config.output.typing_backend,
+        )));
+        Self::with_typing_plan(config, runtime, feedback, clock, latency_sink, typing)
+    }
+
+    fn with_typing_plan(
+        config: Config,
+        runtime: Arc<dyn CoordinatorRuntime>,
+        feedback: Arc<dyn Feedback>,
+        clock: Arc<dyn Clock>,
+        latency_sink: Arc<dyn LatencySink>,
+        typing: Arc<Mutex<crate::output::TypingPlan>>,
+    ) -> anyhow::Result<Self> {
         // backend_info() memoizes its result (see inference.rs), but the
         // first call enumerates real accelerator devices and is not free -
         // warm it here, off the hot path, so the first dictation's finish()
@@ -993,6 +1055,8 @@ impl Coordinator {
                 shortcut_status: crate::ipc::ShortcutStatus::Initializing,
                 worker_active: false,
                 active_timing: None,
+                output_fallbacks: 0,
+                last_output_failure: None,
             })),
             output_lock: Arc::new(Mutex::new(())),
             last_result: Arc::new(Mutex::new(last_result)),
@@ -1000,6 +1064,7 @@ impl Coordinator {
             feedback,
             clock,
             latency_sink,
+            typing,
             worker_finished: {
                 let (worker_finished, _) = tokio::sync::watch::channel(());
                 Arc::new(worker_finished)
@@ -1100,7 +1165,14 @@ impl Coordinator {
                     State::Processing => CoordinatorResponse::Busy,
                     State::Idle => CoordinatorResponse::Ignored("not recording".into()),
                 },
-                CoordinatorCommand::GetStatus => build_status(&inner),
+                CoordinatorCommand::GetStatus => {
+                    let typing = self
+                        .typing
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    build_status(&inner, &typing)
+                }
                 CoordinatorCommand::Cancel => unreachable!(),
             }
         };
@@ -1129,7 +1201,29 @@ impl Coordinator {
     }
 
     pub fn reload_config(&self, config: Config) -> anyhow::Result<()> {
+        // Mark the plan for a fresh probe rather than running the blocking
+        // capability checks here: this method may be called while a dictation
+        // is live, and the next `output` resolves off the command path. The
+        // daemon's own reload path resolves first and calls
+        // `reload_config_with_typing`, so `status` is accurate immediately
+        // after a real config reload.
+        let typing = crate::output::TypingPlan::unprobed(&config.output.typing_backend);
+        self.reload_config_with_typing(config, typing)
+    }
+
+    /// Applies a reload together with the typing plan re-probed for it. The
+    /// daemon uses this so a helper installed, a pinned backend changed, or a
+    /// compositor restarted since load is reflected immediately.
+    pub fn reload_config_with_typing(
+        &self,
+        config: Config,
+        typing: crate::output::TypingPlan,
+    ) -> anyhow::Result<()> {
         self.validate_reload(&config)?;
+        *self
+            .typing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = typing;
         let mut inner = self.state.lock().unwrap();
         if inner.worker_active {
             inner.config = config;
@@ -1466,9 +1560,12 @@ impl Coordinator {
             let (output_error, delivered) = match delivery {
                 Ok(delivery) => {
                     match &delivery {
-                        crate::output::Delivery::CopiedAfterFailure(error) => tracing::warn!(
-                            "typing failed, transcript copied to the clipboard instead: {error}"
-                        ),
+                        crate::output::Delivery::CopiedAfterFailure(error) => {
+                            coordinator.record_output_fallback(error);
+                            tracing::warn!(
+                                "typing failed, transcript copied to the clipboard instead: {error}"
+                            )
+                        }
                         crate::output::Delivery::SubmitFailed(error) => tracing::warn!(
                             "transcript inserted, but the trailing Enter failed: {error}"
                         ),
@@ -1628,6 +1725,17 @@ impl Coordinator {
 
     pub fn set_runtime_error(&self, error: String) {
         self.set_shortcut_state(crate::ipc::ShortcutStatus::Failed, Some(error));
+    }
+
+    /// Records a clipboard fallback so `status` can show that typing is not
+    /// working instead of leaving the only trace in a transient overlay.
+    fn record_output_fallback(&self, error: &str) {
+        let mut inner = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.output_fallbacks = inner.output_fallbacks.saturating_add(1);
+        inner.last_output_failure = Some(error.to_string());
     }
 
     /// Record why the last attempt to load the config file failed, so `status`
@@ -1796,7 +1904,11 @@ fn debounce_elapsed(inner: &CoordinatorStateInner, now: Instant) -> bool {
         .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(30))
 }
 
-fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
+fn build_status(
+    inner: &CoordinatorStateInner,
+    typing: &crate::output::TypingPlan,
+) -> CoordinatorResponse {
+    let inserts_text = inner.config.output.method.inserts_text();
     CoordinatorResponse::Status {
         state: match inner.state {
             State::Idle => "idle",
@@ -1817,9 +1929,21 @@ fn build_status(inner: &CoordinatorStateInner) -> CoordinatorResponse {
         backend: crate::inference::BackendPreference::parse(&inner.config.model.preferred_backend)
             .ok()
             .map(crate::inference::cached_preferred_backend_info),
+        output_configured: inserts_text.then(|| typing.configured.clone()),
+        output_backend: if inserts_text {
+            typing.resolved.clone()
+        } else {
+            None
+        },
+        output_warning: if inserts_text { typing.warning() } else { None },
+        output_fallbacks: inner.output_fallbacks,
+        last_output_failure: inner.last_output_failure.clone(),
     }
 }
 
+// The status reply is the one large variant: it is built, serialized and
+// dropped per request, so boxing its fields would only add allocations.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum CoordinatorResponse {
     Ok,
@@ -1842,6 +1966,18 @@ pub enum CoordinatorResponse {
         /// The backend and device the configured `model.preferred_backend`
         /// resolves to on this machine, as the daemon logs at startup.
         backend: Option<crate::inference::BackendInfo>,
+        /// The configured `output.typing_backend`.
+        output_configured: Option<String>,
+        /// The typing backend delivery will use after hidden capability
+        /// probing. `None` while nothing has resolved.
+        output_backend: Option<String>,
+        /// A substitution or dead end the user should see, for example a
+        /// pinned libei replaced by wtype.
+        output_warning: Option<String>,
+        /// Clipboard fallbacks since the daemon started.
+        output_fallbacks: u64,
+        /// Why the most recent fallback happened.
+        last_output_failure: Option<String>,
     },
 }
 

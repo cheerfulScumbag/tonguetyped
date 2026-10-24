@@ -40,6 +40,16 @@ fn run_setup(
         .env("XDG_CURRENT_DESKTOP", desktop)
         .env("XDG_SESSION_DESKTOP", desktop)
         .env("DESKTOP_SESSION", desktop)
+        // Never let the hidden Wayland registry probe see the operator's real
+        // compositor: this test pins the desktop *name* to exercise the
+        // fallback when no display is available. The D-Bus address points
+        // nowhere so the libei portal probe is deterministic too.
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("DISPLAY")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent-tonguetyped-setup-test",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -174,16 +184,18 @@ fn setup_refuses_typing_without_a_helper_and_says_what_to_install() {
 }
 
 #[test]
-fn setup_offers_native_libei_on_kde_without_a_helper() {
+fn setup_does_not_offer_libei_when_the_portal_is_unreachable() {
     let root = root("kde-libei");
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
 
-    // KDE Wayland with no external helper: the native libei backend can type,
-    // so setup must offer it and save `type` instead of refusing.
+    // A KDE desktop name alone is not proof that libei can work: the backend
+    // needs the RemoteDesktop portal, and this sandbox has no reachable bus.
+    // Setup must not offer an unavailable backend or save `type`; it must
+    // refuse with a remedy that names an installed helper.
     let output = run_setup(
         &root,
-        &answers(&["", "", "", "2", "2", "", "", "", "", "", "", "1", ""]),
+        &answers(&["", "", "", "2", "1", "", "", "", "", "", "", ""]),
         Some(&bin),
         "KDE",
     );
@@ -194,21 +206,20 @@ fn setup_offers_native_libei_on_kde_without_a_helper() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("libei"),
-        "KDE Wayland must offer the native libei backend:\n{stdout}"
+        !stdout.contains("libei"),
+        "a KDE name without a reachable portal must not offer libei:\n{stdout}"
     );
     assert!(
-        !stdout.contains("install dotool"),
-        "no install warning is needed when libei can type:\n{stdout}"
+        stdout.contains("install dotool"),
+        "the refusal must name the helper to install:\n{stdout}"
     );
 
     let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
     let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
     assert_eq!(
         config.output.method,
-        tonguetyped::config::OutputMethod::Type
+        tonguetyped::config::OutputMethod::None
     );
-    assert_eq!(config.output.typing_backend, "libei");
     std::fs::remove_dir_all(root).unwrap();
 }
 

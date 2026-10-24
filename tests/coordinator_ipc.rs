@@ -990,10 +990,76 @@ async fn typing_fallback_to_the_clipboard_is_a_success_with_its_own_cue() {
         dispatch(&coordinator, Request::Status).await,
         Response::Status {
             operation_error: None,
+            output_fallbacks: 1,
+            last_output_failure: Some(ref failure),
             ..
-        }
+        } if failure.contains("dotool failed")
     ));
     assert_eq!(*runtime.outputs.lock().unwrap(), vec!["test transcript "]);
+}
+
+#[tokio::test]
+async fn status_reports_output_health_and_a_reload_replaces_the_resolution() {
+    use tonguetyped::output::{BackendProbeFailure, DisplayIdentity, TypingPlan};
+
+    let runtime = Arc::new(TestRuntime::default());
+    let mut config = Config::default();
+    config.history.enabled = false;
+    config.output.method = tonguetyped::config::OutputMethod::Type;
+    let coordinator = Arc::new(Coordinator::with_runtime(config.clone(), runtime).unwrap());
+
+    // A pinned backend replaced by a working helper: status must carry both
+    // the resolved choice and the substitution, not leave it to a flash.
+    coordinator
+        .reload_config_with_typing(
+            config.clone(),
+            TypingPlan {
+                configured: "libei".to_string(),
+                resolved: Some("wtype".to_string()),
+                reasons: vec![BackendProbeFailure {
+                    backend: "libei".to_string(),
+                    reason: "the RemoteDesktop portal is unavailable".to_string(),
+                }],
+                display: DisplayIdentity::current(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            output_configured: Some(ref configured),
+            output_backend: Some(ref backend),
+            output_warning: Some(ref warning),
+            output_fallbacks: 0,
+            ..
+        } if configured == "libei"
+            && backend == "wtype"
+            && warning.contains("libei")
+            && warning.contains("using 'wtype'")
+    ));
+
+    // A reload re-probes and replaces the stored plan; the old answer must not
+    // survive a helper install or a changed config.
+    coordinator
+        .reload_config_with_typing(
+            config,
+            TypingPlan {
+                configured: "auto".to_string(),
+                resolved: Some("dotool".to_string()),
+                reasons: Vec::new(),
+                display: DisplayIdentity::current(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        dispatch(&coordinator, Request::Status).await,
+        Response::Status {
+            output_configured: Some(ref configured),
+            output_backend: Some(ref backend),
+            output_warning: None,
+            ..
+        } if configured == "auto" && backend == "dotool"
+    ));
 }
 
 #[tokio::test]
@@ -1509,10 +1575,25 @@ async fn toggle_and_hold_commands_complete_recordings() {
         Response::RecordingStopped
     ));
     wait_for_state(&coordinator, "idle").await;
+    // The debounce guard is a 30 ms wall-clock window, so waiting for the
+    // worker alone makes this assertion depend on how long finalization took.
+    // Start a fresh recording first, then toggle it immediately: the second
+    // call is deterministically inside the debounce window.
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Toggle).await,
+        Response::RecordingStarted
+    ));
     assert!(matches!(
         dispatch(&coordinator, Request::Toggle).await,
         Response::Error { .. }
     ));
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(matches!(
+        dispatch(&coordinator, Request::Toggle).await,
+        Response::RecordingStopped
+    ));
+    wait_for_state(&coordinator, "idle").await;
 
     tokio::time::sleep(Duration::from_millis(35)).await;
     assert!(matches!(
@@ -1537,7 +1618,7 @@ async fn toggle_and_hold_commands_complete_recordings() {
         tonguetyped::coordinator::CoordinatorResponse::RecordingStopped
     ));
     wait_for_state(&coordinator, "idle").await;
-    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.recordings.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]

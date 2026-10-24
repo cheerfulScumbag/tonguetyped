@@ -30,6 +30,13 @@ pub struct DoctorReport {
     /// Why the configured output method cannot work here, naming the remedy,
     /// or `None` when it can.
     pub output_method_problem: Option<String>,
+    /// The typing backend the hidden probes selected, `None` when nothing
+    /// works. Absent from reports written by an older build.
+    #[serde(default)]
+    pub output_backend: Option<String>,
+    /// A pinned-backend substitution or dead end, in one sentence.
+    #[serde(default)]
+    pub output_warning: Option<String>,
     pub shortcut_status: Option<crate::ipc::ShortcutStatus>,
     pub shortcut_portal_error: Option<String>,
 }
@@ -84,12 +91,18 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
     };
     let helpers_found = crate::output::list_available_backends();
     let clipboard_available = crate::output::clipboard_available();
-    let output_method_problem = crate::output::method_unavailable_reason(
-        config.output.method,
-        crate::output::type_backend_available(&config.output.typing_backend),
-        clipboard_available,
-    )
-    .map(str::to_string);
+    let typing = crate::output::resolve_typing(&config.output);
+    let output_method_problem = if config.output.method.inserts_text() && typing.resolved.is_none()
+    {
+        Some(typing.failure_message())
+    } else {
+        crate::output::method_unavailable_reason(
+            config.output.method,
+            typing.resolved.is_some(),
+            clipboard_available,
+        )
+        .map(str::to_string)
+    };
     let (shortcut_status, shortcut_portal_error, daemon_build) = match daemon_health().await {
         Some(health) => (
             Some(health.shortcut_status),
@@ -126,6 +139,8 @@ pub async fn run_doctor(config: &crate::config::Config) -> anyhow::Result<Doctor
         clipboard_available,
         output_method: config.output.method,
         output_method_problem,
+        output_backend: typing.resolved.clone(),
+        output_warning: typing.warning(),
         shortcut_status,
         shortcut_portal_error,
     })
@@ -198,13 +213,65 @@ pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<String> {
     if config.output.method == OutputMethod::None {
         anyhow::bail!("the output test needs output.method 'type', 'clipboard', or 'paste'");
     }
-    let delivery = crate::output::output_text("TongueTyped typing test", &config.output)?;
+    const EXPECTED: &str = "TongueTyped typing test";
+
+    // The only place a real "did the key arrive" check belongs. For typing,
+    // give the round trip a surface TongueTyped owns, so it cannot type into
+    // an unrelated application. Without a layer-shell Wayland session, fall
+    // through to the focused-application test for clipboard/paste and older
+    // sessions.
+    if config.output.method == OutputMethod::Type {
+        let output_config = config.output.clone();
+        let outcome = crate::typing_test_surface::run(
+            EXPECTED,
+            std::time::Duration::from_secs(20),
+            move || crate::output::output_text(EXPECTED, &output_config),
+        );
+        match outcome {
+            crate::typing_test_surface::SurfaceTest::Unavailable => {}
+            crate::typing_test_surface::SurfaceTest::NoFocus => {
+                return Ok(
+                    "Opened the TongueTyped test window, but it never received keyboard focus, \
+                     so the round-trip test was not run."
+                        .to_string(),
+                )
+            }
+            crate::typing_test_surface::SurfaceTest::Completed { delivery, captured } => {
+                let delivery = delivery?;
+                return Ok(match delivery {
+                    Delivery::Inserted if captured == EXPECTED => {
+                        "Typed the test text into the TongueTyped test window.".to_string()
+                    }
+                    Delivery::Inserted => format!(
+                        "Typing reported success, but the test window received \"{captured}\" \
+                         instead of the test text."
+                    ),
+                    Delivery::Kept => "Kept the test text in TongueTyped.".to_string(),
+                    Delivery::Copied => "Copied the test text to the clipboard.".to_string(),
+                    Delivery::CopiedAfterFailure(error) => format!(
+                        "Typing failed ({error}); copied the test text to the clipboard instead."
+                    ),
+                    Delivery::SubmitFailed(error) => {
+                        format!("Typed the test text, but pressing Enter failed ({error}).")
+                    }
+                });
+            }
+        }
+    }
+
+    let delivery = crate::output::output_text(EXPECTED, &config.output)?;
     Ok(match delivery {
         Delivery::Kept => "Kept the test text in TongueTyped.".to_string(),
         Delivery::Inserted if config.output.method == OutputMethod::Paste => {
-            "Pasted the test text into the focused application.".to_string()
+            "Pasted the test text into the focused application (delivery not verified by \
+             TongueTyped)."
+                .to_string()
         }
-        Delivery::Inserted => "Typed the test text into the focused application.".to_string(),
+        Delivery::Inserted => {
+            "Typed the test text into the focused application (delivery not verified by \
+             TongueTyped)."
+                .to_string()
+        }
         Delivery::Copied => "Copied the test text to the clipboard.".to_string(),
         Delivery::CopiedAfterFailure(error) => {
             format!("Typing failed ({error}); copied the test text to the clipboard instead.")
@@ -255,6 +322,11 @@ mod tests {
                 model: None,
                 backend: None,
                 device: None,
+                output_configured: None,
+                output_backend: None,
+                output_warning: None,
+                output_fallbacks: 0,
+                last_output_failure: None,
             };
             writer
                 .write_all(crate::ipc::encode_frame(&response).unwrap().as_bytes())

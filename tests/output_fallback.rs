@@ -58,6 +58,13 @@ impl Sandbox {
             &bin.join("dotool"),
             &dotool_script(&root.join("dotool.log")),
         );
+        // A plain file the dotool probe can open read-write stands in for a
+        // writable `/dev/uinput`: whether the real device is writable varies
+        // by host (the operator's machine vs. a CI runner with no `input`
+        // group access), so the probe's permission check is routed here
+        // instead of leaking the real session's kernel-device state into the
+        // test.
+        std::fs::write(root.join("uinput"), b"").unwrap();
         Self { root }
     }
 
@@ -75,10 +82,20 @@ impl Sandbox {
                 "DBUS_SESSION_BUS_ADDRESS",
                 "unix:path=/nonexistent-tonguetyped-test",
             )
+            .env("TONGUETYPED_UINPUT_DEVICE", self.root.join("uinput"))
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY")
             .output()
             .unwrap()
+    }
+
+    /// Adds a `wtype` stub that records its stdin and exits 0. With no
+    /// `WAYLAND_DISPLAY`, the probe falls back to the empty-input self-test.
+    fn write_wtype_stub(&self) {
+        write_script(
+            &self.root.join("bin/wtype"),
+            &format!("#!/bin/sh\n{}", record_into(&self.root.join("wtype.log"))),
+        );
     }
 
     fn read(&self, name: &str) -> Option<String> {
@@ -138,37 +155,66 @@ fn a_typing_failure_falls_back_to_the_clipboard() {
 }
 
 #[test]
-fn native_libei_typing_without_a_portal_falls_back_to_the_clipboard() {
-    // The KDE/GNOME Wayland case with no working portal session: the native
-    // libei backend cannot connect, so the transcript must land on the
-    // clipboard and the failure must be reported, not crash the process. The
-    // sandbox's D-Bus address points nowhere, so this exercises the graceful
-    // degradation without ever touching a real portal.
+fn a_pinned_libei_that_cannot_work_is_replaced_by_a_working_helper() {
+    // The live Mango bug: libei is pinned, but the session has no
+    // RemoteDesktop portal. The output path must not attempt libei on every
+    // dictation and lose the text; it must use a helper that works. The
+    // sandbox's D-Bus address points nowhere, so libei fails its hidden
+    // probe without ever touching a real portal, and wtype is the working
+    // helper the resolver should fall back to (the sandbox has no Wayland
+    // display, so its empty-input self-test decides).
     let sandbox = Sandbox::new(
-        "libei-fallback",
+        "libei-replaced",
         "method = \"type\"\ntyping_backend = \"libei\"\nauto_submit = true\n",
         0,
     );
+    sandbox.write_wtype_stub();
     let output = sandbox.run();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "a fallback is a success: {}",
+        "a working fallback is a success: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        stdout.contains("Typing failed")
-            && stdout.contains("copied the test text to the clipboard"),
+        stdout.contains("Typed the test text into the focused application"),
         "{stdout}"
+    );
+    assert!(
+        sandbox
+            .read("wtype.log")
+            .is_some_and(|log| log.contains("TongueTyped typing test")),
+        "the working helper must receive the transcript"
+    );
+    assert_eq!(
+        sandbox.read("clipboard"),
+        None,
+        "a working fallback must not need the clipboard"
+    );
+}
+
+#[test]
+fn a_pinned_libei_with_no_working_helper_falls_back_and_names_the_cause() {
+    // Nothing probes usable here (no helper on PATH), so the plan is
+    // unresolved. The transcript must still land on the clipboard, and the
+    // reported failure must name the pinned backend rather than the generic
+    // no-helper advice.
+    let sandbox = Sandbox::new(
+        "libei-dead-end",
+        "method = \"type\"\ntyping_backend = \"libei\"\nauto_submit = true\n",
+        0,
+    );
+    std::fs::remove_file(sandbox.root.join("bin/dotool")).unwrap();
+    let output = sandbox.run();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Typing failed") && stdout.contains("libei"),
+        "the failure must name the pinned backend: {stdout}"
     );
     assert_eq!(
         sandbox.read("clipboard").as_deref(),
         Some("TongueTyped typing test\n")
-    );
-    assert_eq!(
-        sandbox.read("dotool.log"),
-        None,
-        "the libei backend must not fall back to dotool"
     );
 }
 

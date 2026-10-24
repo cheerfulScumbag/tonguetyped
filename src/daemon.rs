@@ -44,23 +44,34 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
         inference_device = %backend.device,
         "inference configuration"
     );
-    // The configured method cannot work here; say so (with what to install)
-    // once at startup instead of only failing or falling back on each
-    // dictation.
-    if let Some(warning) = crate::output::method_unavailable_reason(
-        config.output.method,
-        crate::output::type_backend_available(&config.output.typing_backend),
-        crate::output::clipboard_available(),
-    ) {
-        tracing::warn!("{warning}");
-    }
+    // Resolve the typing backend once, with hidden probes only: no window, no
+    // focus, no key event, no portal dialog. A pinned backend that cannot work
+    // is replaced by a working helper here rather than failing on every
+    // dictation, and the warning says what was substituted and why. Methods
+    // that never type (`none`, `clipboard`) skip the probe entirely, so they
+    // cannot warn about a missing typing helper they do not need.
+    let typing = if config.output.method.inserts_text() {
+        let typing = crate::output::resolve_typing(&config.output);
+        if let Some(warning) = typing.warning() {
+            tracing::warn!("{warning}");
+        }
+        tracing::info!(
+            configured = %typing.configured,
+            resolved = typing.resolved.as_deref().unwrap_or("none"),
+            "typing backend resolved"
+        );
+        typing
+    } else {
+        crate::output::TypingPlan::unprobed(&config.output.typing_backend)
+    };
+    warn_missing_clipboard_helper(config.output.method);
     if config.history.enabled {
         tracing::warn!(
             "saving transcripts is on; turn it off in Transcript output > Save transcript history"
         );
     }
 
-    let coordinator = Arc::new(Coordinator::new(config)?);
+    let coordinator = Arc::new(Coordinator::new(config, typing)?);
     spawn_config_watcher(coordinator.clone());
     let listener = UnixListener::bind(&sock_path)?;
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -296,7 +307,21 @@ pub async fn reload_config_from_disk(coordinator: &Arc<Coordinator>) -> anyhow::
         let config = Config::reload()?;
         coordinator.validate_reload(&config)?;
         Box::pin(prepare_dependencies(&config)).await?;
-        coordinator.reload_config(config)
+        // Re-probe on every reload: the pinned backend may have changed, and
+        // a helper installed or a compositor restarted since load must not be
+        // hidden by a process-lifetime answer. Methods that never type skip
+        // the probe, exactly as at startup.
+        let typing = if config.output.method.inserts_text() {
+            let typing = crate::output::resolve_typing(&config.output);
+            if let Some(warning) = typing.warning() {
+                tracing::warn!("{warning}");
+            }
+            typing
+        } else {
+            crate::output::TypingPlan::unprobed(&config.output.typing_backend)
+        };
+        warn_missing_clipboard_helper(config.output.method);
+        coordinator.reload_config_with_typing(config, typing)
     }
     .await;
     match &result {
@@ -304,6 +329,15 @@ pub async fn reload_config_from_disk(coordinator: &Arc<Coordinator>) -> anyhow::
         Err(error) => coordinator.set_config_error(error.to_string()),
     }
     result
+}
+
+/// Warns once when the configured method needs the clipboard helper and this
+/// session has none. `type` is excluded: it copies only as a failure fallback,
+/// so a missing clipboard helper is not a startup problem there.
+fn warn_missing_clipboard_helper(method: crate::config::OutputMethod) {
+    if method.needs_clipboard() && !crate::output::clipboard_available() {
+        tracing::warn!("{}", crate::output::clipboard_helper_warning());
+    }
 }
 
 /// Routes every shortcut request through the daemon's activation handle, the
@@ -449,6 +483,11 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
             shortcut_trigger,
             model,
             backend,
+            output_configured,
+            output_backend,
+            output_warning,
+            output_fallbacks,
+            last_output_failure,
         } => {
             let (backend, device) = match backend {
                 Some(info) => (Some(info.backend), Some(info.device)),
@@ -466,6 +505,11 @@ fn coordinator_response_to_ipc(resp: CoordinatorResponse) -> Response {
                 model: Some(model),
                 backend,
                 device,
+                output_configured,
+                output_backend,
+                output_warning,
+                output_fallbacks,
+                last_output_failure,
             }
         }
     }

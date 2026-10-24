@@ -459,7 +459,10 @@ The state is `idle`, `recording`, `processing`, or `stopped`, repeated in
 style it. The tooltip always reports the shortcut state (`initializing`,
 `available`, `unbound (no key set)`, or `failed`), the bound key when there is
 one, and any shortcut error, so a bar can show a shortcut that died instead of
-claiming it works. `--extended` adds `model`, `backend`, `device` and `build`
+claiming it works. The tooltip also always reports output health: the
+resolved typing backend, a pinned-backend substitution or dead-end warning
+when there is one, the clipboard-fallback count once it is non-zero, and the
+last output error. `--extended` adds `model`, `backend`, `device` and `build`
 fields; the tooltip then also lists `model`, `backend` and `device`, while
 `build` appears only in the JSON.
 
@@ -605,7 +608,11 @@ clipboard", so you can paste it yourself. If the text was inserted but the
 the application - and the overlay shows a distinct "Text entered, but Enter
 failed" cue. The clipboard helper is `wl-copy` from
 `wl-clipboard` on Wayland and `xclip` on X11. `tonguetyped doctor --test-type`
-sends a test line through the configured method and says where it went.
+sends a test line through the configured method and says where it went. For
+`type` on a layer-shell Wayland session it opens a small TongueTyped-owned test
+window and checks that the exact line arrives there, so the test never types
+into an unrelated application; on other sessions it uses the focused
+application and reports that it could not verify delivery itself.
 
 ### History and the transcript folder
 
@@ -808,9 +815,22 @@ and does not need the daemon to be running.
 
 ## Platform notes
 
-Typing into the focused application uses one of four backends. Automatic
-selection tries `wtype`, then `enigo` on X11, then `dotool`, then the built-in
-`libei` backend, and only ever uses one that actually works.
+Typing into the focused application uses one of four backends. At daemon load,
+and again on every config reload, TongueTyped probes each backend without
+opening a window, taking focus, sending a key, or showing a portal dialog:
+`wtype` asks the Wayland compositor for the virtual-keyboard protocol, `enigo`
+asks the X server for XTEST, `dotool` opens `/dev/uinput` and reads its ABI
+version, and `libei` asks D-Bus whether the RemoteDesktop portal interface
+exists. Automatic selection tries `wtype`, then `enigo` on X11, then `dotool`,
+then the built-in `libei` backend, and only ever uses one whose probe succeeds.
+
+A pinned `typing_backend` is a preference, not a hard gate. When it probes
+successfully it wins; when it cannot work on this session TongueTyped uses a
+working backend instead, logs the substitution, and reports it in
+`tonguetyped status`. The config file is never rewritten, so the pinned value
+still works if the same config is used on another machine. `tonguetyped status`
+also carries the resolved backend and the clipboard-fallback count, so a lost
+typing path is visible after the transient overlay cue is gone.
 
 | Session | Typing helper | Notes |
 | --- | --- | --- |

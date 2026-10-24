@@ -168,6 +168,12 @@ pub(crate) struct Capabilities {
     /// installed.
     pub(crate) clipboard: bool,
     pub(crate) inference_backends: Vec<crate::inference::BackendChoice>,
+    /// The install/permission warning to show when no typing backend works,
+    /// computed once during discovery. The console render path calls
+    /// `typing_helper_warning` every frame, and the warning's capability
+    /// probes (Wayland registry roundtrip, portal introspection) must not run
+    /// per frame.
+    pub(crate) typing_warning: Option<&'static str>,
 }
 
 /// The output methods, in the order every configuration UI lists them;
@@ -230,11 +236,16 @@ impl Capabilities {
                 microphones.push((device.id, detail));
             }
         }
+        let typing_backends = crate::output::list_available_backends();
+        let typing_warning = typing_backends
+            .is_empty()
+            .then(crate::output::typing_helper_warning);
         Ok(Self {
             microphones,
-            typing_backends: crate::output::list_available_backends(),
+            typing_backends,
             clipboard: crate::output::clipboard_available(),
             inference_backends: crate::inference::backend_choices(),
+            typing_warning,
         })
     }
 
@@ -244,14 +255,19 @@ impl Capabilities {
     pub(crate) fn discover_or_default() -> Self {
         Self::discover().unwrap_or_else(|error| {
             tracing::warn!("audio device discovery failed: {error}");
+            let typing_backends = crate::output::list_available_backends();
+            let typing_warning = typing_backends
+                .is_empty()
+                .then(crate::output::typing_helper_warning);
             Self {
                 microphones: vec![(
                     "default".to_string(),
                     "System default microphone".to_string(),
                 )],
-                typing_backends: crate::output::list_available_backends(),
+                typing_backends,
                 clipboard: crate::output::clipboard_available(),
                 inference_backends: crate::inference::backend_choices(),
+                typing_warning,
             }
         })
     }
@@ -291,14 +307,30 @@ impl Capabilities {
     /// The install warning the typing-backend screens show when
     /// `has_type_backend` is false, or `None` otherwise.
     pub(crate) fn typing_helper_warning(&self) -> Option<&'static str> {
-        (!self.has_type_backend()).then(crate::output::typing_helper_warning)
+        self.typing_warning
     }
 
     /// Why `method` cannot work on this machine, as the warning naming the
     /// remedy, or `None` when it can. The configuration UIs show it for the
-    /// highlighted method and refuse to save a method that has one.
+    /// highlighted method and refuse to save a method that has one, and call
+    /// it every render frame - so, unlike `method_unavailable_reason`, this
+    /// reuses the already-computed `self.typing_warning` instead of probing
+    /// the typing helper fresh each time.
     pub(crate) fn output_method_problem(&self, method: OutputMethod) -> Option<&'static str> {
-        crate::output::method_unavailable_reason(method, self.has_type_backend(), self.clipboard)
+        match method {
+            OutputMethod::None => None,
+            OutputMethod::Type => self.typing_warning,
+            OutputMethod::Clipboard => {
+                (!self.clipboard).then(crate::output::clipboard_helper_warning)
+            }
+            OutputMethod::Paste => {
+                if !self.clipboard {
+                    Some(crate::output::clipboard_helper_warning())
+                } else {
+                    self.typing_warning
+                }
+            }
+        }
     }
 
     /// Where the configuration UIs open their output-method list: on the
@@ -917,6 +949,7 @@ mod tests {
             typing_backends: Vec::new(),
             clipboard: false,
             inference_backends: Vec::new(),
+            typing_warning: None,
         };
 
         assert_eq!(capabilities.microphone_index("pipewire:usb-source"), 1);
