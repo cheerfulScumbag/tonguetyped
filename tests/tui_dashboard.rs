@@ -216,7 +216,7 @@ impl Session {
         // `Terminal::clear` asks the terminal for its cursor position and waits
         // for the report. A real terminal answers; this parser does not, so
         // answer it here - otherwise any screen that clears after suspending
-        // (the guided setup console) blocks forever inside the dashboard.
+        // (the setup console) blocks forever inside the dashboard.
         let reporter_fd = unsafe { libc::dup(pair.master.as_raw_fd().expect("pty master fd")) };
         assert!(
             reporter_fd >= 0,
@@ -1242,14 +1242,14 @@ fn pty_setup_console_preserves_an_external_config_rewrite() {
     session.wait_for("5 destinations", Duration::from_secs(5));
 
     // Another terminal (or dashboard) rewrites the config while this
-    // dashboard is open. Launching the setup console must not overwrite it
-    // with this process's startup snapshot before the console reloads.
+    // dashboard is open. Launching the setup console and leaving it untouched
+    // must not overwrite it with this process's startup snapshot.
     sandbox.write_config("[output]\nmethod = \"none\"\ntyping_backend = \"wtype\"\n");
 
     session.send(b"p");
     session.wait_for("Review", Duration::from_secs(3));
     session.send(KEY_ENTER);
-    session.wait_for("Speech model", Duration::from_secs(15));
+    session.wait_for("VOX // ", Duration::from_secs(15));
     session.send(b"q");
     // Re-entering the alternate screen clears it; nudge the Deck to redraw a
     // changed pane so the assertion below reads the resumed dashboard.
@@ -1260,7 +1260,7 @@ fn pty_setup_console_preserves_an_external_config_rewrite() {
     assert_eq!(
         config["output"]["method"].as_str(),
         Some("none"),
-        "launching and cancelling setup must keep the newer on-disk config: {config:?}"
+        "launching and leaving setup untouched must keep the newer on-disk config: {config:?}"
     );
 
     // The Output pane must also follow the config the console reloaded, not
