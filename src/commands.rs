@@ -522,6 +522,11 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
             activation_error,
             shortcut_trigger,
             build,
+            output_configured,
+            output_backend,
+            output_warning,
+            output_fallbacks,
+            last_output_failure,
             ..
         } => {
             let mut lines = vec![
@@ -540,6 +545,28 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
             ];
             if let Some(trigger) = shortcut_trigger {
                 lines.push(line(format!("shortcut key:     {trigger}")));
+            }
+            if let Some(backend) = output_backend {
+                let configured = output_configured
+                    .as_deref()
+                    .map(|configured| format!(" (configured {configured})"))
+                    .unwrap_or_default();
+                lines.push(line(format!("output backend:   {backend}{configured}")));
+            } else if let Some(configured) = output_configured {
+                lines.push(error_line(format!(
+                    "output backend:   none resolved (configured {configured})"
+                )));
+            }
+            if *output_fallbacks > 0 {
+                lines.push(error_line(format!(
+                    "clipboard fallbacks: {output_fallbacks}"
+                )));
+            }
+            if let Some(error) = last_output_failure {
+                lines.push(error_line(format!("last output error: {error}")));
+            }
+            if let Some(warning) = output_warning {
+                lines.push(error_line(format!("output warning:   {warning}")));
             }
             if let Some(error) = config_error {
                 lines.push(error_line(format!("config error:     {error}")));
@@ -648,6 +675,15 @@ pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
             "output method:  {} unavailable - {problem}",
             report.output_method
         ))),
+    }
+    if report.output_method.inserts_text() {
+        match &report.output_backend {
+            Some(backend) => lines.push(line(format!("output backend: {backend}"))),
+            None => lines.push(error_line("output backend: none resolved")),
+        }
+        if let Some(warning) = &report.output_warning {
+            lines.push(error_line(format!("output warning: {warning}")));
+        }
     }
     lines.push(line(format!(
         "shortcut portal: {}",
@@ -1032,6 +1068,11 @@ mod tests {
             model: None,
             backend: None,
             device: None,
+            output_configured: None,
+            output_backend: None,
+            output_warning: None,
+            output_fallbacks: 0,
+            last_output_failure: None,
         };
         let text = format_response_lines(&response)
             .into_iter()

@@ -88,6 +88,26 @@ pub enum Response {
         /// The device that backend runs on. `None` from an older daemon.
         #[serde(default)]
         device: Option<String>,
+        /// The configured `output.typing_backend`. `None` from an older daemon.
+        #[serde(default)]
+        output_configured: Option<String>,
+        /// The typing backend delivery will use after hidden capability
+        /// probing, `None` while nothing has resolved. `None` from an older
+        /// daemon.
+        #[serde(default)]
+        output_backend: Option<String>,
+        /// A substitution or dead end worth showing the user, for example a
+        /// pinned libei replaced by wtype. `None` when the configured backend
+        /// works, or from an older daemon.
+        #[serde(default)]
+        output_warning: Option<String>,
+        /// Clipboard fallbacks since the daemon started. Zero from an older
+        /// daemon.
+        #[serde(default)]
+        output_fallbacks: u64,
+        /// Why the most recent fallback happened. `None` when none has.
+        #[serde(default)]
+        last_output_failure: Option<String>,
     },
     LastResult {
         text: String,

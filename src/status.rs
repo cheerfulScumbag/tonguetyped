@@ -76,6 +76,10 @@ pub fn bar_status(response: Option<&Response>, extended: bool) -> BarStatus {
         model,
         backend,
         device,
+        output_backend,
+        output_warning,
+        output_fallbacks,
+        last_output_failure,
         ..
     }) = response
     else {
@@ -117,6 +121,21 @@ pub fn bar_status(response: Option<&Response>, extended: bool) -> BarStatus {
     }
     if let Some(error) = operation_error {
         tooltip.push_str(&format!("\nLast error: {error}"));
+    }
+    // Output health: which backend typing uses, any substitution or dead end,
+    // and how often typing fell back to the clipboard. This is the durable
+    // trace the 1.8 s overlay flash could not provide.
+    if let Some(backend) = output_backend {
+        tooltip.push_str(&format!("\nOutput: {backend}"));
+    }
+    if *output_fallbacks > 0 {
+        tooltip.push_str(&format!("\nClipboard fallbacks: {output_fallbacks}"));
+    }
+    if let Some(error) = last_output_failure {
+        tooltip.push_str(&format!("\nLast output error: {error}"));
+    }
+    if let Some(warning) = output_warning {
+        tooltip.push_str(&format!("\nOutput warning: {warning}"));
     }
     if let Some(error) = config_error {
         tooltip.push_str(&format!("\nConfig error: {error}"));
@@ -232,6 +251,11 @@ mod tests {
             model: Some("whisper-small-q5_k_m".to_string()),
             backend: Some("transcribe.cpp/vulkan".to_string()),
             device: Some("AMD Radeon RX 7900".to_string()),
+            output_configured: Some("auto".to_string()),
+            output_backend: Some("wtype".to_string()),
+            output_warning: None,
+            output_fallbacks: 0,
+            last_output_failure: None,
         }
     }
 
@@ -247,7 +271,7 @@ mod tests {
                 "text": "recording",
                 "alt": "recording",
                 "class": "recording",
-                "tooltip": "TongueTyped: recording\nShortcut: available\nShortcut key: Super+Space",
+                "tooltip": "TongueTyped: recording\nShortcut: available\nShortcut key: Super+Space\nOutput: wtype",
             })
         );
     }
@@ -256,7 +280,7 @@ mod tests {
     fn json_status_serializes_on_one_line_in_waybar_field_order() {
         assert_eq!(
             serde_json::to_string(&bar_status(Some(&status("idle", None)), false)).unwrap(),
-            r#"{"text":"idle","alt":"idle","class":"idle","tooltip":"TongueTyped: idle\nShortcut: available\nShortcut key: Super+Space"}"#
+            r#"{"text":"idle","alt":"idle","class":"idle","tooltip":"TongueTyped: idle\nShortcut: available\nShortcut key: Super+Space\nOutput: wtype"}"#
         );
     }
 
@@ -271,7 +295,7 @@ mod tests {
                 "tooltip": "TongueTyped: processing\nModel: whisper-small-q5_k_m\n\
                             Backend: transcribe.cpp/vulkan on AMD Radeon RX 7900\n\
                             Shortcut: available\nShortcut key: Super+Space\n\
-                            Last error: output failed",
+                            Last error: output failed\nOutput: wtype",
                 "model": "whisper-small-q5_k_m",
                 "backend": "transcribe.cpp/vulkan",
                 "device": "AMD Radeon RX 7900",
@@ -289,7 +313,7 @@ mod tests {
         assert_eq!(
             json(Some(&response), false)["tooltip"],
             "TongueTyped: idle\nShortcut: available\nShortcut key: Super+Space\n\
-             Config error: unknown field `bogus`"
+             Output: wtype\nConfig error: unknown field `bogus`"
         );
     }
 
@@ -351,7 +375,7 @@ mod tests {
         assert_eq!(
             json(Some(&response), false)["tooltip"],
             "TongueTyped: idle\nShortcut: failed\n\
-             Shortcut error: activation listener failed: no portal"
+             Shortcut error: activation listener failed: no portal\nOutput: wtype"
         );
 
         let mut unbound = status("idle", None);
@@ -366,7 +390,7 @@ mod tests {
         }
         assert_eq!(
             json(Some(&unbound), false)["tooltip"],
-            "TongueTyped: idle\nShortcut: unbound (no key set)"
+            "TongueTyped: idle\nShortcut: unbound (no key set)\nOutput: wtype"
         );
     }
 

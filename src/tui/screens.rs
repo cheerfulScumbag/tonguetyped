@@ -2309,12 +2309,17 @@ mod tests {
             typing_backends: vec!["wtype".to_string(), "enigo".to_string()],
             clipboard: true,
             inference_backends: Vec::new(),
+            typing_warning: None,
         }
     }
 
     fn capabilities_without_backends() -> Capabilities {
         Capabilities {
             typing_backends: Vec::new(),
+            typing_warning: Some(
+                "No typing helper found - install dotool (needs /dev/uinput access), \
+                 then restart TongueTyped.",
+            ),
             ..test_capabilities()
         }
     }

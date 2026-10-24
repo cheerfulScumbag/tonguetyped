@@ -1,7 +1,6 @@
 use crate::config::{OutputConfig, OutputMethod, PasteKeys};
 use anyhow::Context;
 use std::process::Command;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 /// How long `paste` mode waits between pressing the paste keys and pressing
@@ -32,13 +31,248 @@ pub enum Delivery {
 }
 
 pub fn output_text(text: &str, config: &OutputConfig) -> anyhow::Result<Delivery> {
-    deliver(
-        text,
-        config,
-        &SystemDesktop {
-            backend: &config.typing_backend,
-        },
+    // Methods that type or paste need a resolved backend. `none` and
+    // `clipboard` never touch one, so they skip the probe entirely.
+    if !config.method.inserts_text() {
+        return deliver(text, config, &SystemDesktop { plan: None });
+    }
+    let plan = resolve_typing(config);
+    output_text_with_plan(text, config, &plan)
+}
+
+/// Delivers `text` through an already-resolved typing plan.
+///
+/// The daemon resolves once at load and keeps the plan up to date on reload
+/// and display changes, so a dictation never re-runs the probes. An unresolved
+/// plan (`resolved: None`, because every probe failed) fails into the normal
+/// clipboard fallback with the precise reason, instead of retrying a backend
+/// that is known not to work.
+pub fn output_text_with_plan(
+    text: &str,
+    config: &OutputConfig,
+    plan: &TypingPlan,
+) -> anyhow::Result<Delivery> {
+    deliver(text, config, &SystemDesktop { plan: Some(plan) })
+}
+
+/// How a pinned or automatic typing backend resolved on this session.
+///
+/// `configured` is what the config asked for, `resolved` is what will actually
+/// be used (`None` when nothing probed usable), and `reasons` records every
+/// failed probe with the session-specific cause. `display` is the display
+/// identity the probes ran against, so the daemon can tell when the answer is
+/// stale after a compositor or session change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingPlan {
+    pub configured: String,
+    pub resolved: Option<String>,
+    pub reasons: Vec<BackendProbeFailure>,
+    pub display: DisplayIdentity,
+}
+
+/// One backend that failed its hidden probe, and why on this session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendProbeFailure {
+    pub backend: String,
+    pub reason: String,
+}
+
+impl TypingPlan {
+    /// A plan for a caller that does not type or has not probed yet (test
+    /// runtimes, the status snapshot before load). It performs no probing and
+    /// never claims a backend works, so a later `needs_reprobe` resolves it.
+    pub fn unprobed(configured: &str) -> Self {
+        Self {
+            configured: configured.to_string(),
+            resolved: None,
+            reasons: Vec::new(),
+            display: DisplayIdentity::current(),
+        }
+    }
+
+    /// Whether this plan is stale for `config`: the pinned value changed, no
+    /// backend resolved (a probe that ran before the compositor or portal was
+    /// ready must not disable typing for the daemon's life), or the display
+    /// identity changed under a running daemon.
+    pub fn needs_reprobe(&self, config: &OutputConfig) -> bool {
+        self.needs_reprobe_for(config, &DisplayIdentity::current())
+    }
+
+    /// Pure core of [`needs_reprobe`](Self::needs_reprobe), so the display
+    /// identity rule is testable without mutating the process environment.
+    fn needs_reprobe_for(&self, config: &OutputConfig, display: &DisplayIdentity) -> bool {
+        self.configured != config.typing_backend
+            || self.resolved.is_none()
+            || &self.display != display
+    }
+
+    /// The probe reason for the configured backend, when it was probed.
+    pub fn configured_reason(&self) -> Option<&str> {
+        self.reasons
+            .iter()
+            .find(|failure| failure.backend == self.configured)
+            .map(|failure| failure.reason.as_str())
+    }
+
+    /// A substitution or dead end worth showing the user, in one sentence.
+    /// `None` when the configured choice works.
+    pub fn warning(&self) -> Option<String> {
+        match &self.resolved {
+            Some(resolved) if self.configured != "auto" && resolved != &self.configured => {
+                Some(format!(
+                    "typing backend '{}' cannot work on this session ({}); using '{}' instead. \
+                     Set output.typing_backend = \"auto\" to use {}.",
+                    self.configured,
+                    self.configured_reason()
+                        .unwrap_or("the hidden probe failed"),
+                    resolved,
+                    resolved,
+                ))
+            }
+            Some(_) => None,
+            None => Some(self.failure_message()),
+        }
+    }
+
+    /// Why delivery cannot type, naming the pinned backend, the session
+    /// reason, and one remedy. Used as the delivery error that reaches the
+    /// clipboard-fallback warning and the doctor test output.
+    pub fn failure_message(&self) -> String {
+        if self.configured == "auto" {
+            format!(
+                "no typing helper works on this session - {}",
+                no_helper_remedy()
+            )
+        } else {
+            format!(
+                "typing backend '{}' cannot work on this session ({}), and no other typing \
+                 helper works - {}",
+                self.configured,
+                self.configured_reason()
+                    .unwrap_or("the hidden probe failed"),
+                no_helper_remedy(),
+            )
+        }
+    }
+}
+
+/// Which display the probes ran against. A compositor or session change
+/// replaces the socket or the display name, which makes a cached plan stale.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DisplayIdentity {
+    key: Option<String>,
+}
+
+impl DisplayIdentity {
+    pub fn current() -> Self {
+        let key = if let Some(display) = std::env::var_os("WAYLAND_DISPLAY") {
+            let display = display.to_string_lossy().into_owned();
+            let path = wayland_socket_path(&display);
+            let metadata = std::fs::metadata(&path).ok();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                metadata.map(|metadata| {
+                    format!(
+                        "wayland:{display}:{}:{}:{}:{}",
+                        metadata.dev(),
+                        metadata.ino(),
+                        metadata.mtime(),
+                        metadata.mtime_nsec()
+                    )
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = metadata;
+                Some(format!("wayland:{display}"))
+            }
+        } else {
+            std::env::var_os("DISPLAY").map(|display| format!("x11:{}", display.to_string_lossy()))
+        };
+        Self { key }
+    }
+
+    /// Whether the display the plan probed is still the current one. A plan
+    /// probed with no display (`None`) stays current only while there is still
+    /// no display, so a compositor appearing later triggers a re-probe.
+    pub fn is_current(&self) -> bool {
+        *self == Self::current()
+    }
+}
+
+fn wayland_socket_path(display: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(display);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(display)
+}
+
+/// The order `auto` tries backends in. `wtype` first because it is the direct
+/// Wayland protocol, then the X11-only `enigo`, then the `/dev/uinput`
+/// helper, and `libei` last because it needs a portal session.
+pub const BACKEND_ORDER: [&str; 4] = ["wtype", "enigo", "dotool", "libei"];
+
+/// Resolves the configured backend against this session's hidden probes.
+pub fn resolve_typing(config: &OutputConfig) -> TypingPlan {
+    resolve_typing_with(
+        &config.typing_backend,
+        DisplayIdentity::current(),
+        &|backend| probe_backend(backend),
     )
+}
+
+/// Pure core of [`resolve_typing`]. `probe` is injected so the pinned and
+/// automatic decisions can be tested without a Wayland, X11, uinput, or
+/// portal session.
+fn resolve_typing_with(
+    configured: &str,
+    display: DisplayIdentity,
+    probe: &dyn Fn(&str) -> Result<(), String>,
+) -> TypingPlan {
+    let mut reasons = Vec::new();
+    let mut resolved = None;
+
+    // An explicit choice wins when it probes OK.
+    if configured != "auto" {
+        match probe(configured) {
+            Ok(()) => resolved = Some(configured.to_string()),
+            Err(reason) => reasons.push(BackendProbeFailure {
+                backend: configured.to_string(),
+                reason,
+            }),
+        }
+    }
+
+    if resolved.is_none() {
+        for backend in BACKEND_ORDER {
+            if backend == configured {
+                // Already probed above and failed; do not run it twice.
+                continue;
+            }
+            match probe(backend) {
+                Ok(()) => {
+                    resolved = Some(backend.to_string());
+                    break;
+                }
+                Err(reason) => reasons.push(BackendProbeFailure {
+                    backend: backend.to_string(),
+                    reason,
+                }),
+            }
+        }
+    }
+
+    TypingPlan {
+        configured: configured.to_string(),
+        resolved,
+        reasons,
+        display,
+    }
 }
 
 /// The three desktop actions output needs, split out so the mode and
@@ -116,34 +350,31 @@ fn press_enter_if_requested(auto_submit: bool, desktop: &impl Desktop) -> Option
 }
 
 struct SystemDesktop<'a> {
-    backend: &'a str,
+    plan: Option<&'a TypingPlan>,
 }
 
 impl SystemDesktop<'_> {
-    fn resolved_backend(&self) -> anyhow::Result<String> {
-        let backend = if self.backend == "auto" {
-            cached_auto_backend()
-        } else {
-            self.backend.to_string()
-        };
-        if backend == "none" {
-            anyhow::bail!("no typing helper is available: {}", typing_helper_warning());
-        }
-        Ok(backend)
+    fn backend(&self) -> anyhow::Result<&str> {
+        let plan = self
+            .plan
+            .ok_or_else(|| anyhow::anyhow!("no typing backend was resolved for this output"))?;
+        plan.resolved
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!(plan.failure_message()))
     }
 }
 
 impl Desktop for SystemDesktop<'_> {
     fn type_text(&self, text: &str) -> anyhow::Result<()> {
-        type_text(text, &self.resolved_backend()?)
+        type_text(text, self.backend()?)
     }
 
     fn press_paste(&self, keys: PasteKeys) -> anyhow::Result<()> {
-        press_paste(keys, &self.resolved_backend()?)
+        press_paste(keys, self.backend()?)
     }
 
     fn press_enter(&self) -> anyhow::Result<()> {
-        press_enter(&self.resolved_backend()?)
+        press_enter(self.backend()?)
     }
 
     fn copy(&self, text: &str) -> anyhow::Result<()> {
@@ -376,105 +607,114 @@ pub fn method_unavailable_reason(
     }
 }
 
-/// Memoized `probe_type_backend()`: which typing helper is actually installed
-/// cannot change over a daemon process's lifetime, so re-running its
-/// subprocess self-tests (observed costing over a second in the real
-/// stop-to-idle latency log, since "auto" means probing wtype, then enigo,
-/// then dotool, then libei on every single dictation) on every "auto"-backend
-/// output is pure waste - same probe-then-cache shape as
-/// `inference::backend_info`'s GPU device probe and
-/// `overlay::OverlayHandle`'s layer-shell probe.
-fn cached_auto_backend() -> String {
-    static BACKEND: OnceLock<String> = OnceLock::new();
-    BACKEND.get_or_init(probe_type_backend).clone()
-}
-
+/// Which typing helper is installed and can work here, in `auto` order.
+///
+/// Stateless on purpose: the daemon resolves once at load and keeps the plan
+/// in memory, so a stale process-lifetime answer cannot outlive a config
+/// reload, a helper install, or a compositor change. Callers that want a
+/// cached answer hold a [`TypingPlan`].
 pub fn probe_type_backend() -> String {
-    if helper_self_test("wtype") {
-        return "wtype".to_string();
-    }
-    if enigo_available() {
-        return "enigo".to_string();
-    }
-    if dotool_available() {
-        return "dotool".to_string();
-    }
-    if crate::libei::available() {
-        return "libei".to_string();
-    }
-    "none".to_string()
+    BACKEND_ORDER
+        .iter()
+        .find(|backend| probe_backend(backend).is_ok())
+        .map(|backend| backend.to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 pub fn list_available_backends() -> Vec<String> {
-    let mut backends = Vec::new();
-    if helper_self_test("wtype") {
-        backends.push("wtype".to_string());
-    }
-    if enigo_available() {
-        backends.push("enigo".to_string());
-    }
-    if dotool_available() {
-        backends.push("dotool".to_string());
-    }
-    if crate::libei::available() {
-        backends.push("libei".to_string());
-    }
-    backends
+    BACKEND_ORDER
+        .iter()
+        .filter(|backend| probe_backend(backend).is_ok())
+        .map(|backend| backend.to_string())
+        .collect()
 }
 
 pub fn has_any_type_backend() -> bool {
-    helper_self_test("wtype")
-        || enigo_available()
-        || dotool_available()
-        || crate::libei::available()
+    BACKEND_ORDER
+        .iter()
+        .any(|backend| probe_backend(backend).is_ok())
 }
 
 pub fn type_backend_available(backend: &str) -> bool {
+    if backend == "auto" {
+        return has_any_type_backend();
+    }
+    probe_backend(backend).is_ok()
+}
+
+/// The hidden capability probe for one backend. It reports why a backend
+/// cannot work, which is what makes the pinned-substitution and no-helper
+/// warnings name the real cause instead of guessing from the desktop name.
+///
+/// None of these probes creates a window, requests focus, sends a key event,
+/// opens a portal session, or creates a uinput device.
+pub fn probe_backend(backend: &str) -> Result<(), String> {
     match backend {
-        "auto" => has_any_type_backend(),
-        "wtype" => helper_self_test("wtype"),
-        "dotool" => dotool_available(),
-        "enigo" => enigo_available(),
-        "libei" => crate::libei::available(),
-        _ => false,
+        "wtype" => probe_wtype(),
+        "dotool" => probe_dotool(),
+        "enigo" => probe_enigo(),
+        "libei" => probe_libei(),
+        _ => Err(format!("unsupported typing backend: {backend}")),
     }
 }
 
-/// The warning the configuration UIs and the daemon startup log show when the
-/// configured typing backend cannot type here, naming the one action that makes
-/// typing work for this compositor. `enigo` needs no install (it is built in),
-/// `wtype` types through the Wayland virtual-keyboard protocol that only
-/// wlroots-based compositors implement, and `dotool` types through
-/// `/dev/uinput` and so works on KDE's KWin and other compositors too. When
-/// `dotool` is already installed but `/dev/uinput` is not writable, the warning
-/// names the permission remedy instead of telling the user to install a binary
-/// they already have; when the native `libei` backend is available on
-/// KDE/GNOME Wayland, the fix is to switch `typing_backend` to it, not to
-/// install another helper.
-/// The restart note is real, not boilerplate: `cached_auto_backend`, this
-/// warning, and the daemon process all memoize the probe, so a helper
-/// installed while TongueTyped is running is not picked up until it restarts.
-/// The warning is memoized here because the setup console's render path calls
-/// it on every frame while the Output step is open.
-pub fn typing_helper_warning() -> &'static str {
-    static WARNING: OnceLock<&'static str> = OnceLock::new();
-    WARNING.get_or_init(|| {
-        warning_for(
-            recommended_helper(),
-            dotool_installed(),
-            device_is_writable(std::path::Path::new("/dev/uinput")),
-        )
-    })
+/// `wtype` needs the binary, a reachable Wayland display, the
+/// `zwp_virtual_keyboard_manager_v1` global, and a keyboard-capable seat. The
+/// registry roundtrip is authoritative when a display is reachable; with no
+/// display, the helper's empty-input self-test keeps a headless sandbox
+/// deterministic (it sends no key either).
+fn probe_wtype() -> Result<(), String> {
+    if !wtype_installed() {
+        return Err("wtype is not installed".to_string());
+    }
+    match crate::wayland::virtual_keyboard() {
+        Some(capability) if capability.usable() => Ok(()),
+        Some(_) => Err(
+            "the compositor does not advertise the Wayland virtual-keyboard protocol \
+             with a keyboard-capable seat"
+                .to_string(),
+        ),
+        None if helper_self_test("wtype") => Ok(()),
+        None => Err("no Wayland display is reachable".to_string()),
+    }
 }
 
-/// The helper to name for this session. `wtype` only on a Wayland session
-/// whose compositor is wlroots-based (sway, Hyprland, niri, ...), which
-/// implements the `zwp_virtual_keyboard_manager_v1` protocol `wtype` needs.
-/// On KDE/GNOME Wayland the native `libei` backend works, so nothing needs
-/// installing there. Everywhere else - other Wayland compositors and X11 -
-/// `dotool` is the helper that can work.
+fn wtype_installed() -> bool {
+    binary_on_path("wtype", std::env::var_os("PATH").as_deref())
+}
+
+/// The warning the configuration UIs and the doctor show when no typing
+/// backend works here, naming the one action that can make typing work for
+/// this compositor. Every branch checks whether the helper it names is
+/// already installed, so the message never tells the user to install a binary
+/// they already have.
+pub fn typing_helper_warning() -> &'static str {
+    warning_for(
+        recommended_helper(),
+        wtype_installed(),
+        dotool_installed(),
+        uinput_ready(),
+    )
+}
+
+/// The remedy phrase without the leading sentence, shared by the warning and
+/// the plan's failure message so both name the same next action.
+fn no_helper_remedy() -> &'static str {
+    remedy_for(
+        recommended_helper(),
+        wtype_installed(),
+        dotool_installed(),
+        uinput_ready(),
+    )
+}
+
+/// The helper to name when nothing works. `wtype` is named only when the
+/// compositor advertises the virtual-keyboard protocol (or, with no display to
+/// probe, identifies as wlroots by name); then `libei` if its portal is
+/// present; otherwise `dotool`, the helper that works through `/dev/uinput`
+/// on KWin and most other compositors.
 fn recommended_helper() -> &'static str {
-    if session_is_wayland() && compositor_is_wlroots() {
+    if session_is_wayland() && compositor_supports_virtual_keyboard() {
         "wtype"
     } else if crate::libei::available() {
         "libei"
@@ -483,15 +723,73 @@ fn recommended_helper() -> &'static str {
     }
 }
 
-fn warning_for(helper: &str, dotool_installed: bool, uinput_writable: bool) -> &'static str {
+fn warning_for(
+    helper: &str,
+    wtype_installed: bool,
+    dotool_installed: bool,
+    uinput_ready: bool,
+) -> &'static str {
     if helper == "wtype" {
-        "No typing helper found - install wtype, then restart TongueTyped."
+        if !wtype_installed {
+            "No typing helper found - install wtype, then restart TongueTyped."
+        } else if dotool_installed && !uinput_ready {
+            "wtype is installed but this compositor did not accept the virtual-keyboard \
+             protocol, and dotool cannot open /dev/uinput - add your user to the 'input' \
+             group or add a udev rule granting write access to /dev/uinput, then restart \
+             TongueTyped."
+        } else if dotool_installed {
+            "wtype is installed but this compositor did not accept the virtual-keyboard \
+             protocol, and dotool could not type here - check your compositor's \
+             input-device support, or use the clipboard output method, then restart \
+             TongueTyped."
+        } else {
+            "wtype is installed but this compositor did not accept the virtual-keyboard \
+             protocol - install dotool (needs /dev/uinput access) or use the clipboard \
+             output method, then restart TongueTyped."
+        }
     } else if helper == "libei" {
         "The configured typing backend is unavailable - the native libei backend works on this session; set typing_backend = \"libei\" (or use the clipboard output method), then restart TongueTyped."
-    } else if dotool_installed && !uinput_writable {
+    } else if dotool_installed && !uinput_ready {
         "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or add a udev rule granting write access to /dev/uinput, then restart TongueTyped."
+    } else if dotool_installed {
+        "dotool is installed but could not type here - check your compositor's input-device support, or use the clipboard output method, then restart TongueTyped."
     } else {
         "No typing helper found - install dotool (needs /dev/uinput access), then restart TongueTyped."
+    }
+}
+
+fn remedy_for(
+    helper: &str,
+    wtype_installed: bool,
+    dotool_installed: bool,
+    uinput_ready: bool,
+) -> &'static str {
+    if helper == "wtype" {
+        if !wtype_installed {
+            "install wtype, then restart TongueTyped"
+        } else if dotool_installed && !uinput_ready {
+            "dotool is installed but cannot open /dev/uinput - add your user to the 'input' \
+             group or add a udev rule granting write access to /dev/uinput, then restart \
+             TongueTyped"
+        } else if dotool_installed {
+            "dotool is installed but could not type here - check your compositor's \
+             input-device support, or use the clipboard output method, then restart \
+             TongueTyped"
+        } else {
+            "install dotool (it types through /dev/uinput) or use the clipboard output method, \
+             then restart TongueTyped"
+        }
+    } else if helper == "libei" {
+        "set typing_backend = \"libei\" (the native libei backend works on this session) or use \
+         the clipboard output method, then restart TongueTyped"
+    } else if dotool_installed && !uinput_ready {
+        "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or \
+         add a udev rule granting write access to /dev/uinput, then restart TongueTyped"
+    } else if dotool_installed {
+        "dotool is installed but could not type here - check your compositor's input-device \
+         support, or use the clipboard output method, then restart TongueTyped"
+    } else {
+        "install dotool (needs /dev/uinput access), then restart TongueTyped"
     }
 }
 
@@ -499,24 +797,30 @@ fn session_is_wayland() -> bool {
     std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland")
 }
 
-/// Whether this session's desktop identifies a wlroots-based compositor, the
-/// only family that implements the `zwp_virtual_keyboard_manager_v1` protocol
-/// `wtype` types through. KWin advertises `KDE`, not a wlroots name, so it
-/// takes the `dotool` branch.
-fn compositor_is_wlroots() -> bool {
-    let desktops: Vec<String> = [
-        "XDG_CURRENT_DESKTOP",
-        "XDG_SESSION_DESKTOP",
-        "DESKTOP_SESSION",
-    ]
-    .iter()
-    .filter_map(|key| std::env::var(key).ok())
-    .collect();
-    desktop_names_are_wlroots(&desktops)
+/// Whether this compositor accepts `wtype`'s protocol.
+///
+/// The registry probe is authoritative when a Wayland display is reachable.
+/// Without one, the desktop-name list is the fallback so a headless sandbox or
+/// a daemon that starts before the compositor still gets a useful answer.
+fn compositor_supports_virtual_keyboard() -> bool {
+    match crate::wayland::virtual_keyboard() {
+        Some(capability) => capability.usable(),
+        None => {
+            let desktops: Vec<String> = [
+                "XDG_CURRENT_DESKTOP",
+                "XDG_SESSION_DESKTOP",
+                "DESKTOP_SESSION",
+            ]
+            .iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .collect();
+            desktop_names_are_wlroots(&desktops)
+        }
+    }
 }
 
-/// Pure core of `compositor_is_wlroots`, kept separate so it is testable
-/// without mutating the process-global environment.
+/// Pure core of the name fallback, kept separate so it is testable without
+/// mutating the process-global environment.
 fn desktop_names_are_wlroots(desktops: &[String]) -> bool {
     const WLROOTS: [&str; 7] = [
         "sway", "hyprland", "niri", "wlroots", "river", "wayfire", "labwc",
@@ -527,12 +831,52 @@ fn desktop_names_are_wlroots(desktops: &[String]) -> bool {
     })
 }
 
-fn enigo_available() -> bool {
+/// `enigo` is the X11 path. Connect to `$DISPLAY` and ask for the XTEST
+/// extension version: no window, no event, no focus. `Enigo::new()` alone was
+/// weaker, because it can connect to an X server without XTEST and only fail
+/// on the first key.
+fn probe_enigo() -> Result<(), String> {
     if session_is_wayland() {
-        return false;
+        return Err("enigo is X11-only and this is a Wayland session".to_string());
     }
-    use enigo::{Enigo, Settings};
-    Enigo::new(&Settings::default()).is_ok()
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    let (connection, _screen) =
+        x11rb::connect(None).map_err(|error| format!("no X11 display is reachable: {error}"))?;
+    let cookie = connection
+        .xtest_get_version(2, 2)
+        .map_err(|error| format!("the XTEST extension is unavailable: {error}"))?;
+    cookie
+        .reply()
+        .map_err(|error| format!("the XTEST version probe failed: {error}"))?;
+    Ok(())
+}
+
+/// `dotool` needs the binary and permission to open `/dev/uinput`. The probe
+/// opens the device and asks for the uinput ABI version with
+/// `UI_GET_VERSION`; it never creates a device (`UI_DEV_CREATE`) and writes no
+/// event, so it leaks no node and cannot disturb the input stack. A kernel
+/// that does not answer `UI_GET_VERSION` still proves the open works.
+fn probe_dotool() -> Result<(), String> {
+    if !dotool_installed() {
+        return Err("dotool is not installed".to_string());
+    }
+    if uinput_ready() {
+        Ok(())
+    } else {
+        Err("/dev/uinput is not writable".to_string())
+    }
+}
+
+/// `libei` needs the RemoteDesktop portal interface, checked over D-Bus only.
+fn probe_libei() -> Result<(), String> {
+    if !session_is_wayland() {
+        return Err("libei needs a Wayland session".to_string());
+    }
+    if crate::libei::available() {
+        Ok(())
+    } else {
+        Err("the RemoteDesktop portal is unavailable".to_string())
+    }
 }
 
 /// Whether the `dotool` binary is installed, independent of whether the
@@ -572,21 +916,30 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     true
 }
 
-/// Whether `dotool` is present *and* can actually inject. It types through
-/// `/dev/uinput`, so a binary that is installed but whose user cannot open
-/// that device (no `input` group membership or matching udev rule) would
-/// silently type nothing - a plain binary-exists check is not enough. The
-/// device check is also what separates "installed but forbidden" from
-/// "missing", which is why presence above is a PATH lookup rather than a
-/// `dotool` self-test. Opening the device for writing is side-effect-free: a
-/// virtual device is only created by a later `UI_DEV_CREATE` ioctl, so this
-/// probe leaks no node.
-fn dotool_available() -> bool {
-    dotool_installed() && device_is_writable(std::path::Path::new("/dev/uinput"))
+/// Whether `/dev/uinput` can be opened by this user, the capability `dotool`
+/// needs. See [`uinput_version_at`] for the probe and why it creates nothing.
+fn uinput_ready() -> bool {
+    uinput_version_at(std::path::Path::new("/dev/uinput")).is_some()
 }
 
-fn device_is_writable(path: &std::path::Path) -> bool {
-    std::fs::OpenOptions::new().write(true).open(path).is_ok()
+/// Opens `path` read-write and returns the uinput ABI version, or `Some(0)`
+/// when the ioctl is unsupported. `None` means the device could not be opened,
+/// which is the permission failure the warning text names.
+fn uinput_version_at(path: &std::path::Path) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
+    // _IOR('U', 45, unsigned int): the uinput ABI version, no device created.
+    const UI_GET_VERSION: libc::c_ulong = 0x8004_552D;
+    let mut version: libc::c_uint = 0;
+    // SAFETY: `file` owns a valid /dev/uinput descriptor for this call, and
+    // the ioctl writes one `unsigned int` into `version`.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), UI_GET_VERSION, &mut version) };
+    Some(if result == 0 { version as u32 } else { 0 })
 }
 
 fn write_dotool_commands(writer: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
@@ -930,7 +1283,7 @@ mod tests {
         // native libei backend is available on KDE/GNOME Wayland: the remedy
         // is to switch to libei, never to install a helper or to claim the
         // available libei is unavailable.
-        let warning = warning_for("libei", false, false);
+        let warning = warning_for("libei", true, true, true);
         assert!(
             warning.contains("libei") && warning.contains("typing_backend"),
             "the warning must name switching to libei: {warning}"
@@ -962,13 +1315,13 @@ mod tests {
 
     #[test]
     fn dotool_warning_states_the_uinput_requirement() {
-        let dotool = warning_for("dotool", false, false);
+        let dotool = warning_for("dotool", false, false, false);
         assert!(dotool.contains("install dotool"));
         assert!(
             dotool.contains("/dev/uinput"),
             "the dotool warning must state its device requirement: {dotool}"
         );
-        let wtype = warning_for("wtype", false, false);
+        let wtype = warning_for("wtype", false, false, false);
         assert!(wtype.contains("install wtype"));
         assert!(!wtype.contains("dotool"));
         assert!(!dotool.contains("wtype"));
@@ -979,7 +1332,7 @@ mod tests {
         // `dotool` present but `/dev/uinput` unreadable is the state the
         // packaged install creates when it grants no `input` group or udev
         // access: the warning must not tell the user to install it again.
-        let warning = warning_for("dotool", true, false);
+        let warning = warning_for("dotool", true, true, false);
         assert!(
             !warning.contains("install dotool"),
             "an installed dotool must not be reported missing: {warning}"
@@ -995,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn device_is_writable_reflects_real_write_access() {
+    fn uinput_probe_reports_openability_not_a_created_device() {
         let dir = std::env::temp_dir().join(format!(
             "tt-uinput-probe-{}-{}",
             std::process::id(),
@@ -1007,9 +1360,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("uinput");
         std::fs::write(&file, b"").unwrap();
-        assert!(device_is_writable(&file), "a writable file must pass");
         assert!(
-            !device_is_writable(&dir.join("missing")),
+            uinput_version_at(&file).is_some(),
+            "an openable path must pass even when the ioctl is unsupported"
+        );
+        assert!(
+            uinput_version_at(&dir.join("missing")).is_none(),
             "a missing device must fail the dotool probe"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1054,11 +1410,185 @@ mod tests {
     }
 
     #[test]
-    fn auto_backend_choice_is_memoized_across_calls() {
-        let first = cached_auto_backend();
-        let second = cached_auto_backend();
-        assert_eq!(first, second);
-        assert_eq!(first, probe_type_backend());
+    fn a_warning_never_tells_the_user_to_install_an_installed_helper() {
+        // The live bug this task fixes: wtype and dotool were both installed
+        // and working, yet the no-helper warning told the user to install one
+        // of them. Every branch that names an installed helper must say what
+        // is actually wrong instead.
+        let wtype = warning_for("wtype", true, false, false);
+        assert!(
+            !wtype.contains("install wtype") && wtype.contains("wtype is installed"),
+            "an installed wtype must not be reported missing: {wtype}"
+        );
+        let dotool = warning_for("dotool", true, true, false);
+        assert!(
+            !dotool.contains("install dotool") && dotool.contains("/dev/uinput"),
+            "an installed dotool must not be reported missing: {dotool}"
+        );
+        let dotool_ready = warning_for("dotool", true, true, true);
+        assert!(
+            !dotool_ready.contains("install dotool"),
+            "a usable dotool must not be reported missing: {dotool_ready}"
+        );
+        // The wtype branch can also be reached when wtype is installed but the
+        // compositor rejects the protocol; it must check dotool's install and
+        // device state before advising another install.
+        let wtype_with_forbidden_dotool = warning_for("wtype", true, true, false);
+        assert!(
+            !wtype_with_forbidden_dotool.contains("install dotool")
+                && wtype_with_forbidden_dotool.contains("/dev/uinput"),
+            "an installed dotool must get the permission remedy: {wtype_with_forbidden_dotool}"
+        );
+        let wtype_with_usable_dotool = warning_for("wtype", true, true, true);
+        assert!(
+            !wtype_with_usable_dotool.contains("install dotool"),
+            "a usable dotool must not be reported missing: {wtype_with_usable_dotool}"
+        );
+    }
+
+    fn plan_with(configured: &str, working: &[&str]) -> TypingPlan {
+        let display = DisplayIdentity {
+            key: Some("test-display".to_string()),
+        };
+        resolve_typing_with(configured, display, &|backend| {
+            if working.contains(&backend) {
+                Ok(())
+            } else {
+                Err(format!("{backend} probe failed"))
+            }
+        })
+    }
+
+    #[test]
+    fn auto_picks_the_first_working_backend_in_probe_order() {
+        assert_eq!(
+            plan_with("auto", &["wtype", "dotool"]).resolved.as_deref(),
+            Some("wtype")
+        );
+        assert_eq!(
+            plan_with("auto", &["dotool"]).resolved.as_deref(),
+            Some("dotool")
+        );
+        assert_eq!(
+            plan_with("auto", &["libei"]).resolved.as_deref(),
+            Some("libei")
+        );
+        assert_eq!(plan_with("auto", &[]).resolved, None);
+        let dead = plan_with("auto", &[]);
+        assert!(
+            dead.warning()
+                .as_deref()
+                .is_some_and(|warning| warning.contains("no typing helper works")),
+            "{dead:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_backend_that_works_stays_selected() {
+        let plan = plan_with("libei", &["wtype", "libei"]);
+        assert_eq!(plan.configured, "libei");
+        assert_eq!(plan.resolved.as_deref(), Some("libei"));
+        assert_eq!(plan.warning(), None);
+        assert_eq!(plan.reasons, vec![]);
+    }
+
+    #[test]
+    fn a_pinned_backend_that_cannot_work_is_replaced_and_reported() {
+        // The live bug: libei pinned on Mango, while wtype works. The plan
+        // must use wtype and say so instead of attempting libei every time.
+        let plan = plan_with("libei", &["wtype"]);
+        assert_eq!(plan.configured, "libei");
+        assert_eq!(plan.resolved.as_deref(), Some("wtype"));
+        let warning = plan.warning().unwrap();
+        assert!(warning.contains("libei"), "{warning}");
+        assert!(warning.contains("probe failed"), "{warning}");
+        assert!(warning.contains("using 'wtype'"), "{warning}");
+        assert!(plan
+            .reasons
+            .iter()
+            .any(|failure| failure.backend == "libei"));
+    }
+
+    #[test]
+    fn a_pinned_backend_with_no_fallback_names_the_dead_end() {
+        let plan = plan_with("libei", &[]);
+        assert_eq!(plan.resolved, None);
+        let warning = plan.failure_message();
+        assert!(warning.contains("libei"), "{warning}");
+        assert!(
+            warning.contains("no other typing helper works"),
+            "{warning}"
+        );
+        assert_eq!(plan.reasons.len(), 4, "every backend was tried");
+    }
+
+    #[test]
+    fn a_pinned_dotool_failure_names_the_uinput_requirement() {
+        let plan = plan_with("dotool", &["wtype"]);
+        assert_eq!(plan.resolved.as_deref(), Some("wtype"));
+        let warning = plan.warning().unwrap();
+        assert!(warning.contains("dotool"), "{warning}");
+        assert!(warning.contains("probe failed"), "{warning}");
+    }
+
+    #[test]
+    fn an_unresolved_plan_wants_a_reprobe_and_a_resolved_one_does_not() {
+        let config = OutputConfig::default();
+        let dead = plan_with("auto", &[]);
+        assert!(dead.needs_reprobe(&config), "nothing working must retry");
+        let working = resolve_typing_with("auto", DisplayIdentity::current(), &|_| Ok(()));
+        assert!(
+            !working.needs_reprobe(&config),
+            "a resolved plan on the same display and config must not probe again"
+        );
+        let mut changed = config.clone();
+        changed.typing_backend = "dotool".to_string();
+        assert!(
+            working.needs_reprobe(&changed),
+            "a config change must invalidate the plan"
+        );
+    }
+
+    #[test]
+    fn a_changed_display_invalidates_a_resolved_plan() {
+        let config = OutputConfig::default();
+        let plan = TypingPlan {
+            configured: "auto".to_string(),
+            resolved: Some("wtype".to_string()),
+            reasons: Vec::new(),
+            display: DisplayIdentity {
+                key: Some("wayland:wayland-0:1:2:3:4".to_string()),
+            },
+        };
+        assert!(
+            !plan.needs_reprobe_for(
+                &config,
+                &DisplayIdentity {
+                    key: Some("wayland:wayland-0:1:2:3:4".to_string())
+                }
+            ),
+            "the same display identity must stay valid"
+        );
+        assert!(
+            plan.needs_reprobe_for(
+                &config,
+                &DisplayIdentity {
+                    key: Some("wayland:wayland-1:9:8:7:6".to_string())
+                }
+            ),
+            "a replaced compositor socket must trigger a re-probe"
+        );
+    }
+
+    #[test]
+    fn a_failure_record_keeps_the_display_it_probed() {
+        let plan = plan_with("auto", &["wtype"]);
+        assert_eq!(
+            plan.display,
+            DisplayIdentity {
+                key: Some("test-display".to_string())
+            }
+        );
     }
 
     #[test]

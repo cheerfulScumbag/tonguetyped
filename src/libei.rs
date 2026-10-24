@@ -67,29 +67,76 @@ const KEYBOARD_WAIT: Duration = Duration::from_secs(10);
 const RESTORE_TOKEN_FILE: &str = "libei-restore-token";
 
 /// Whether this session can type through the portal: a Wayland session whose
-/// desktop is one of the two compositors that route emulated input through the
-/// RemoteDesktop portal. This is deliberately a cheap, side-effect-free check:
-/// opening the portal would show the authorization dialog, so the probe must
-/// never do it (the `eitype` helper path learned the same lesson by probing
-/// with a PATH lookup, `V:src/output/eitype.rs:246-256`).
+/// portal frontend exports `org.freedesktop.portal.RemoteDesktop`.
 ///
-/// The probe is compositor-based, not version-based. A KDE 6.0 or GNOME 44
-/// session reports available here but answers `ConnectToEIS` with an error on
-/// first use, which [`run`] turns into the normal clipboard fallback.
+/// The probe is a plain D-Bus interface check, not a portal session: it never
+/// calls `CreateSession`, `SelectDevices`, `Start`, or `ConnectToEIS`, so it
+/// cannot raise the consent dialog. That keeps it safe to run at daemon load
+/// and in the configuration UIs. It is capability-based, not
+/// compositor-name-based: a session whose portal does not implement
+/// RemoteDesktop (wlroots portals do not) answers false without opening
+/// anything. A KDE 6.0 or GNOME 44 session still answers true here and may
+/// fail `ConnectToEIS` on first use, which [`run`] turns into the normal
+/// clipboard fallback.
 pub fn available() -> bool {
-    wayland_session() && desktop_routes_ei(&session_desktops())
+    wayland_session() && portal_has_remote_desktop()
 }
 
-/// The pure core of [`available`], kept separate so the classification is
-/// testable without mutating the process-global environment.
-fn desktop_routes_ei(desktops: &[String]) -> bool {
-    desktops
-        .iter()
-        .flat_map(|desktop| desktop.split(':'))
-        .any(|component| {
-            let component = component.trim();
-            component.eq_ignore_ascii_case("KDE") || component.eq_ignore_ascii_case("GNOME")
+/// Reads only the portal's D-Bus interface list. Runs on the shared portal
+/// runtime from its own thread so a blocking join never nests inside a tokio
+/// runtime, the same shape [`portal_stream`] uses. Bounded so a wedged bus
+/// cannot delay daemon startup.
+fn portal_has_remote_desktop() -> bool {
+    std::thread::spawn(|| {
+        crate::activation::portal_runtime().block_on(async {
+            let probe = async {
+                let connection = zbus::Connection::session().await.ok()?;
+                let has_owner: bool = connection
+                    .call_method(
+                        Some("org.freedesktop.DBus"),
+                        "/org/freedesktop/DBus",
+                        Some("org.freedesktop.DBus"),
+                        "NameHasOwner",
+                        &("org.freedesktop.portal.Desktop",),
+                    )
+                    .await
+                    .ok()?
+                    .body()
+                    .deserialize()
+                    .ok()?;
+                if !has_owner {
+                    return None;
+                }
+                let xml: String = connection
+                    .call_method(
+                        Some("org.freedesktop.portal.Desktop"),
+                        "/org/freedesktop/portal/desktop",
+                        Some("org.freedesktop.DBus.Introspectable"),
+                        "Introspect",
+                        &(),
+                    )
+                    .await
+                    .ok()?
+                    .body()
+                    .deserialize()
+                    .ok()?;
+                Some(xml_has_remote_desktop(&xml))
+            };
+            tokio::time::timeout(std::time::Duration::from_millis(750), probe)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false)
         })
+    })
+    .join()
+    .ok()
+    .unwrap_or(false)
+}
+
+/// Pure core of the introspection check, kept separate for a headless test.
+fn xml_has_remote_desktop(xml: &str) -> bool {
+    xml.contains("interface name=\"org.freedesktop.portal.RemoteDesktop\"")
 }
 
 /// Whether this session is Wayland. A daemon started by a systemd user unit can
@@ -739,27 +786,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kde_and_gnome_desktops_route_ei_and_others_do_not() {
-        for (desktop, routes) in [
-            ("KDE", true),
-            ("kde", true),
-            ("KDE:Plasma", true),
-            ("GNOME", true),
-            ("ubuntu:GNOME", true),
-            ("GNOME-Classic:GNOME", true),
-            ("sway", false),
-            ("Hyprland", false),
-            ("XFCE", false),
-            ("X-Cinnamon", false),
-            ("", false),
-        ] {
-            assert_eq!(
-                desktop_routes_ei(&[desktop.to_string()]),
-                routes,
-                "{desktop}"
-            );
-        }
-        assert!(!desktop_routes_ei(&[]));
+    fn introspection_requires_the_remote_desktop_interface() {
+        let with = r#"<node>
+            <interface name="org.freedesktop.portal.ScreenCast"/>
+            <interface name="org.freedesktop.portal.RemoteDesktop"/>
+        </node>"#;
+        let without = r#"<node>
+            <interface name="org.freedesktop.portal.ScreenCast"/>
+        </node>"#;
+        assert!(xml_has_remote_desktop(with));
+        assert!(!xml_has_remote_desktop(without));
+        assert!(!xml_has_remote_desktop(""));
+        // A substring in an unrelated name must not count.
+        assert!(!xml_has_remote_desktop(
+            r#"<interface name="org.freedesktop.portal.RemoteDesktopNot"/>"#
+        ));
     }
 
     #[test]

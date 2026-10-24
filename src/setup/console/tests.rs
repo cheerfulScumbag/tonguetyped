@@ -31,6 +31,7 @@ fn capabilities() -> Capabilities {
                 unavailable: Some("not compiled in".into()),
             },
         ],
+        typing_warning: None,
     }
 }
 
