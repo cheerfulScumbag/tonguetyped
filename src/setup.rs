@@ -307,7 +307,7 @@ impl Capabilities {
 
     /// Where the configuration UIs open their output-method list. Saving
     /// transcripts is off by default, so a fresh config's `none` would deliver
-    /// nothing; in that case the wizard defaults to `type`, the primary
+    /// nothing; in that case setup defaults to `type`, the primary
     /// dictation path. A saved method that works here still wins, and
     /// `output_index` falls back to `none` when typing cannot work.
     pub(crate) fn setup_output_index(&self, config: &Config) -> usize {
