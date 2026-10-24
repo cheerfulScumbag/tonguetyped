@@ -339,6 +339,7 @@
               ' config.json
               test "$(stat -c %a $XDG_CONFIG_HOME/tonguetyped/config.toml)" = 600
               test ${pkgs.lib.escapeShellArg (builtins.toJSON service.wantedBy)} = '["graphical-session.target"]'
+              test ${pkgs.lib.escapeShellArg service.serviceConfig.RestartPreventExitStatus} = "3"
               touch $out
             '';
       }
