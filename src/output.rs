@@ -723,38 +723,87 @@ fn recommended_helper() -> &'static str {
     }
 }
 
+/// The one decision tree shared by [`warning_for`] (a full sentence for the
+/// doctor and config UIs) and [`remedy_for`] (the fragment embedded in
+/// `TypingPlan::failure_message`), so a new branch is added once and both
+/// wrappers stay in sync.
+enum HelperRemedyCase {
+    InstallWtype,
+    WtypeOkDotoolNeedsUinput,
+    WtypeOkDotoolInstalled,
+    WtypeOkInstallDotool,
+    Libei,
+    DotoolNeedsUinput,
+    DotoolInstalled,
+    InstallDotool,
+}
+
+fn helper_remedy_case(
+    helper: &str,
+    wtype_installed: bool,
+    dotool_installed: bool,
+    uinput_ready: bool,
+) -> HelperRemedyCase {
+    use HelperRemedyCase::*;
+    if helper == "wtype" {
+        if !wtype_installed {
+            InstallWtype
+        } else if dotool_installed && !uinput_ready {
+            WtypeOkDotoolNeedsUinput
+        } else if dotool_installed {
+            WtypeOkDotoolInstalled
+        } else {
+            WtypeOkInstallDotool
+        }
+    } else if helper == "libei" {
+        Libei
+    } else if dotool_installed && !uinput_ready {
+        DotoolNeedsUinput
+    } else if dotool_installed {
+        DotoolInstalled
+    } else {
+        InstallDotool
+    }
+}
+
 fn warning_for(
     helper: &str,
     wtype_installed: bool,
     dotool_installed: bool,
     uinput_ready: bool,
 ) -> &'static str {
-    if helper == "wtype" {
-        if !wtype_installed {
-            "No typing helper found - install wtype, then restart TongueTyped."
-        } else if dotool_installed && !uinput_ready {
+    use HelperRemedyCase::*;
+    match helper_remedy_case(helper, wtype_installed, dotool_installed, uinput_ready) {
+        InstallWtype => "No typing helper found - install wtype, then restart TongueTyped.",
+        WtypeOkDotoolNeedsUinput => {
             "wtype is installed but this compositor did not accept the virtual-keyboard \
              protocol, and dotool cannot open /dev/uinput - add your user to the 'input' \
              group or add a udev rule granting write access to /dev/uinput, then restart \
              TongueTyped."
-        } else if dotool_installed {
+        }
+        WtypeOkDotoolInstalled => {
             "wtype is installed but this compositor did not accept the virtual-keyboard \
              protocol, and dotool could not type here - check your compositor's \
              input-device support, or use the clipboard output method, then restart \
              TongueTyped."
-        } else {
+        }
+        WtypeOkInstallDotool => {
             "wtype is installed but this compositor did not accept the virtual-keyboard \
              protocol - install dotool (needs /dev/uinput access) or use the clipboard \
              output method, then restart TongueTyped."
         }
-    } else if helper == "libei" {
-        "The configured typing backend is unavailable - the native libei backend works on this session; set typing_backend = \"libei\" (or use the clipboard output method), then restart TongueTyped."
-    } else if dotool_installed && !uinput_ready {
-        "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or add a udev rule granting write access to /dev/uinput, then restart TongueTyped."
-    } else if dotool_installed {
-        "dotool is installed but could not type here - check your compositor's input-device support, or use the clipboard output method, then restart TongueTyped."
-    } else {
-        "No typing helper found - install dotool (needs /dev/uinput access), then restart TongueTyped."
+        Libei => {
+            "The configured typing backend is unavailable - the native libei backend works on this session; set typing_backend = \"libei\" (or use the clipboard output method), then restart TongueTyped."
+        }
+        DotoolNeedsUinput => {
+            "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or add a udev rule granting write access to /dev/uinput, then restart TongueTyped."
+        }
+        DotoolInstalled => {
+            "dotool is installed but could not type here - check your compositor's input-device support, or use the clipboard output method, then restart TongueTyped."
+        }
+        InstallDotool => {
+            "No typing helper found - install dotool (needs /dev/uinput access), then restart TongueTyped."
+        }
     }
 }
 
@@ -764,32 +813,28 @@ fn remedy_for(
     dotool_installed: bool,
     uinput_ready: bool,
 ) -> &'static str {
-    if helper == "wtype" {
-        if !wtype_installed {
-            "install wtype, then restart TongueTyped"
-        } else if dotool_installed && !uinput_ready {
+    use HelperRemedyCase::*;
+    match helper_remedy_case(helper, wtype_installed, dotool_installed, uinput_ready) {
+        InstallWtype => "install wtype, then restart TongueTyped",
+        WtypeOkDotoolNeedsUinput | DotoolNeedsUinput => {
             "dotool is installed but cannot open /dev/uinput - add your user to the 'input' \
              group or add a udev rule granting write access to /dev/uinput, then restart \
              TongueTyped"
-        } else if dotool_installed {
+        }
+        WtypeOkDotoolInstalled | DotoolInstalled => {
             "dotool is installed but could not type here - check your compositor's \
              input-device support, or use the clipboard output method, then restart \
              TongueTyped"
-        } else {
+        }
+        WtypeOkInstallDotool => {
             "install dotool (it types through /dev/uinput) or use the clipboard output method, \
              then restart TongueTyped"
         }
-    } else if helper == "libei" {
-        "set typing_backend = \"libei\" (the native libei backend works on this session) or use \
-         the clipboard output method, then restart TongueTyped"
-    } else if dotool_installed && !uinput_ready {
-        "dotool is installed but cannot open /dev/uinput - add your user to the 'input' group or \
-         add a udev rule granting write access to /dev/uinput, then restart TongueTyped"
-    } else if dotool_installed {
-        "dotool is installed but could not type here - check your compositor's input-device \
-         support, or use the clipboard output method, then restart TongueTyped"
-    } else {
-        "install dotool (needs /dev/uinput access), then restart TongueTyped"
+        Libei => {
+            "set typing_backend = \"libei\" (the native libei backend works on this session) or use \
+             the clipboard output method, then restart TongueTyped"
+        }
+        InstallDotool => "install dotool (needs /dev/uinput access), then restart TongueTyped",
     }
 }
 

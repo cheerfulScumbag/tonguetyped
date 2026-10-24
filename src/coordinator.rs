@@ -698,15 +698,24 @@ impl CoordinatorRuntime for ProductionRuntime {
         // changed, or the last answer was "nothing works": a probe that ran
         // before the compositor or portal was ready must not disable typing
         // for the life of the daemon.
-        let plan = {
+        let needs_reprobe = self
+            .typing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .needs_reprobe(&config.output);
+        let plan = if needs_reprobe {
+            let resolved = crate::output::resolve_typing(&config.output);
             let mut plan = self
                 .typing
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if plan.needs_reprobe(&config.output) {
-                *plan = crate::output::resolve_typing(&config.output);
-            }
+            *plan = resolved;
             plan.clone()
+        } else {
+            self.typing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
         };
         crate::output::output_text_with_plan(text, &config.output, &plan)
     }
