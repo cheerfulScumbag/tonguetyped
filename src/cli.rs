@@ -1,8 +1,6 @@
 //! Clap argument definitions, kept as a library module (rather than private to
-//! `main.rs`) so `tui::home_items` can introspect the exact same subcommand names
-//! and `about` text that `--help` renders (`Cli::command()`), instead of
-//! maintaining a second, driftable copy of each command's name/description
-//! for the dashboard's Commands screen.
+//! `main.rs`) so `build.rs` can render the man pages and shell completions
+//! from the exact same definition `--help` uses.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -14,9 +12,9 @@ use std::path::PathBuf;
     about = "Linux dictation application"
 )]
 pub struct Cli {
-    /// Running with no subcommand opens the interactive dashboard
-    /// (`crate::tui::run`) instead of erroring - every subcommand below
-    /// keeps its exact existing CLI behavior.
+    /// Running with no subcommand opens the interactive setup console, the
+    /// same one `setup` opens - every subcommand below keeps its exact
+    /// existing CLI behavior.
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

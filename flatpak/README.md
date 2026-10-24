@@ -125,7 +125,7 @@ The source manifest built, installed, and ran with
 
 ## Behavior inside the sandbox
 
-The desktop entry (`Exec=tonguetyped`, `Terminal=true`) opens the TUI dashboard.
+The desktop entry (`Exec=tonguetyped`, `Terminal=true`) opens the setup console.
 `tonguetyped autostart enable` inside a Flatpak uses the
 `org.freedesktop.portal.Background` portal with `autostart=true` and the
 command line `tonguetyped daemon`, because the host desktop ignores autostart

@@ -24,7 +24,7 @@ account, no cloud, and no audio ever leaves the computer.
 
 It is built for the terminal: one daemon owns the microphone and the speech
 model, a small CLI drives it, and running `tonguetyped` with no arguments opens
-an interactive dashboard for every setting.
+an interactive settings console for every setting.
 
 ---
 
@@ -46,7 +46,7 @@ an interactive dashboard for every setting.
   clipboard. Off by default.
 - **Unobtrusive feedback.** A click-through overlay shows recording,
   transcribing, success, and failure - nine styles, on any number of screens.
-- **Terminal-native control.** Script it, or use the dashboard. Every command is
+- **Terminal-native control.** Script it, or use the settings console. Every command is
   a plain subcommand over a local Unix socket.
 - **Your transcripts stay yours.** Saving is opt-in: history is a local SQLite
   database with retention you control, plus an optional plain-text export
@@ -68,15 +68,14 @@ sudo dnf install ./tonguetyped-gpu-vulkan-*.rpm         # Fedora / RHEL
 cargo build --release                                   # build from source
 
 # 2. Configure and start on login:
-tonguetyped setup
+tonguetyped
 tonguetyped autostart enable
 ```
 
-`tonguetyped setup` does not choose a dictation key for you. The "Start or stop
+`tonguetyped` does not choose a dictation key for you. The "Start or stop
 dictation" action is registered with your desktop by the daemon, and pressing
-Ctrl+R in setup opens the desktop's own shortcut dialog to pick one - the
-dashboard's Shortcut screen offers an explicit action to open that same dialog.
-If you skip it, no key is bound. See
+Ctrl+R in the settings console (or Enter on its Shortcut row) opens the
+desktop's own shortcut dialog to pick one. If you skip it, no key is bound. See
 [the desktop shortcut](#the-desktop-shortcut) for why.
 
 Sign out and back in after the first install so your desktop's portal discovers
@@ -162,8 +161,8 @@ daemon in each user's graphical session.
 - `settings` takes any key from [Configuration](#configuration). Common keys
   are typed, so a misspelled value fails at evaluation time.
 
-`config.toml` stays a normal writable file, because the dashboard, `tonguetyped
-setup`, and the daemon itself all write it. The modules merge the keys you set
+`config.toml` stays a normal writable file, because the `tonguetyped` settings
+console and the daemon itself both write it. The modules merge the keys you set
 over it: those keys are reset to your value, and every other key keeps what the
 app last wrote. Removing a key from `settings` leaves its last value in the
 file. home-manager applies settings on every activation and runs `tonguetyped
@@ -250,7 +249,7 @@ development files:
 
 ```sh
 cargo build --release
-./target/release/tonguetyped setup
+./target/release/tonguetyped
 ./target/release/tonguetyped daemon
 ```
 
@@ -277,7 +276,8 @@ falling back to CPU; setting any single name (`cpu`, `vulkan`, `cuda`, `rocm`,
 
 ### Setup
 
-`tonguetyped setup` opens a four-tab settings utility in the terminal:
+Running `tonguetyped` with no subcommand opens a four-tab settings console in
+the terminal; `tonguetyped setup` opens the same console:
 
 | Tab | What it holds |
 | --- | --- |
@@ -286,7 +286,8 @@ falling back to CPU; setting any single name (`cpu`, `vulkan`, `cuda`, `rocm`,
 | **[3] Output & Delivery** | The delivery method (Type, Paste, Clipboard, None) and the settings that method uses (typing helper, paste keys, pressing Enter after the text), spoken punctuation, filler removal, replacements, the cleanup command and its timeout, and transcript history with its retention limits and export folder |
 | **[4] Interface & System** | Overlay on or off, position, style, look, and waveform shape; a test that shows the real overlay on your desktop for four seconds; daemon Start, Stop, and Restart; and starting TongueTyped when you sign in |
 
-The header shows the daemon's state and inference backend while setup runs.
+The header shows the TongueTyped wordmark with the daemon's state and inference
+backend while setup runs.
 Setup is keyboard-only, and the footer lists the keys for whatever has focus:
 
 | Key | Action |
@@ -314,68 +315,15 @@ card instead of treating it as key presses.
 Setup paints its own dark background, so it reads the same on a light
 terminal. With `NO_COLOR` set it uses no colours; selection and focus stay
 marked with symbols and reverse video. When standard input or output is not a
-terminal, `tonguetyped setup` falls back to numbered prompts read one per
-line, so it stays scriptable.
-
-### The dashboard
-
-Run `tonguetyped` with no subcommand:
-
-```sh
-tonguetyped
-```
-
-A landing splash shows the TongueTyped bubble mark and tagline; any key skips
-it. The dashboard then opens on the **Split Deck**: a live rail listing five
-destinations - **Speak**, **Models**, **Output**, **History**, and **Setup** -
-with the daemon state and active model, and a pane for the selected
-destination. The dashboard is keyboard-only; there is no mouse support.
-
-Press `s`, `m`, `o`, `h`, or `p` to jump straight to a destination, Up/Down
-to move through the pane's rows or fields (on **Speak** it moves between
-destinations), `?` for the key reference, and `q` to quit.
-**Speak** shows the activation instruction and a simulated mic level in a
-dark-blue wave field; `t` or Enter starts or stops dictation, `c` cancels, and
-`w` turns the wave motion on or off. **Models** lists the catalog with
-`live`/`final` wording and the selected model's detail; Enter or `a` activates
-the highlighted model, `d` downloads it without making it active, and `/`
-cycles the filter; a running download shows a progress gauge. **Output** picks
-the delivery method and toggles transcript history with Space; **History**
-toggles it with Space and edits the retention fields. Both save on Enter.
-**Setup** lists the five chapters (Model, Output, History, App, Review): Enter
-opens the [setup utility](#setup), `g` opens the full Settings screen below, and
-`c` opens Commands.
-
-The full Settings screen groups the fifteen configuration areas into four
-sections - **Language & model**, **Capture & activation**, **Output**, and
-**App** - with one row each for Model, Inference backend, Translation,
-Decoding, Text processing, Microphone, Activation, Shortcut, Transcript
-output, Typing backend, Transcript folder, History retention, Startup,
-Overlay, and Media pause. A Commands row below them opens a separate screen
-listing the remaining commands, where Up/Down selects a command and Enter runs
-it. Selecting a settings row opens a screen that edits just that area, with the
-same live microphone preview and shortcut dialog that setup uses. The
-**Transcript output** screen also holds the **Save transcript history** toggle,
-which is off by default. Esc from the Settings overview returns to the Deck.
-
-On the full Settings screen, the value steppers and choice lists share one
-navigation grammar: Up/Down moves between rows, Left/Right changes the
-highlighted choice in either direction, Enter saves, and Esc (or Backspace)
-goes back. On Microphone,
-Activation, Translation, Typing backend, Startup, Media pause, Overlay, and the
-text forms, backing out also commits the highlighted value. Model, Inference
-backend, Transcript output, Shortcut, and Daemon apply only on Enter. Free-text
-rows keep Left/Right for the cursor and Backspace for deleting, with Esc as the
-way back. The Overlay screen previews the highlighted style, look, waveform
-shape, and position as you step them, so a choice is visible before Enter or
-backing out saves it.
+terminal, `tonguetyped` and `tonguetyped setup` fall back to numbered prompts
+read one per line, so they stay scriptable.
 
 ### Commands
 
 | Command | What it does |
 | --- | --- |
-| `tonguetyped` | Open the interactive dashboard |
-| `tonguetyped setup` | Configure everything interactively |
+| `tonguetyped` | Open the interactive settings console |
+| `tonguetyped setup` | Open the same settings console |
 | `tonguetyped daemon` | Start the daemon (foreground) |
 | `tonguetyped daemon stop` / `restart` | Gracefully stop, or stop and start fresh |
 | `tonguetyped start` / `stop` / `toggle` | Control recording |
@@ -399,9 +347,9 @@ holds the lock.
 TongueTyped registers the action **"Start or stop dictation"** with your
 desktop's global-shortcuts portal but deliberately never chooses a key for it.
 The binding belongs to the desktop, so you set it in your own shortcut dialog -
-KDE's System Settings, GNOME's Keyboard settings, and so on. The dashboard's
-Shortcut screen offers an explicit action to open that dialog for you, and
-Ctrl+R in `tonguetyped setup` does the same.
+KDE's System Settings, GNOME's Keyboard settings, and so on. The Shortcut row
+on the settings console's Audio tab opens that dialog for you, and Ctrl+R
+anywhere in the console does the same.
 
 This means a fresh install starts **unbound**: nothing responds until you assign
 a key. `tonguetyped shortcut-test` waits up to 15 seconds for you to press
@@ -409,7 +357,7 @@ whatever key you have bound, reporting whether the press was actually detected.
 While the daemon runs, it asks the daemon's own listener, so the test never
 opens a competing shortcut session; with no daemon, it uses its own session.
 
-Activation comes in two modes, set from the dashboard or `config.toml`:
+Activation comes in two modes, set from the settings console or `config.toml`:
 
 - **Hold** (default) - record while the key is held, stop when released.
 - **Toggle** - press once to start, press again to stop.
@@ -484,8 +432,8 @@ fields; the tooltip then also lists `model`, `backend` and `device`, while
 
 ### Pausing media while dictating
 
-Set `audio.pause_media = true` (or pick it on the dashboard's Media pause
-screen) to pause music and videos while you dictate. When a recording starts,
+Set `audio.pause_media = true` (or tick **Pause media while dictating** on the
+settings console's Audio tab) to pause music and videos while you dictate. When a recording starts,
 every MPRIS media player that is playing is paused; when the recording ends,
 whether stopped, cancelled, or failed, those same players are resumed. A
 player you stopped yourself in the meantime is left alone. It is off by
@@ -541,8 +489,8 @@ sweep with your voice. The `plain` look is the resting shape with no waveform.
 Loud speech is a big response; silence is calm, with the waveform's quiet
 stretches rendered as tiny dots.
 
-To see a combination before saving it, run **Test Overlay on Desktop** in
-`tonguetyped setup`'s Interface & System tab: it shows the real overlay on your
+To see a combination before saving it, run **Test Overlay on Desktop** on the
+settings console's Interface & System tab. It shows the real overlay on your
 desktop for four seconds with the style, position, look, and shape set there,
 and follows any change you make while it is up.
 
@@ -580,11 +528,11 @@ feedback_volume = 0.7
 ### Transcript output
 
 The configuration file defaults `output.method` to `none`, which delivers
-nothing. On a fresh install with no `config.toml` yet, `tonguetyped setup`
-starts on `type` when a typing helper is available, so saving from setup types
-into the focused application. An existing `none` is left alone, with a warning
-in setup while saving transcripts is off. Pick a method in the dashboard's **Transcript output** screen or
-in `tonguetyped setup`:
+nothing. On a fresh install with no `config.toml` yet, the settings console
+starts on `type` when a typing helper is available, so saving from the console
+types into the focused application. An existing `none` is left alone, with a
+warning while saving transcripts is off. Pick a method on the settings
+console's Output tab:
 
 | `output.method` | What happens to the transcript |
 | --- | --- |
@@ -619,11 +567,10 @@ application and reports that it could not verify delivery itself.
 Saving transcripts is opt-in. A fresh install leaves `history.enabled` off, so
 dictation only types the text into the focused application and writes no
 database or transcript files. Turn on **Save transcript history** on the
-dashboard's **Transcript output** screen or in `tonguetyped setup` to keep
-transcripts. While it is off, the retention and transcript-folder settings are
-disabled. An existing configuration that already has `enabled = true` keeps
-saving until you turn it off; upgrading leaves it on, and the dashboard shows a
-notice naming **Transcript output > Save transcript history** while it is.
+settings console's Output tab to keep transcripts. While it is off, the
+retention and transcript-folder settings are hidden. An existing configuration
+that already has `enabled = true` keeps saving until you turn it off; upgrading
+leaves it on.
 
 When history is enabled, transcripts are stored in
 `$XDG_DATA_HOME/tonguetyped/history.db` with user-only permissions. Two
@@ -683,11 +630,11 @@ post_process_command = ""            # command: transcript on stdin, cleaned tex
 post_process_timeout_seconds = 10    # kill the command after this and keep the text
 
 [text.replacements]
-"vox type" = "Voxtype"               # fix the same mistranscription every time
+alot = "a lot"                       # fix the same mistranscription every time
 ```
 
 The replacement table is applied case-insensitively and only on whole words, so
-`vox type` never rewrites part of `vox typed`. Spoken punctuation turns spoken
+`alot` never rewrites part of `zealots`. Spoken punctuation turns spoken
 words into symbols (`comma`, `period`, `open paren`, `close brace`, `new line`,
 `equals`, and so on) for dictating code. Filler removal drops unambiguous
 English interjections (`um`, `uh`, `hmm`, ...), and runs only when
@@ -726,9 +673,8 @@ Whether a model can do this is a property of the model, not a setting, so the
 live decode runs the way Handy does it. Whether the words are *shown* is your
 call: choose a live-capable style's `live-text` look (see "Overlay" above) to
 see them. `tonguetyped model list` marks the streaming models with a `live` tag
-under **STREAMING** (or `live (en)` for the English-only ones), the dashboard's
-**Models** pane labels them `live` in its STREAM column, and the full Model
-settings screen marks them `live` in its LIVE column; the rest of the catalog
+under **STREAMING** (or `live (en)` for the English-only ones), and the
+settings console's model table marks them `live` in its Live column; the rest of the catalog
 produces no live text and shows only the recording indicator.
 
 Four things to know before choosing a streaming model:
@@ -852,8 +798,8 @@ selects it explicitly. If the portal is unavailable (an older KDE or GNOME, or a
 denied request), typing falls back to leaving the transcript on the clipboard.
 
 The Nix package and the AUR package both carry the helpers, so a normal install
-works out of the box. When a method's helper is missing, the dashboard and the
-setup utility say so and name the remedy for your compositor - install the missing
+works out of the box. When a method's helper is missing, the settings console
+and the line-based setup say so and name the remedy for your compositor - install the missing
 helper, or switch to the built-in `libei` backend where it works - and refuse to
 save an output method that could never work. `paste` needs both the clipboard
 helper and a typing helper, which presses the paste keys.
@@ -885,7 +831,7 @@ text and no audio.
 ## Configuration
 
 TongueTyped reads `$XDG_CONFIG_HOME/tonguetyped/config.toml`. Almost everything
-is editable from `tonguetyped setup` and the dashboard; the file is there when
+is editable from the `tonguetyped` settings console; the file is there when
 you want to script it. The running daemon watches this file and applies a valid
 edit live, so you do not have to run `tonguetyped reload` or restart it; an
 invalid edit is rejected, the overlay cues that the edit was rejected, and

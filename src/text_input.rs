@@ -1,8 +1,7 @@
-//! A minimal single-line text editor shared by the dashboard's settings
-//! screens (`src/tui/screens.rs`) and the setup console's text fields
-//! (`src/setup/console.rs`) - the two configuration UIs otherwise have no
-//! free-text entry at all, and both need the same folder-path / numeric-field
-//! editing behavior (character cursor, insert, backspace, home/end).
+//! A minimal single-line text editor for the setup console's text fields
+//! (`src/setup/console.rs`): the folder-path / numeric-field editing behavior
+//! (character cursor, insert, backspace, home/end) its free-text entries
+//! need.
 //!
 //! The cursor is a character index (`0..=char_count`), not a byte offset, so
 //! multi-byte input never splits a UTF-8 code point; the value and cursor are

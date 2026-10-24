@@ -119,6 +119,42 @@ fn expected_label(control: Control) -> String {
 }
 
 #[test]
+fn the_header_wordmark_degrades_without_clipping_the_badge() {
+    let app = app();
+    assert!(render(&app, 100, 10)[1].contains("TONGUETYPED SETUP"));
+    let mut seen = Vec::new();
+    for width in (24..=100).rev() {
+        let header = render(&app, width, 10)[1].trim_end().to_string();
+        let brand = ["TONGUETYPED SETUP", "TONGUETYPED", "TT"]
+            .into_iter()
+            .find(|brand| header.starts_with(&format!("\u{2502} {brand}")))
+            .unwrap_or_else(|| panic!("{width} cols has no wordmark: {header}"));
+        assert!(header.contains("ACTIVE"), "{width} cols: {header}");
+        assert!(header.ends_with('\u{2502}'), "{width} cols: {header}");
+        assert!(!header.contains('\u{1F399}'), "no emoji: {header}");
+        if seen.last() != Some(&brand) {
+            seen.push(brand);
+        }
+    }
+    assert_eq!(seen, ["TONGUETYPED SETUP", "TONGUETYPED", "TT"]);
+}
+
+#[test]
+fn the_replacements_placeholder_names_no_other_app() {
+    let mut app = app();
+    focus(&mut app, Control::Field(Field::Replacements));
+    let text = screen(&app, 100, 40);
+    let line = text
+        .lines()
+        .find(|line| line.contains("none (e.g."))
+        .unwrap_or_else(|| panic!("no Replacements placeholder:\n{text}"));
+    assert!(line.contains("alot => a lot"), "{line}");
+    for name in ["vox", "Vox", "VOX"] {
+        assert!(!line.contains(name), "{line}");
+    }
+}
+
+#[test]
 fn every_tab_renders_its_frame_at_both_sizes() {
     let mut app = app();
     for (width, height) in SIZES {
@@ -128,9 +164,10 @@ fn every_tab_renders_its_frame_at_both_sizes() {
             assert_eq!(lines.len(), usize::from(height));
             let text = lines.join("\n");
             assert!(
-                lines[1].contains("VOX // "),
+                lines[1].contains("TONGUETYPED"),
                 "{tab:?} {width}x{height}:\n{text}"
             );
+            assert!(!text.contains("VOX"), "no other app's name:\n{text}");
             assert!(
                 lines[1].contains("ACTIVE"),
                 "the header carries the daemon state:\n{text}"

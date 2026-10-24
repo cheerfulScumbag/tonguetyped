@@ -87,7 +87,7 @@ pub struct VariantInfo {
 }
 
 impl VariantInfo {
-    /// One-line language coverage for the model list and dashboard: "English",
+    /// One-line language coverage for the model list and setup console: "English",
     /// "N languages", or "n/a" when a port advertises none.
     pub fn language_summary(&self) -> String {
         match self.languages {
@@ -97,7 +97,7 @@ impl VariantInfo {
         }
     }
 
-    /// Human-readable family name for the model list and dashboard. The stored
+    /// Human-readable family name for the model list and setup console. The stored
     /// `family` is the GGUF architecture (`cohere_asr`), which is what the
     /// loader keys on but not what a user recognizes.
     pub fn family_label(&self) -> &'static str {

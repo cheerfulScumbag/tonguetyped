@@ -43,24 +43,10 @@ const ACCELERATOR_PRIORITY: &[(transcribe_cpp::Backend, &str)] = &[
 ];
 
 /// Every value `config.model.preferred_backend` accepts, in the order
-/// setup and the dashboard list them. `"auto"` is the priority-order
+/// the setup console lists them. `"auto"` is the priority-order
 /// fallback chain above; every other entry pins `InferenceEngine::load` to
 /// that one backend.
 pub const BACKEND_PREFERENCES: &[&str] = &["auto", "cpu", "vulkan", "cuda", "rocm", "metal"];
-
-/// Human-readable label for a `BACKEND_PREFERENCES` value, shared by
-/// setup and the dashboard.
-pub fn backend_preference_label(name: &str) -> &'static str {
-    match name {
-        "auto" => "Auto (tries CUDA, ROCm, Vulkan, Metal, then CPU)",
-        "cpu" => "CPU",
-        "vulkan" => "Vulkan",
-        "cuda" => "CUDA (NVIDIA)",
-        "rocm" => "ROCm (AMD)",
-        "metal" => "Metal (Apple)",
-        _ => "Unknown backend",
-    }
-}
 
 /// A parsed `config.model.preferred_backend` value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +144,7 @@ fn backend_unavailable_reason(entry: &SelectableBackend) -> Option<String> {
     None
 }
 
-/// One row of the backend picker shown by setup and the dashboard.
+/// One row of the backend picker shown by the setup console.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendChoice {
     /// The `config.model.preferred_backend` value.

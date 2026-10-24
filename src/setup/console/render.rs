@@ -18,11 +18,9 @@ use std::cell::Cell;
 
 /// The narrowest body that still shows two pane columns side by side.
 const WIDE_MIN: u16 = 76;
-const BRANDS: [&str; 3] = [
-    "\u{1F399}\u{FE0F} VOX // TONGUETYPED SETUP",
-    "\u{1F399}\u{FE0F} VOX // SETUP",
-    "VOX // SETUP",
-];
+/// The header wordmark from widest to narrowest: the name in the brand style,
+/// then an optional dimmer suffix.
+const BRANDS: [(&str, &str); 3] = [("TONGUETYPED", " SETUP"), ("TONGUETYPED", ""), ("TT", "")];
 /// The width every row reserves for the focus marker.
 const MARKER: u16 = 2;
 /// A blank column kept between row content and the pane's right border.
@@ -83,17 +81,18 @@ impl App {
         let mut chosen = None;
         'search: for brand in BRANDS {
             for badge in &badges {
-                if text_width(brand) + 2 + line_width(badge) <= width {
+                if brand_width(brand) + 2 + line_width(badge) <= width {
                     chosen = Some((brand, badge.clone()));
                     break 'search;
                 }
             }
         }
-        let (brand, badge) =
+        let ((name, suffix), badge) =
             chosen.unwrap_or((BRANDS[BRANDS.len() - 1], badges[badges.len() - 1].clone()));
-        let gap = width.saturating_sub(text_width(brand) + line_width(&badge));
+        let gap = width.saturating_sub(brand_width((name, suffix)) + line_width(&badge));
         let mut spans = vec![
-            Span::styled(brand.to_string(), self.theme.brand()),
+            Span::styled(name, self.theme.brand()),
+            Span::styled(suffix, self.theme.dim()),
             Span::raw(" ".repeat(gap)),
         ];
         spans.extend(badge);
@@ -941,9 +940,13 @@ fn field_label(field: Field) -> &'static str {
     }
 }
 
+fn brand_width((name, suffix): (&str, &str)) -> usize {
+    text_width(name) + text_width(suffix)
+}
+
 fn field_placeholder(field: Field) -> String {
     match field {
-        Field::Replacements => "none (e.g. vox type => Voxtype)".into(),
+        Field::Replacements => "none (e.g. alot => a lot)".into(),
         Field::CleanupCommand | Field::TranscriptFolder => "none".into(),
         Field::Decode(index) => crate::config::TranscriptionConfig::decoding_form_placeholders()
             .get(index)

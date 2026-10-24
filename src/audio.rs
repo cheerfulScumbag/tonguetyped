@@ -432,8 +432,7 @@ pub fn latest_level() -> f32 {
 }
 
 /// Maps a raw RMS level to the 0..1 fraction an input-level gauge shows,
-/// on a -60 dB..0 dB scale. Shared by the setup console and the dashboard's
-/// Microphone screen so both gauges respond identically.
+/// on a -60 dB..0 dB scale, for the setup console's microphone gauge.
 pub fn level_to_ratio(level: f32) -> f64 {
     if level <= 0.0 {
         return 0.0;
@@ -443,9 +442,8 @@ pub fn level_to_ratio(level: f32) -> f64 {
 }
 
 /// Owns the live microphone-preview stream for a caller-owned device list,
-/// shared by the setup console's Microphone step and the dashboard's
-/// Microphone screen so the settle-delay, async-error-routing and
-/// stream-restart behavior cannot drift between the two UIs.
+/// for the setup console's Microphone row: the settle delay, async error
+/// routing, and stream restarts.
 ///
 /// The caller drives it like this: `defer_restart()` on every highlight
 /// change, `poll()` once per frame, `sync()` with the currently highlighted

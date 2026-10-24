@@ -88,13 +88,13 @@
               # `tests/media_pause.rs` starts a private `dbus-daemon`.
               nativeCheckInputs = [ pkgs.dbus ];
 
-              # `tests/tui_dashboard.rs`'s `pty_*`-prefixed tests allocate a real
+              # The setup console's `pty_*`-prefixed tests allocate a real
               # pseudo-terminal and spawn the built binary into it
               # (`portable-pty`); the Nix build sandbox's `checkPhase` has no
               # usable pty/tty subsystem for that nested spawn (fails with ENOENT
               # even though the binary itself builds fine and `openpty` succeeds).
               # `nix develop -c cargo test` and plain `cargo test` both run them
-              # normally and are the real coverage for that file.
+              # normally and are the real coverage for those files.
               cargoTestFlags = [
                 "--"
                 "--skip"

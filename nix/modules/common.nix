@@ -146,7 +146,7 @@ in
             chunk_seconds = setting types.ints.unsigned "Decode window; audio longer than this is transcribed in chunks. 0 sends the whole buffer in one call, except a model that advertises an audio limit (canary, cohere, moonshine, Qwen3-ASR), which is still split to stay within it.";
           };
           text = section "The `[text]` table." {
-            replacements = setting (types.attrsOf types.str) "Map of mistranscriptions to corrections, e.g. `{ \"vox type\" = \"Voxtype\"; }`.";
+            replacements = setting (types.attrsOf types.str) "Map of mistranscriptions to corrections, e.g. `{ alot = \"a lot\"; }`.";
             spoken_punctuation = setting types.bool "Turn spoken punctuation words into symbols for dictating code.";
             remove_fillers = setting types.bool "Drop filler words. Applied only when `transcription.language` is English.";
             post_process_command = setting types.str "External command that cleans the transcript on stdin/stdout. Empty disables it.";
@@ -212,8 +212,8 @@ in
         section of the README for every key.
 
         The file stays writable. Keys set here are merged over it and win;
-        keys left unset keep whatever the file holds, so the dashboard and
-        `tonguetyped setup` can still change them. Removing a key here leaves
+        keys left unset keep whatever the file holds, so the `tonguetyped`
+        setup console can still change them. Removing a key here leaves
         its last written value in place.
       '';
     };

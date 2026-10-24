@@ -916,9 +916,8 @@ impl State {
     }
 }
 
-/// The `OverlayConfig::position` values both configuration UIs (the setup
-/// console and the dashboard's Overlay screen) cycle through, in the order
-/// `anchor_for` recognizes them.
+/// The `OverlayConfig::position` values the setup console cycles through, in
+/// the order `anchor_for` recognizes them.
 pub(crate) const POSITION_VALUES: [&str; 7] = [
     "top-left",
     "top",
@@ -1071,28 +1070,6 @@ pub(crate) fn legacy_waveform_look(style_name: &str, live_waveform: bool) -> &'s
         "waveform"
     } else {
         "plain"
-    }
-}
-
-/// The display label of a configured look value, taken from the same
-/// `(value, label)` pairs the settings step lists use (see [`look_options`]),
-/// so the step lists and the summaries can never drift. Falls back to
-/// `Waveform` for a value no style lists.
-pub(crate) fn look_label(value: &str) -> &'static str {
-    STYLE_VALUES
-        .iter()
-        .flat_map(|style| style_look_options(style))
-        .find(|(option, _)| *option == value)
-        .map(|(_, label)| *label)
-        .unwrap_or("Waveform")
-}
-
-/// The display label of a configured waveform-shape value, falling back to
-/// `Bars`.
-pub(crate) fn shape_label(value: &str) -> &'static str {
-    match value {
-        "squiggle" => "Squiggly line",
-        _ => "Bars",
     }
 }
 

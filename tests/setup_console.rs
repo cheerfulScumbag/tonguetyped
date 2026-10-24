@@ -1,11 +1,10 @@
 //! Real-pseudo-terminal behavior tests for the tabbed setup console
 //! (`src/setup/console.rs`). These drive the compiled binary through a PTY
-//! exactly as a terminal session would, mirroring `tests/tui_dashboard.rs`'s
-//! `Sandbox`/`Session` pattern - no source-grepping, no calling internal
-//! functions directly.
+//! exactly as a terminal session would - no source-grepping, no calling
+//! internal functions directly.
 //!
-//! Named with a `pty_` prefix like `tests/tui_dashboard.rs` so `flake.nix`'s
-//! `cargoTestFlags = ["--" "--skip" "pty_"]` continues to skip these in the
+//! Named with a `pty_` prefix so `flake.nix`'s
+//! `cargoTestFlags = ["--" "--skip" "pty_"]` skips these in the
 //! Nix sandboxed build (no usable pty/tty subsystem there); `nix develop -c
 //! cargo test` and plain `cargo test` run them normally.
 
@@ -48,9 +47,8 @@ impl Sandbox {
         std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
         std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
         std::fs::create_dir_all(&runtime_dir).unwrap();
-        // Pre-seed the default catalog model as "already installed" (same
-        // trick as tests/tui_dashboard.rs's Sandbox) so selecting it never
-        // starts a download or touches the network.
+        // Pre-seed the default catalog model as "already installed" so
+        // selecting it never starts a download or touches the network.
         let entry = tonguetyped::catalog::find(tonguetyped::catalog::DEFAULT_MODEL_ID).unwrap();
         std::fs::write(
             data_home.join("tonguetyped/models").join(entry.filename),
@@ -99,10 +97,10 @@ impl Drop for Sandbox {
     }
 }
 
-/// Same `vt100::Parser`-backed screen reconstruction as
-/// `tests/tui_dashboard.rs::Session` - ratatui only rewrites changed cells and
-/// jumps the cursor directly between them, so a naive strip-and-concatenate
-/// read of the raw byte stream would merge unrelated rows.
+/// A `vt100::Parser`-backed screen reconstruction - ratatui only rewrites
+/// changed cells and jumps the cursor directly between them, so a naive
+/// strip-and-concatenate read of the raw byte stream would merge unrelated
+/// rows.
 struct Session {
     #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
@@ -113,6 +111,11 @@ struct Session {
 
 impl Session {
     fn spawn(sandbox: &Sandbox, cols: u16, rows: u16) -> Self {
+        Self::spawn_with_args(sandbox, &["setup"], cols, rows)
+    }
+
+    /// Spawns the binary with `args`; `spawn` is the `setup` spelling.
+    fn spawn_with_args(sandbox: &Sandbox, args: &[&str], cols: u16, rows: u16) -> Self {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -123,7 +126,7 @@ impl Session {
             })
             .expect("openpty");
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_tonguetyped"));
-        cmd.arg("setup");
+        cmd.args(args);
         sandbox.apply_env(&mut cmd);
         let child = pair.slave.spawn_command(cmd).expect("spawn setup console");
         drop(pair.slave);
@@ -146,7 +149,7 @@ impl Session {
             parser,
             child,
         };
-        session.wait_for("VOX // ", Duration::from_secs(15));
+        session.wait_for("TONGUETYPED", Duration::from_secs(15));
         // Let raw mode settle so the first keypress is not eaten by the
         // pty's line discipline.
         std::thread::sleep(Duration::from_millis(300));
@@ -214,13 +217,13 @@ impl Session {
         );
     }
 
-    fn wait_for_exit(&mut self, timeout: Duration) {
+    fn wait_for_exit(&mut self, timeout: Duration) -> portable_pty::ExitStatus {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Ok(Some(_)) = self.child.try_wait() {
+            if let Ok(Some(status)) = self.child.try_wait() {
                 // Let the reader thread drain the final output.
                 std::thread::sleep(Duration::from_millis(200));
-                return;
+                return status;
             }
             if Instant::now() >= deadline {
                 let _ = self.child.kill();
@@ -378,14 +381,14 @@ fn pty_text_filters_persist_replacements_and_passes() {
     session.send(b" ");
     session.focus_row("Replacements");
     session.send(KEY_ENTER);
-    session.type_text("vox type => Voxtype");
+    session.type_text("alot => a lot");
     session.send(KEY_ENTER);
-    session.wait_for("vox type => Voxtype", Duration::from_secs(5));
+    session.wait_for("alot => a lot", Duration::from_secs(5));
     session.send(b"q");
     session.wait_for_exit(Duration::from_secs(5));
 
     let config = sandbox.config_contents();
-    assert!(config.contains("\"vox type\" = \"Voxtype\""), "{config}");
+    assert!(config.contains("alot = \"a lot\""), "{config}");
     assert!(config.contains("spoken_punctuation = true"), "{config}");
     assert!(config.contains("remove_fillers = true"), "{config}");
 }
@@ -519,5 +522,65 @@ fn pty_quitting_untouched_settings_writes_nothing() {
         session.visible_text().contains("No changes were made."),
         "{}",
         session.visible_text()
+    );
+}
+
+/// The header and tab bar of a freshly opened console: the rows above the
+/// first tab's content, which hold no host-dependent values.
+fn console_chrome(screen: &str) -> Vec<String> {
+    screen
+        .lines()
+        .take_while(|line| !line.contains("Microphone"))
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
+#[test]
+fn pty_bare_tonguetyped_opens_the_four_tab_console() {
+    let _serial = serialize();
+    let original = "[output]\nmethod = \"clipboard\"\n";
+    let sandbox = Sandbox::with_config("bare", original);
+    let mut session = Session::spawn_with_args(&sandbox, &[], 100, 32);
+    let screen = session.wait_for("Microphone", Duration::from_secs(5));
+    assert!(
+        screen.contains("TONGUETYPED SETUP"),
+        "console header:\n{screen}"
+    );
+    for tab in ["[1] Audio", "[2] Model", "[3] Output", "[4] Interface"] {
+        assert!(screen.contains(tab), "tab bar lists {tab:?}:\n{screen}");
+    }
+    session.send(b"2");
+    session.wait_for("Speech models", Duration::from_secs(5));
+    session.send(b"q");
+    let status = session.wait_for_exit(Duration::from_secs(5));
+    assert!(status.success(), "{}", session.visible_text());
+    assert!(
+        session.visible_text().contains("No changes were made."),
+        "{}",
+        session.visible_text()
+    );
+    assert_eq!(
+        sandbox.config_contents(),
+        original,
+        "quitting untouched must not write the config"
+    );
+}
+
+#[test]
+fn pty_setup_opens_the_same_console_as_bare_tonguetyped() {
+    let _serial = serialize();
+    let mut chrome = Vec::new();
+    for args in [&[][..], &["setup"][..]] {
+        let sandbox = Sandbox::new("alias");
+        let mut session = Session::spawn_with_args(&sandbox, args, 100, 32);
+        let screen = session.wait_for("Microphone", Duration::from_secs(5));
+        chrome.push(console_chrome(&screen));
+        session.send(b"q");
+        assert!(session.wait_for_exit(Duration::from_secs(5)).success());
+    }
+    assert!(!chrome[0].is_empty(), "no console header rendered");
+    assert_eq!(
+        chrome[0], chrome[1],
+        "`tonguetyped` and `tonguetyped setup` must open the same console"
     );
 }

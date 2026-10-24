@@ -4,37 +4,25 @@ use tonguetyped::cli::{
 };
 use tonguetyped::{
     activation, autostart, catalog, commands, config, daemon, doctor, ipc, model, setup, status,
-    transcribe, tui,
+    transcribe,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // The dashboard (no subcommand) puts the terminal in raw mode on the
-    // alternate screen and owns every byte written to it via ratatui's own
-    // cursor-positioned redraws; a `tracing::warn!` line (e.g. inference
-    // trying the next backend while loading a model from the Doctor or
-    // Model screen) written straight to the same stderr would land askew of
-    // whatever ratatui just drew and visibly corrupt the display. Every
-    // other subcommand logs to stderr, keeping stdout for its own data - the
+    // Logs go to stderr, keeping stdout for each command's own data - the
     // `transcribe` transcript, `status --format json`, `model list` rows -
     // since the ONNX runtime behind VAD is chatty at `info` level.
-    if cli.command.is_none() {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_filter())
-            .with_writer(std::io::sink)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_filter())
-            .with_writer(std::io::stderr)
-            .init();
-    }
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_filter())
+        .with_writer(std::io::stderr)
+        .init();
 
     match cli.command {
-        None => tui::run().await?,
-        Some(Commands::Setup) => setup::run()?,
+        // Bare `tonguetyped` opens the setup console; `setup` is the same
+        // console under its explicit name.
+        None | Some(Commands::Setup) => setup::run()?,
         Some(Commands::Daemon { command: None }) => {
             let config = config::Config::load()?;
             if let Err(error) = daemon::run_daemon(config).await {
@@ -116,8 +104,8 @@ async fn main() -> anyhow::Result<()> {
                 Ok(activation::ShortcutTestOutcome::TimedOut) => {
                     anyhow::bail!(
                         "no shortcut press detected within 15s; set a shortcut in your \
-                         desktop's own shortcut dialog (or the dashboard's Shortcut screen) \
-                         and try again"
+                         desktop's own shortcut dialog (or the Shortcut row on the Audio tab of \
+                         `tonguetyped`) and try again"
                     );
                 }
                 Err(error) => {
