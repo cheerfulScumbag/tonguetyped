@@ -18,9 +18,13 @@ use std::cell::Cell;
 
 /// The narrowest body that still shows two pane columns side by side.
 const WIDE_MIN: u16 = 76;
-/// The header wordmark from widest to narrowest: the name in the brand style,
-/// then an optional dimmer suffix.
-const BRANDS: [(&str, &str); 3] = [("TONGUETYPED", " SETUP"), ("TONGUETYPED", ""), ("TT", "")];
+/// The header wordmark from widest to narrowest: `tonguetyped` with both `t`
+/// glyphs accented, then a two-letter fallback for narrow terminals. Each
+/// segment pairs its text with whether it is one of those `t` glyphs.
+const WORDMARKS: [&[(&str, bool)]; 2] = [
+    &[("t", true), ("ongue", false), ("t", true), ("yped", false)],
+    &[("t", true), ("t", true)],
+];
 /// The width every row reserves for the focus marker.
 const MARKER: u16 = 2;
 /// A blank column kept between row content and the pane's right border.
@@ -79,28 +83,35 @@ impl App {
         let width = usize::from(inner.width);
         let badges = self.daemon_badges();
         let mut chosen = None;
-        'search: for brand in BRANDS {
+        'search: for wordmark in WORDMARKS {
             for badge in &badges {
-                if brand_width(brand) + 2 + line_width(badge) <= width {
-                    chosen = Some((brand, badge.clone()));
+                if wordmark_width(wordmark) + 2 + line_width(badge) <= width {
+                    chosen = Some((wordmark, badge.clone()));
                     break 'search;
                 }
             }
         }
-        let ((name, suffix), badge) =
-            chosen.unwrap_or((BRANDS[BRANDS.len() - 1], badges[badges.len() - 1].clone()));
-        let gap = width.saturating_sub(brand_width((name, suffix)) + line_width(&badge));
-        let mut spans = vec![
-            Span::styled(name, self.theme.brand()),
-            Span::styled(suffix, self.theme.dim()),
-            Span::raw(" ".repeat(gap)),
-        ];
+        let (wordmark, badge) = chosen.unwrap_or((
+            WORDMARKS[WORDMARKS.len() - 1],
+            badges[badges.len() - 1].clone(),
+        ));
+        let gap = width.saturating_sub(wordmark_width(wordmark) + line_width(&badge));
+        let mut spans = Vec::with_capacity(wordmark.len() + 1 + badge.len());
+        for (text, accent) in wordmark {
+            let style = if *accent {
+                self.theme.wordmark_accent()
+            } else {
+                self.theme.wordmark()
+            };
+            spans.push(Span::styled(*text, style));
+        }
+        spans.push(Span::raw(" ".repeat(gap)));
         spans.extend(badge);
         fit(spans, inner.width).render(inner, buf);
     }
 
     /// The daemon badge from widest to narrowest, so the header can pick the
-    /// widest that fits next to the brand.
+    /// widest that fits next to the wordmark.
     fn daemon_badges(&self) -> Vec<Vec<Span<'static>>> {
         let (state, tone) = super::daemon_state_label(self.daemon.state);
         let state = Span::styled(state, self.tone(tone));
@@ -940,8 +951,8 @@ fn field_label(field: Field) -> &'static str {
     }
 }
 
-fn brand_width((name, suffix): (&str, &str)) -> usize {
-    text_width(name) + text_width(suffix)
+fn wordmark_width(wordmark: &[(&str, bool)]) -> usize {
+    wordmark.iter().map(|(text, _)| text_width(text)).sum()
 }
 
 fn field_placeholder(field: Field) -> String {

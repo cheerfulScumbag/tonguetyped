@@ -116,6 +116,16 @@ impl Session {
 
     /// Spawns the binary with `args`; `spawn` is the `setup` spelling.
     fn spawn_with_args(sandbox: &Sandbox, args: &[&str], cols: u16, rows: u16) -> Self {
+        Self::spawn_inner(sandbox, args, cols, rows, false)
+    }
+
+    /// Like `spawn_with_args`, but leaves colour on (the sandbox otherwise
+    /// forces `NO_COLOR=1`), so real-terminal colour cells can be inspected.
+    fn spawn_with_args_colored(sandbox: &Sandbox, args: &[&str], cols: u16, rows: u16) -> Self {
+        Self::spawn_inner(sandbox, args, cols, rows, true)
+    }
+
+    fn spawn_inner(sandbox: &Sandbox, args: &[&str], cols: u16, rows: u16, colored: bool) -> Self {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -128,6 +138,9 @@ impl Session {
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_tonguetyped"));
         cmd.args(args);
         sandbox.apply_env(&mut cmd);
+        if colored {
+            cmd.env_remove("NO_COLOR");
+        }
         let child = pair.slave.spawn_command(cmd).expect("spawn setup console");
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().expect("clone reader");
@@ -149,7 +162,9 @@ impl Session {
             parser,
             child,
         };
-        session.wait_for("TONGUETYPED", Duration::from_secs(15));
+        // "Microphone" (unlike the header wordmark, which shortens to "tt"
+        // below 24 columns) is present at every width the console supports.
+        session.wait_for("Microphone", Duration::from_secs(15));
         // Let raw mode settle so the first keypress is not eaten by the
         // pty's line discipline.
         std::thread::sleep(Duration::from_millis(300));
@@ -171,6 +186,19 @@ impl Session {
 
     fn visible_text(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
+    }
+
+    /// One screen row as (glyph, foreground colour) cells, so a real
+    /// terminal's painted colours - not just its text - can be inspected.
+    fn row_cells(&self, row: u16, cols: u16) -> Vec<(String, vt100::Color)> {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        (0..cols)
+            .map(|col| {
+                let cell = screen.cell(row, col).expect("cell in bounds");
+                (cell.contents(), cell.fgcolor())
+            })
+            .collect()
     }
 
     fn try_wait_for(&self, needle: &str, timeout: Duration) -> Option<String> {
@@ -542,10 +570,7 @@ fn pty_bare_tonguetyped_opens_the_four_tab_console() {
     let sandbox = Sandbox::with_config("bare", original);
     let mut session = Session::spawn_with_args(&sandbox, &[], 100, 32);
     let screen = session.wait_for("Microphone", Duration::from_secs(5));
-    assert!(
-        screen.contains("TONGUETYPED SETUP"),
-        "console header:\n{screen}"
-    );
+    assert!(screen.contains("tonguetyped"), "console header:\n{screen}");
     for tab in ["[1] Audio", "[2] Model", "[3] Output", "[4] Interface"] {
         assert!(screen.contains(tab), "tab bar lists {tab:?}:\n{screen}");
     }
@@ -583,4 +608,105 @@ fn pty_setup_opens_the_same_console_as_bare_tonguetyped() {
         chrome[0], chrome[1],
         "`tonguetyped` and `tonguetyped setup` must open the same console"
     );
+}
+
+/// The theme's wordmark colours, straight from `src/setup/console/theme.rs`.
+const WORDMARK_GREEN: vt100::Color = vt100::Color::Rgb(0xa6, 0xe3, 0xa1);
+const WORDMARK_TEXT: vt100::Color = vt100::Color::Rgb(0xcd, 0xd6, 0xf4);
+
+/// The cell index where `needle` starts, so multi-byte borders cannot shift it.
+fn find_cells(cells: &[(String, vt100::Color)], needle: &str) -> Option<usize> {
+    let needle: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+    cells.windows(needle.len()).position(|window| {
+        window
+            .iter()
+            .zip(&needle)
+            .all(|((glyph, _), wanted)| glyph == wanted)
+    })
+}
+
+#[test]
+fn pty_header_wordmark_paints_the_two_t_glyphs_green() {
+    let _serial = serialize();
+    let sandbox = Sandbox::new("wordmark-color");
+    let mut session = Session::spawn_with_args_colored(&sandbox, &[], 100, 32);
+    session.wait_for("Microphone", Duration::from_secs(5));
+    let cells = session.row_cells(1, 100);
+    let text: String = cells.iter().map(|(glyph, _)| glyph.as_str()).collect();
+    let start = find_cells(&cells, "tonguetyped")
+        .unwrap_or_else(|| panic!("no wordmark in header row:\n{text}"));
+    for (offset, letter) in "tonguetyped".chars().enumerate() {
+        let (glyph, color) = &cells[start + offset];
+        let expected = if letter == 't' {
+            WORDMARK_GREEN
+        } else {
+            WORDMARK_TEXT
+        };
+        assert_eq!(glyph, &letter.to_string(), "wordmark letter {offset}");
+        assert_eq!(
+            *color, expected,
+            "wordmark letter {offset} ({letter:?}) painted {color:?} on a real terminal:\n{text}"
+        );
+    }
+    let green_ts = cells
+        .iter()
+        .filter(|(glyph, color)| glyph == "t" && *color == WORDMARK_GREEN)
+        .count();
+    assert_eq!(
+        green_ts, 2,
+        "exactly the two t glyphs are green on a real terminal:\n{text}"
+    );
+    session.send(b"q");
+    assert!(session.wait_for_exit(Duration::from_secs(5)).success());
+}
+
+#[test]
+fn pty_header_wordmark_fallback_keeps_both_t_glyphs_green() {
+    let _serial = serialize();
+    let sandbox = Sandbox::new("wordmark-color-narrow");
+    let mut session = Session::spawn_with_args_colored(&sandbox, &[], 22, 32);
+    session.wait_for("Microphone", Duration::from_secs(5));
+    let cells = session.row_cells(1, 22);
+    let text: String = cells.iter().map(|(glyph, _)| glyph.as_str()).collect();
+    assert!(
+        !text.contains("tonguetyped"),
+        "too narrow for the full wordmark:\n{text}"
+    );
+    let start =
+        find_cells(&cells, "tt").unwrap_or_else(|| panic!("no tt fallback in header:\n{text}"));
+    for offset in 0..2 {
+        assert_eq!(
+            cells[start + offset],
+            ("t".to_string(), WORDMARK_GREEN),
+            "fallback t glyph {offset} on a real terminal:\n{text}"
+        );
+    }
+    session.send(b"q");
+    assert!(session.wait_for_exit(Duration::from_secs(5)).success());
+}
+
+#[test]
+fn pty_header_wordmark_drops_colour_under_no_color() {
+    let _serial = serialize();
+    let sandbox = Sandbox::new("wordmark-no-color");
+    // `Sandbox::apply_env` sets `NO_COLOR=1`; this spawn (unlike the
+    // `_colored` variant above) leaves that in place.
+    let mut session = Session::spawn_with_args(&sandbox, &[], 100, 32);
+    session.wait_for("Microphone", Duration::from_secs(5));
+    let cells = session.row_cells(1, 100);
+    let text: String = cells.iter().map(|(glyph, _)| glyph.as_str()).collect();
+    assert!(
+        find_cells(&cells, "tonguetyped").is_some(),
+        "the wordmark text still reads under NO_COLOR:\n{text}"
+    );
+    let green_cells = cells
+        .iter()
+        .filter(|(_, color)| *color == WORDMARK_GREEN)
+        .count();
+    assert_eq!(
+        green_cells, 0,
+        "NO_COLOR must drop the wordmark's colour, not just dim it:\n{text}"
+    );
+    session.send(b"q");
+    assert!(session.wait_for_exit(Duration::from_secs(5)).success());
 }
