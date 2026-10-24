@@ -240,6 +240,14 @@ impl OutputMethod {
     pub fn inserts_text(self) -> bool {
         matches!(self, OutputMethod::Type | OutputMethod::Paste)
     }
+
+    /// Whether this method needs the session clipboard helper: `clipboard`
+    /// copies directly, and `paste` copies before pressing the paste keys.
+    /// `type` only copies as a failure fallback, so it is not a startup
+    /// requirement.
+    pub fn needs_clipboard(self) -> bool {
+        matches!(self, OutputMethod::Clipboard | OutputMethod::Paste)
+    }
 }
 
 impl std::fmt::Display for OutputMethod {
@@ -2336,6 +2344,22 @@ mod tests {
         ] {
             config.output.method = method;
             assert_eq!(config.validate().is_ok(), valid, "{method}");
+        }
+    }
+
+    #[test]
+    fn only_copying_methods_need_the_clipboard_helper() {
+        // `type` copies only as a failure fallback, so a missing clipboard
+        // helper is not a startup warning there; `clipboard` and `paste`
+        // cannot work without it.
+        for (method, inserts, needs_clipboard) in [
+            (OutputMethod::None, false, false),
+            (OutputMethod::Type, true, false),
+            (OutputMethod::Clipboard, false, true),
+            (OutputMethod::Paste, true, true),
+        ] {
+            assert_eq!(method.inserts_text(), inserts, "{method}");
+            assert_eq!(method.needs_clipboard(), needs_clipboard, "{method}");
         }
     }
 

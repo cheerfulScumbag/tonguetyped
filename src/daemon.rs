@@ -62,13 +62,9 @@ pub async fn run_daemon(config: Config) -> anyhow::Result<()> {
         );
         typing
     } else {
-        if config.output.method == crate::config::OutputMethod::Clipboard
-            && !crate::output::clipboard_available()
-        {
-            tracing::warn!("{}", crate::output::clipboard_helper_warning());
-        }
         crate::output::TypingPlan::unprobed(&config.output.typing_backend)
     };
+    warn_missing_clipboard_helper(config.output.method);
     if config.history.enabled {
         tracing::warn!(
             "saving transcripts is on; turn it off in Transcript output > Save transcript history"
@@ -324,6 +320,7 @@ pub async fn reload_config_from_disk(coordinator: &Arc<Coordinator>) -> anyhow::
         } else {
             crate::output::TypingPlan::unprobed(&config.output.typing_backend)
         };
+        warn_missing_clipboard_helper(config.output.method);
         coordinator.reload_config_with_typing(config, typing)
     }
     .await;
@@ -332,6 +329,15 @@ pub async fn reload_config_from_disk(coordinator: &Arc<Coordinator>) -> anyhow::
         Err(error) => coordinator.set_config_error(error.to_string()),
     }
     result
+}
+
+/// Warns once when the configured method needs the clipboard helper and this
+/// session has none. `type` is excluded: it copies only as a failure fallback,
+/// so a missing clipboard helper is not a startup problem there.
+fn warn_missing_clipboard_helper(method: crate::config::OutputMethod) {
+    if method.needs_clipboard() && !crate::output::clipboard_available() {
+        tracing::warn!("{}", crate::output::clipboard_helper_warning());
+    }
 }
 
 /// Routes every shortcut request through the daemon's activation handle, the

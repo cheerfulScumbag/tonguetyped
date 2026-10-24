@@ -263,9 +263,15 @@ pub fn typing_test(config: &crate::config::Config) -> anyhow::Result<String> {
     Ok(match delivery {
         Delivery::Kept => "Kept the test text in TongueTyped.".to_string(),
         Delivery::Inserted if config.output.method == OutputMethod::Paste => {
-            "Pasted the test text into the focused application.".to_string()
+            "Pasted the test text into the focused application (delivery not verified by \
+             TongueTyped)."
+                .to_string()
         }
-        Delivery::Inserted => "Typed the test text into the focused application.".to_string(),
+        Delivery::Inserted => {
+            "Typed the test text into the focused application (delivery not verified by \
+             TongueTyped)."
+                .to_string()
+        }
         Delivery::Copied => "Copied the test text to the clipboard.".to_string(),
         Delivery::CopiedAfterFailure(error) => {
             format!("Typing failed ({error}); copied the test text to the clipboard instead.")
