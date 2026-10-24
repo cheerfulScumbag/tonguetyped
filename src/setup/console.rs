@@ -1579,11 +1579,9 @@ impl App {
         }
     }
 
+    /// Opens the desktop dialog, or reopens it while one is already open
+    /// (the executor waits for the old request to settle first).
     fn open_shortcut_dialog(&mut self) {
-        if self.shortcut_waiting {
-            // Reopen the dialog instead of waiting out the old request.
-            self.effects.push(Effect::CancelShortcutDialog);
-        }
         self.shortcut_waiting = true;
         self.shortcut_feedback = None;
         self.effects.push(Effect::OpenShortcutDialog);
@@ -2052,6 +2050,12 @@ struct Executor {
     /// overtake the show it ends while the first show is still probing.
     overlay: std::sync::mpsc::Sender<(Effect, Slot)>,
     shortcut: Option<ReconfigureHandle>,
+    /// A reopen requested while `shortcut` was still open: its wait was
+    /// cancelled, and the replacement dialog opens only once that wait
+    /// settles. Starting it immediately would race the cancel (the daemon
+    /// could reject the new dialog as "already open", or the stale cancel
+    /// could end the new one).
+    shortcut_reopen: bool,
     download: Option<ProvisionHandle>,
     download_progress: (u64, u64),
 }
@@ -2071,6 +2075,7 @@ impl Executor {
             stop,
             overlay,
             shortcut: None,
+            shortcut_reopen: false,
             download: None,
             download_progress: (0, 0),
         }
@@ -2134,10 +2139,15 @@ impl Executor {
                     self.slots.push(slot);
                 }
             }
-            Effect::OpenShortcutDialog => {
-                self.shortcut = Some(super::reconfigure_shortcut_async());
-            }
+            Effect::OpenShortcutDialog => match &self.shortcut {
+                Some(handle) => {
+                    handle.cancel();
+                    self.shortcut_reopen = true;
+                }
+                None => self.shortcut = Some(super::reconfigure_shortcut_async()),
+            },
             Effect::CancelShortcutDialog => {
+                self.shortcut_reopen = false;
                 if let Some(handle) = self.shortcut.take() {
                     handle.cancel();
                 }
@@ -2166,7 +2176,11 @@ impl Executor {
         if let Some(handle) = &self.shortcut {
             if let Some(outcome) = handle.result.lock().ok().and_then(|mut guard| guard.take()) {
                 self.shortcut = None;
-                results.push(TaskResult::Shortcut(outcome));
+                if std::mem::take(&mut self.shortcut_reopen) {
+                    self.shortcut = Some(super::reconfigure_shortcut_async());
+                } else {
+                    results.push(TaskResult::Shortcut(outcome));
+                }
             }
         }
         if let Some(handle) = &self.download {

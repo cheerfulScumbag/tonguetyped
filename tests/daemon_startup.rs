@@ -90,7 +90,11 @@ fn ipc_starts_when_shortcut_portal_is_unavailable() {
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
         .output()
         .unwrap();
-    assert!(!second.status.success());
+    assert_eq!(
+        second.status.code(),
+        Some(3),
+        "a duplicate daemon must exit 3 so systemd can skip the restart"
+    );
     assert!(String::from_utf8(second.stderr)
         .unwrap()
         .contains("daemon is already running"));

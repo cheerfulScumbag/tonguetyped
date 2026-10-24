@@ -743,6 +743,45 @@ fn ctrl_r_opens_the_shortcut_dialog_and_esc_keeps_the_binding() {
 }
 
 #[test]
+fn ctrl_r_keeps_the_old_wait_until_it_settles() {
+    let mut app = app();
+    app.handle_key(ctrl('r'));
+    app.take_effects();
+    app.handle_key(ctrl('r'));
+    assert!(
+        matches!(&app.take_effects()[..], [Effect::OpenShortcutDialog]),
+        "a reopen must not cancel ahead of the executor"
+    );
+
+    let mut executor = Executor {
+        slots: Vec::new(),
+        status: Arc::new(Mutex::new(None)),
+        stop: Arc::new(AtomicBool::new(false)),
+        overlay: std::sync::mpsc::channel().0,
+        shortcut: Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None)))),
+        shortcut_reopen: false,
+        download: None,
+        download_progress: (0, 0),
+    };
+    executor.run(Effect::OpenShortcutDialog);
+    assert!(
+        executor.shortcut_reopen,
+        "the reopen must wait for the old wait to settle"
+    );
+    assert!(
+        executor.shortcut.is_some(),
+        "the old wait must stay polled instead of starting a second configure"
+    );
+
+    executor.run(Effect::CancelShortcutDialog);
+    assert!(
+        !executor.shortcut_reopen,
+        "keeping the current binding must cancel the scheduled reopen"
+    );
+    assert!(executor.shortcut.is_none());
+}
+
+#[test]
 fn a_changed_shortcut_is_stored_with_the_super_wording() {
     let mut app = app();
     app.handle_key(ctrl('r'));
