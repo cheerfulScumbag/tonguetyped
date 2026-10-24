@@ -125,13 +125,7 @@ impl Session {
         Self::spawn_inner(sandbox, args, cols, rows, true)
     }
 
-    fn spawn_inner(
-        sandbox: &Sandbox,
-        args: &[&str],
-        cols: u16,
-        rows: u16,
-        colored: bool,
-    ) -> Self {
+    fn spawn_inner(sandbox: &Sandbox, args: &[&str], cols: u16, rows: u16, colored: bool) -> Self {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
