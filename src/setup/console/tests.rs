@@ -635,6 +635,7 @@ fn the_delivery_method_shows_only_its_own_settings() {
 fn a_delivery_method_that_cannot_work_here_is_skipped() {
     let mut caps = capabilities();
     caps.typing_backends.clear();
+    caps.typing_warning = Some("No typing helper found - install dotool.");
     let mut app = App::new(Config::default(), caps, Theme::new(false), false);
     app.config.output.method = OutputMethod::Clipboard;
     focus(&mut app, Control::OutputMethod);

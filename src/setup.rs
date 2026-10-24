@@ -312,9 +312,25 @@ impl Capabilities {
 
     /// Why `method` cannot work on this machine, as the warning naming the
     /// remedy, or `None` when it can. The configuration UIs show it for the
-    /// highlighted method and refuse to save a method that has one.
+    /// highlighted method and refuse to save a method that has one, and call
+    /// it every render frame - so, unlike `method_unavailable_reason`, this
+    /// reuses the already-computed `self.typing_warning` instead of probing
+    /// the typing helper fresh each time.
     pub(crate) fn output_method_problem(&self, method: OutputMethod) -> Option<&'static str> {
-        crate::output::method_unavailable_reason(method, self.has_type_backend(), self.clipboard)
+        match method {
+            OutputMethod::None => None,
+            OutputMethod::Type => self.typing_warning,
+            OutputMethod::Clipboard => {
+                (!self.clipboard).then(crate::output::clipboard_helper_warning)
+            }
+            OutputMethod::Paste => {
+                if !self.clipboard {
+                    Some(crate::output::clipboard_helper_warning())
+                } else {
+                    self.typing_warning
+                }
+            }
+        }
     }
 
     /// Where the configuration UIs open their output-method list: on the
