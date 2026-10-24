@@ -489,8 +489,8 @@ sweep with your voice. The `plain` look is the resting shape with no waveform.
 Loud speech is a big response; silence is calm, with the waveform's quiet
 stretches rendered as tiny dots.
 
-To see a combination before saving it, run **Test Overlay on Desktop** in
-`tonguetyped setup`'s Interface & System tab: it shows the real overlay on your
+To see a combination before saving it, run **Test Overlay on Desktop** on the
+settings console's Interface & System tab. It shows the real overlay on your
 desktop for four seconds with the style, position, look, and shape set there,
 and follows any change you make while it is up.
 
@@ -528,10 +528,10 @@ feedback_volume = 0.7
 ### Transcript output
 
 The configuration file defaults `output.method` to `none`, which delivers
-nothing. On a fresh install with no `config.toml` yet, `tonguetyped setup`
-starts on `type` when a typing helper is available, so saving from setup types
-into the focused application. An existing `none` is left alone, with a warning
-in setup while saving transcripts is off. Pick a method on the settings
+nothing. On a fresh install with no `config.toml` yet, the settings console
+starts on `type` when a typing helper is available, so saving from the console
+types into the focused application. An existing `none` is left alone, with a
+warning while saving transcripts is off. Pick a method on the settings
 console's Output tab:
 
 | `output.method` | What happens to the transcript |

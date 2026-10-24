@@ -356,7 +356,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut stdout = io::stdout();
 
     // Piped/non-interactive stdin or stdout (scripts, tests, CI) falls back to the
-    // line-based flow below so `tonguetyped setup` stays scriptable with plain
+    // line-based flow below so both setup entry points stay scriptable with plain
     // newline-separated answers.
     if stdin.is_terminal() && stdout.is_terminal() {
         let outcome = console::run(capabilities)?;
