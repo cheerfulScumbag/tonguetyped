@@ -6,16 +6,14 @@ All notable changes to TongueTyped are recorded here.
 
 ### Added
 
-- `tonguetyped setup` is now a four-tab settings utility: Audio & Capture,
-  Model & Engine, Output & Delivery, and Interface & System. It reaches every
+- A four-tab settings console: Audio & Capture, Model & Engine, Output &
+  Delivery, and Interface & System. Running `tonguetyped` with no arguments
+  opens it, and `tonguetyped setup` opens the same console. It reaches every
   setting the old wizard had, adds pause-media and feedback-sound switches,
   starts, stops, and restarts the daemon, runs a Start/Stop Dictation card
   over daemon IPC, and shows the real layer-shell overlay for four seconds as
   a desktop test. Edits apply in memory, and Ctrl+S saves only the changed
   fields.
-- A split deck dashboard with ASCII logo art and a splash screen. The deck
-  groups settings into panes, keeps model and history actions beside the
-  result, and shows the live microphone level while dictating.
 - Live text in the overlay for streaming models. Partial words stream across
   the live-text look while you speak, and the finalized text is typed when
   the recording stops. A model-aware rollover keeps a long dictation
@@ -57,6 +55,8 @@ All notable changes to TongueTyped are recorded here.
 
 ### Changed
 
+- The previous dashboard TUI is removed. Its settings and actions live in the
+  four-tab console that bare `tonguetyped` now opens.
 - Transcript history saving is opt-in and off by default. Turning it off
   writes neither the history database nor transcript files.
 - The daemon watches `config.toml` and applies settled edits without a reload
