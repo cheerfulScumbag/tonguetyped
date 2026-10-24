@@ -12,7 +12,10 @@
 //! it directly, map it to an icon through `alt`, or style it through `class`.
 //! `--extended` adds `model`, `backend`, `device` and `build` fields (each
 //! `null` when the daemon does not report it); the tooltip lists `model`,
-//! `backend` and `device`, while `build` appears only in the JSON.
+//! `backend` and `device`, while `build` appears only in the JSON. The
+//! tooltip also always reports output health - the resolved typing backend,
+//! any pinned-backend substitution or dead-end warning, the clipboard
+//! fallback count, and the last output error - regardless of `--extended`.
 //!
 //! Following polls the daemon's ordinary `Status` request over one kept-open
 //! connection, so it works against any daemon build. A daemon that stops or

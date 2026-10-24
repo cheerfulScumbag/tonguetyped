@@ -459,7 +459,10 @@ The state is `idle`, `recording`, `processing`, or `stopped`, repeated in
 style it. The tooltip always reports the shortcut state (`initializing`,
 `available`, `unbound (no key set)`, or `failed`), the bound key when there is
 one, and any shortcut error, so a bar can show a shortcut that died instead of
-claiming it works. `--extended` adds `model`, `backend`, `device` and `build`
+claiming it works. The tooltip also always reports output health: the
+resolved typing backend, a pinned-backend substitution or dead-end warning
+when there is one, the clipboard-fallback count once it is non-zero, and the
+last output error. `--extended` adds `model`, `backend`, `device` and `build`
 fields; the tooltip then also lists `model`, `backend` and `device`, while
 `build` appears only in the JSON.
 
