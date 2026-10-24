@@ -25,7 +25,6 @@ pub mod status;
 pub mod text;
 pub mod text_input;
 pub mod transcribe;
-pub mod tui;
 pub mod typing_test_surface;
 pub mod vad;
 pub mod wayland;

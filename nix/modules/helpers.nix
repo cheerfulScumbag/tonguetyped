@@ -28,7 +28,7 @@ rec {
   hasSettings = rendered != { };
 
   # Merges the declared settings over the user's config.toml. The app rewrites
-  # that file itself (dashboard, setup, the desktop-reported shortcut), so it
+  # that file itself (the setup console, the desktop-reported shortcut), so it
   # stays a regular writable file rather than a read-only store link.
   applySettings = pkgs.writeShellApplication {
     name = "tonguetyped-apply-settings";

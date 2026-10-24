@@ -1,14 +1,13 @@
 //! Shared command implementations used by both the plain CLI dispatch in
-//! `main.rs` and the interactive dashboard in `tui`. Neither caller shells
-//! out to the installed binary or re-implements these behaviors itself - both
-//! call the exact same functions here, so there is exactly one place that
-//! knows how to talk to the daemon, install/activate a model, or launch the
+//! `main.rs` and the interactive setup console in `setup`. Neither caller
+//! shells out to the installed binary or re-implements these behaviors
+//! itself; both call the exact same functions here, so there is exactly one
+//! place that knows how to talk to the daemon, select a model, or launch the
 //! daemon process.
 
 use crate::config::Config;
 use crate::doctor::{DaemonBuild, DoctorReport};
 use crate::ipc::{self, Request, Response};
-use crate::model::{DownloadManager, DownloadOutcome, ProgressCallback};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 /// How long `stop_daemon_at` waits for the daemon's reply to a `Shutdown`
@@ -26,8 +25,8 @@ const SHUTDOWN_EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_se
 /// Connects to the daemon's control socket, sends one request, and returns
 /// its decoded response. Shared by every IPC-backed CLI command
 /// (`start`/`stop`/`toggle`/`cancel`/`status`/`reload`/`last-result`) and by
-/// the dashboard's equivalent actions, so the socket handshake only exists in
-/// one place.
+/// the setup console's dictation and daemon actions, so the socket handshake
+/// only exists in one place.
 pub async fn send_ipc(request: Request) -> anyhow::Result<Response> {
     let sock_path = crate::daemon::socket_path()?;
     send_ipc_at(&sock_path, request).await
@@ -186,7 +185,7 @@ fn socket_is_alive(sock_path: &std::path::Path) -> bool {
 /// whichever CLI/TUI invocation started it (see `data/tonguetyped-daemon.desktop`'s
 /// `Exec=tonguetyped daemon`, used identically for desktop autostart), so it
 /// is spawned as a separate OS process via `current_exe()` rather than as an
-/// in-process tokio task that would die with the dashboard. This re-executes
+/// in-process tokio task that would die with the setup console. This re-executes
 /// the same binary's already-tested `daemon` subcommand - it does not
 /// reimplement or shell out to a *different* program, and no daemon logic
 /// lives here.
@@ -280,7 +279,7 @@ async fn stop_daemon_at_with(
 
 /// Stops the running daemon (if any) and waits for its socket to clear
 /// before launching a fresh one via `spawn_daemon` - the same detached
-/// background launch the dashboard uses, so `daemon restart` returns once
+/// background launch the setup console uses, so `daemon restart` returns once
 /// the new daemon is underway instead of blocking in the foreground. A
 /// stale socket file with nothing listening behind it (`daemon_socket_exists`
 /// returns `false` and removes it) is treated as no daemon running, so this
@@ -291,34 +290,6 @@ pub async fn restart_daemon() -> anyhow::Result<()> {
         stop_daemon().await?;
     }
     spawn_daemon()
-}
-
-pub struct ModelRow {
-    pub id: &'static str,
-    pub quant: &'static str,
-    pub size_bytes: u64,
-    pub license_spdx: &'static str,
-    /// The entry's family, language coverage, and long-form behavior, shared
-    /// with the model list and dashboard so both label models the same way.
-    pub info: &'static crate::catalog::VariantInfo,
-    pub installed: bool,
-    pub active: bool,
-}
-
-/// Catalog rows in the same order `tonguetyped model list` prints them.
-pub fn model_rows(config: &Config) -> Vec<ModelRow> {
-    crate::catalog::ENTRIES
-        .iter()
-        .map(|entry| ModelRow {
-            id: entry.id,
-            quant: entry.quant,
-            size_bytes: entry.size_bytes,
-            license_spdx: entry.license_spdx,
-            info: entry.info(),
-            installed: crate::catalog::is_installed(entry.id),
-            active: entry.id == config.model.active_model,
-        })
-        .collect()
 }
 
 pub fn human_size(bytes: u64) -> String {
@@ -343,126 +314,8 @@ pub fn select_model(id: &str) -> anyhow::Result<()> {
     config.save()
 }
 
-/// Downloads (if needed) and verifies `id` without selecting it as the active
-/// model or touching a running daemon. The dashboard's Models pane uses this
-/// for its download-only key, which must never change the active model.
-pub async fn download_model(
-    id: &str,
-    on_progress: Option<ProgressCallback>,
-) -> anyhow::Result<DownloadOutcome> {
-    if crate::catalog::find(id).is_none() {
-        anyhow::bail!("unknown catalog model: {id}");
-    }
-    let manager = DownloadManager::new()?;
-    let (_, outcome) = manager.install_catalog_model(id, on_progress).await?;
-    Ok(outcome)
-}
-
-/// Everything that happened while activating a catalog model from the
-/// dashboard: download/verify, save the selection, reload a running daemon,
-/// and confirm the new model actually loads. A failure at any step after the
-/// download is reported on the matching field rather than raised as an
-/// `Err`, so the dashboard can show exactly which step failed instead of
-/// losing partial progress - but `succeeded()` is `false` whenever any step
-/// did not complete, so the caller never has to guess which fields to check
-/// before claiming activation worked.
-pub struct ModelActivation {
-    pub download: DownloadOutcome,
-    pub daemon_reload: Option<Result<(), String>>,
-    pub confirmation: crate::doctor::DoctorReport,
-}
-
-impl ModelActivation {
-    /// Whether the model is confirmed active on a reachable backend - the
-    /// one bit the dashboard needs before it may claim success. `None` would
-    /// mean a running daemon's reload failed, which must not be reported as
-    /// activation succeeding even though the config file was already saved.
-    pub fn succeeded(&self) -> bool {
-        !matches!(self.daemon_reload, Some(Err(_))) && self.confirmation.model_ready
-    }
-}
-
-/// Downloads (if needed) and verifies `id`, saves it as the active model,
-/// reloads a running daemon so it picks up the change immediately, and
-/// re-runs diagnostics to confirm the model actually loads and report which
-/// backend/device it loaded on. Mirrors `tonguetyped model install --use`
-/// plus `tonguetyped reload` plus `tonguetyped doctor`, composed into one
-/// action because the dashboard presents model activation as a single step.
-pub async fn activate_model(
-    id: &str,
-    on_progress: Option<ProgressCallback>,
-) -> anyhow::Result<ModelActivation> {
-    let download = download_model(id, on_progress).await?;
-
-    select_model(id)?;
-    let (daemon_reload, confirmation) = reload_and_confirm().await?;
-
-    Ok(ModelActivation {
-        download,
-        daemon_reload,
-        confirmation,
-    })
-}
-
-/// Reloads a running daemon (`None` when none is running) and re-runs
-/// diagnostics against the saved config, so a caller that just changed
-/// inference settings can confirm the model really loads with them.
-async fn reload_and_confirm(
-) -> anyhow::Result<(Option<Result<(), String>>, crate::doctor::DoctorReport)> {
-    let daemon_reload = if daemon_socket_exists() {
-        Some(match send_ipc(Request::ReloadConfig).await {
-            Ok(Response::Ok) => Ok(()),
-            Ok(Response::Error { message }) => Err(message),
-            Ok(other) => Err(format!("unexpected daemon response: {other:?}")),
-            Err(error) => Err(error.to_string()),
-        })
-    } else {
-        None
-    };
-    let config = Config::load()?;
-    let confirmation = crate::doctor::run_doctor(&config).await?;
-    Ok((daemon_reload, confirmation))
-}
-
-/// Saves `name` as `config.model.preferred_backend`, rejecting anything
-/// `inference::BackendPreference::parse` doesn't accept.
-pub fn select_backend(name: &str) -> anyhow::Result<()> {
-    crate::inference::BackendPreference::parse(name)?;
-    let mut config = Config::load()?;
-    config.model.preferred_backend = name.to_string();
-    config.save()
-}
-
-/// Everything that happened while switching the inference backend from the
-/// dashboard - the same save/reload/confirm steps as `ModelActivation`,
-/// without the download.
-pub struct BackendActivation {
-    pub daemon_reload: Option<Result<(), String>>,
-    pub confirmation: crate::doctor::DoctorReport,
-}
-
-impl BackendActivation {
-    /// Same rule as `ModelActivation::succeeded`: the saved backend must be
-    /// confirmed to load the model, and a running daemon must have reloaded.
-    pub fn succeeded(&self) -> bool {
-        !matches!(self.daemon_reload, Some(Err(_))) && self.confirmation.model_ready
-    }
-}
-
-/// Saves `name` as the preferred inference backend, reloads a running daemon
-/// and re-runs diagnostics to confirm the active model loads on it.
-pub async fn activate_backend(name: &str) -> anyhow::Result<BackendActivation> {
-    select_backend(name)?;
-    let (daemon_reload, confirmation) = reload_and_confirm().await?;
-    Ok(BackendActivation {
-        daemon_reload,
-        confirmation,
-    })
-}
-
-/// One formatted output line plus whether it represents an error/failure -
-/// the dashboard uses the flag to color the line; the CLI ignores it and
-/// prints every line the same way `main.rs` always has.
+/// One formatted output line plus whether it represents an error/failure.
+/// The CLI prints every line the same way `main.rs` always has.
 pub struct OutputLine {
     pub text: String,
     pub is_error: bool,
@@ -483,11 +336,9 @@ fn error_line(text: impl Into<String>) -> OutputLine {
 }
 
 /// Formats an IPC response exactly the way `tonguetyped start/stop/toggle/
-/// cancel/status/reload/last-result` has always printed it on stdout, so the
-/// dashboard's equivalent actions render the identical text. Unlike the CLI
-/// (which raises `Response::Error` as a hard `anyhow` failure and exits), this
-/// renders it as one error-flagged line - the dashboard must show the failure
-/// inline rather than tearing down the whole interactive session over it.
+/// cancel/status/reload/last-result` has always printed it on stdout. The CLI
+/// raises `Response::Error` as a hard `anyhow` failure before formatting;
+/// this renders it as one error-flagged line.
 pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
     match response {
         Response::Ok => vec![line("ok")],
@@ -587,7 +438,7 @@ pub fn format_response_lines(response: &Response) -> Vec<OutputLine> {
 }
 
 /// The user-facing label for the daemon's shortcut state. Kept in one place
-/// so text status, doctor and the dashboard cannot drift on what "available"
+/// so text status and doctor cannot drift on what "available"
 /// means; it never implies a key is grabbed when the action is unbound or the
 /// listener failed.
 pub fn shortcut_status_label(status: &ipc::ShortcutStatus) -> &'static str {
@@ -600,7 +451,7 @@ pub fn shortcut_status_label(status: &ipc::ShortcutStatus) -> &'static str {
 }
 
 /// Formats a `DoctorReport` exactly the way `tonguetyped doctor` has always
-/// printed it, shared with the dashboard's Doctor screen.
+/// printed it.
 pub fn format_doctor_lines(report: &DoctorReport) -> Vec<OutputLine> {
     let mut lines = vec![
         line(format!("build:          {}", report.build)),
@@ -1014,8 +865,8 @@ mod tests {
             ));
 
             // The cancel arrives on its own connection while the configure
-            // request is still waiting, exactly like the dashboard's
-            // "keep current" action.
+            // request is still waiting, exactly like the setup console's
+            // cancel of an open shortcut dialog.
             let (cancel_stream, _) = listener.accept().await.unwrap();
             let (cancel_reader, mut cancel_writer) = cancel_stream.into_split();
             let mut cancel_reader = tokio::io::BufReader::new(cancel_reader);

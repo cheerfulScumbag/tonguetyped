@@ -1,5 +1,5 @@
 //! Asserts that making the top-level subcommand optional (so bare
-//! `tonguetyped` opens the dashboard - see `tests/tui_dashboard.rs`) left
+//! `tonguetyped` opens the setup console - see `tests/setup_console.rs`) left
 //! `--help`, `--version`, and every existing subcommand's name/description
 //! untouched. These spawn the real compiled binary; none of this greps
 //! source.
@@ -87,23 +87,40 @@ fn every_subcommand_remains_directly_invocable_and_known_to_clap() {
 }
 
 #[test]
-fn no_subcommand_no_longer_prints_the_old_missing_subcommand_usage_error() {
-    // Historical baseline (see .superdesign/replica_html_template and the
-    // task report): bare invocation used to fail clap's required-subcommand
-    // check with exit code 2 and "Usage: tonguetyped <COMMAND>" on stderr.
-    // It must not do that anymore - it either opens the dashboard (a real
-    // terminal; see tests/tui_dashboard.rs) or, with no terminal attached,
-    // fails for a terminal-related reason instead of a clap usage error.
-    let output = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_ne!(output.status.code(), Some(2), "stderr was: {stderr}");
+fn no_subcommand_without_a_terminal_runs_the_same_setup_as_the_setup_command() {
+    // Bare invocation used to fail clap's required-subcommand check with exit
+    // code 2 and "Usage: tonguetyped <COMMAND>" on stderr. It now opens the
+    // setup console, and with no terminal attached it falls back to the same
+    // line-based setup `tonguetyped setup` runs, which an empty stdin cancels
+    // without writing anything.
+    let root = std::env::temp_dir().join(format!(
+        "tonguetyped-bare-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
+            .args(args)
+            .env("XDG_CONFIG_HOME", &root)
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let bare = run(&[]);
+    let setup = run(&["setup"]);
+    let stderr = String::from_utf8_lossy(&bare.stderr);
+    assert!(bare.status.success(), "stderr was: {stderr}");
     assert!(
         !stderr.contains("Usage: tonguetyped <COMMAND>"),
         "stderr was: {stderr}"
     );
+    let stdout = String::from_utf8_lossy(&bare.stdout);
+    assert!(stdout.contains("TongueTyped setup"), "stdout was: {stdout}");
+    assert_eq!(stdout, String::from_utf8_lossy(&setup.stdout));
+    assert!(!root.join("tonguetyped/config.toml").exists());
+    let _ = std::fs::remove_dir_all(&root);
 }

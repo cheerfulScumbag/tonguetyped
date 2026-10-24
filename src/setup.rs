@@ -52,37 +52,6 @@ fn fetch_requirement(
     })
 }
 
-/// Shared state a background shortcut-test thread reports into, polled by
-/// the dashboard's Shortcut screen - same shape as `ReconfigureHandle` above.
-pub(crate) struct ShortcutTestHandle {
-    pub result: Arc<Mutex<Option<Result<crate::activation::ShortcutTestOutcome, String>>>>,
-}
-
-/// Spawns a background thread that drives the shortcut test to completion
-/// and reports its outcome through the returned handle. It routes through the
-/// daemon's own listener when a daemon is running (`commands::test_shortcut`),
-/// and only opens a standalone portal session when none is. Runs on the
-/// shared portal runtime (`activation::portal_runtime`), not a fresh
-/// per-thread one, so the process-global portal connection stays usable for
-/// later calls; same as `reconfigure_shortcut_async` below.
-pub(crate) fn shortcut_test_async() -> ShortcutTestHandle {
-    let result = Arc::new(Mutex::new(None));
-    let result_for_thread = result.clone();
-    std::thread::spawn(move || {
-        let outcome = run_shortcut_test();
-        if let Ok(mut guard) = result_for_thread.lock() {
-            *guard = Some(outcome);
-        }
-    });
-    ShortcutTestHandle { result }
-}
-
-fn run_shortcut_test() -> Result<crate::activation::ShortcutTestOutcome, String> {
-    // Routes through the daemon when one owns the shortcut session; the
-    // standalone portal path is only for when no daemon is running.
-    crate::activation::portal_runtime().block_on(crate::commands::test_shortcut())
-}
-
 /// Shared state a background shortcut-reconfigure thread reports into,
 /// polled by the setup console's render loop - same shape as
 /// `ProvisionHandle` above and the console's microphone level meter, needed
@@ -249,40 +218,8 @@ impl Capabilities {
         })
     }
 
-    /// Discovery for surfaces (the dashboard) that must still open when audio
-    /// enumeration fails: falls back to just the system-default microphone,
-    /// whose own preview error is then surfaced in the microphone screen.
-    pub(crate) fn discover_or_default() -> Self {
-        Self::discover().unwrap_or_else(|error| {
-            tracing::warn!("audio device discovery failed: {error}");
-            let typing_backends = crate::output::list_available_backends();
-            let typing_warning = typing_backends
-                .is_empty()
-                .then(crate::output::typing_helper_warning);
-            Self {
-                microphones: vec![(
-                    "default".to_string(),
-                    "System default microphone".to_string(),
-                )],
-                typing_backends,
-                clipboard: crate::output::clipboard_available(),
-                inference_backends: crate::inference::backend_choices(),
-                typing_warning,
-            }
-        })
-    }
-
     pub(crate) fn microphone_index(&self, selected: &str) -> usize {
         self.microphone_position(selected).unwrap_or(0)
-    }
-
-    /// The display label for `selected`, resolving both stable device ids and
-    /// legacy stored names the same way `microphone_index` does, and falling
-    /// back to the stored value for a device that is no longer present.
-    pub(crate) fn microphone_label(&self, selected: &str) -> String {
-        self.microphone_position(selected)
-            .map(|index| self.microphones[index].1.clone())
-            .unwrap_or_else(|| selected.to_string())
     }
 
     fn microphone_position(&self, selected: &str) -> Option<usize> {
@@ -302,12 +239,6 @@ impl Capabilities {
     /// `typing_backends`).
     pub(crate) fn has_type_backend(&self) -> bool {
         !self.typing_backends.is_empty()
-    }
-
-    /// The install warning the typing-backend screens show when
-    /// `has_type_backend` is false, or `None` otherwise.
-    pub(crate) fn typing_helper_warning(&self) -> Option<&'static str> {
-        self.typing_warning
     }
 
     /// Why `method` cannot work on this machine, as the warning naming the
@@ -417,16 +348,6 @@ pub(crate) enum SetupOutcome {
     /// The interactive console closed with nothing to write.
     Unchanged,
     Cancelled,
-}
-
-/// Runs the interactive Ratatui setup console directly (`src/setup/console.rs`),
-/// bypassing the `stdin`/`stdout`-is-a-terminal branch in `run()` below since
-/// the dashboard (`crate::tui`) already knows it is attached to a real
-/// terminal when it offers "setup" as an action - this is the same console
-/// code `tonguetyped setup` uses, reused rather than reimplemented.
-pub(crate) fn run_console() -> anyhow::Result<SetupOutcome> {
-    let capabilities = Capabilities::discover()?;
-    console::run(capabilities)
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -562,8 +483,8 @@ fn configure(
     writeln!(
         output,
         "TongueTyped no longer picks a shortcut for you. After setup, run `tonguetyped` and \
-         open the Shortcut screen to choose one in your desktop's own shortcut dialog, or set \
-         it from your desktop's keyboard settings."
+         choose Shortcut on the Audio tab to set one in your desktop's own shortcut dialog, or \
+         set it from your desktop's keyboard settings."
     )?;
 
     ui.section(output, 5, "Transcript output")?;

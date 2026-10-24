@@ -14,7 +14,7 @@
 //! `ashpd` cache a portal connection - the precondition for the reopen hang it
 //! guards against.
 //!
-//! Named with a `pty_` prefix like `tests/tui_dashboard.rs` so
+//! Named with a `pty_` prefix like `tests/setup_console.rs` so
 //! `flake.nix`'s `cargoTestFlags = ["--" "--skip" "pty_"]` continues to
 //! skip these in the Nix sandboxed build (no usable pty/tty subsystem
 //! there); `nix develop -c cargo test` and plain `cargo test` run them

@@ -88,7 +88,7 @@ const DEVELOPMENT_DESKTOP_ENTRY: &str = concat!(
 /// [`ashpd`] caches its `zbus::Connection` in a process-global `OnceLock`, and
 /// zbus's tokio backend spawns that connection's socket-reader task on
 /// whichever runtime first opened it. Building a fresh runtime per call (as
-/// the wizard's and dashboard's one-shot shortcut threads used to) tears that
+/// the wizard's and the old dashboard's one-shot shortcut threads used to) tears that
 /// reader down the moment the call returns, so every later portal call -
 /// reopening the shortcut dialog, re-running the test - blocks forever inside
 /// [`GlobalShortcuts::new`] before it reaches D-Bus. Routing every such call

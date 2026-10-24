@@ -62,13 +62,6 @@ pub enum ActivationMode {
     Toggle,
 }
 
-/// The two `ActivationMode` choices as both configuration UIs label them, in
-/// order (index 0 = `Hold`, index 1 = `Toggle`).
-pub(crate) const ACTIVATION_MODE_LABELS: [&str; 2] = [
-    "Hold the shortcut while speaking",
-    "Press once to start and again to stop",
-];
-
 impl std::fmt::Display for ActivationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -438,13 +431,6 @@ pub(crate) const INITIAL_PROMPT_PLACEHOLDER: &str =
 pub(crate) const DECODING_HINT: &str =
     "Whisper models only. Thresholds take inf (log-prob: -inf) to turn off.";
 
-/// The `TranscriptionConfig::translate` choices as both configuration UIs
-/// label them, in order (index 0 = transcribe, index 1 = translate).
-pub(crate) const TRANSLATE_LABELS: [&str; 2] = [
-    "Transcribe in the spoken language",
-    "Translate speech into English",
-];
-
 impl TranscriptionConfig {
     /// Why `initial_prompt` cannot be sent to the decoder, if it cannot: an
     /// interior NUL cannot cross the C boundary, and transcribe.cpp rejects a
@@ -553,11 +539,6 @@ impl TranscriptionConfig {
                     .map(|knob| format!("model default ({})", knob.model_default)),
             )
             .collect()
-    }
-
-    /// The `TRANSLATE_LABELS` entry for the current `translate` choice.
-    pub(crate) fn translate_label(&self) -> &'static str {
-        TRANSLATE_LABELS[usize::from(self.translate)]
     }
 }
 
@@ -968,11 +949,6 @@ pub struct StartupConfig {
     #[serde(default = "default_false")]
     pub autostart: bool,
 }
-
-/// The `StartupConfig::autostart` choices as both configuration UIs label
-/// them, in order (index 0 = start manually, index 1 = autostart).
-pub(crate) const STARTUP_LABELS: [&str; 2] =
-    ["Start manually", "Start TongueTyped when you sign in"];
 
 fn default_activation_mode() -> ActivationMode {
     ActivationMode::Hold
