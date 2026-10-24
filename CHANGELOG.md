@@ -87,4 +87,9 @@ All notable changes to TongueTyped are recorded here.
   no longer sits in a tall card with a dead band underneath.
 - The libei typing path tolerates an already-registered portal application
   id, so it no longer falls back to the clipboard on every KDE dictation.
+- Typing backends are probed for availability at daemon load and on every
+  reload. A pinned backend that cannot work is replaced by one that can, the
+  substitution is logged, and status reports it along with output health.
+  The real round-trip typing test stays in `doctor --test-type`, in a surface
+  the tool owns.
 - The Silero VAD download is pinned and verified by SHA-256.
