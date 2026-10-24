@@ -56,7 +56,8 @@ All notable changes to TongueTyped are recorded here.
 ### Changed
 
 - The previous dashboard TUI is removed. Its settings and actions live in the
-  four-tab console that bare `tonguetyped` now opens.
+  four-tab console that bare `tonguetyped` now opens, and the console header
+  draws a lowercase `tonguetyped` wordmark with both `t` glyphs in green.
 - Transcript history saving is opt-in and off by default. Turning it off
   writes neither the history database nor transcript files.
 - The daemon watches `config.toml` and applies settled edits without a reload
@@ -78,8 +79,8 @@ All notable changes to TongueTyped are recorded here.
   manually started daemon.
 - `daemon stop` and `restart` stay bounded while a transcript is being typed,
   including when the typing helper is wedged.
-- The deck and setup no longer write a stale config snapshot over a newer
-  file, so they cannot revert the saved output method or reset the typing
+- The setup console no longer writes a stale config snapshot over a newer
+  file, so it cannot revert the saved output method or reset the typing
   backend and auto-submit.
 - The transcript-folder export writes files only when keeping transcripts is
   enabled.
