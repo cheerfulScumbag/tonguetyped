@@ -477,6 +477,20 @@ fn daemon_restart_stops_the_old_process_and_starts_a_new_one() {
     // necessarily finishes (re)binding, so confirm the new daemon is up by
     // waiting for the socket and then successfully talking to it.
     wait_for_socket(&socket);
+
+    // The replacement must lead its own session, detached from the terminal
+    // that launched it, so closing that terminal (SIGHUP) cannot stop it.
+    let pid: u32 = std::fs::read_to_string(runtime_dir.join("tonguetyped/daemon.lock"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        session_id(pid),
+        pid,
+        "the restarted daemon must run in its own session"
+    );
+
     let status = Command::new(binary)
         .arg("status")
         .env("XDG_CONFIG_HOME", &config_home)
@@ -498,4 +512,17 @@ fn daemon_restart_stops_the_old_process_and_starts_a_new_one() {
     assert!(stop.status.success());
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The session id of process `pid`, from the sixth field of `/proc/<pid>/stat`
+/// (read after the parenthesised command name, which may contain spaces).
+fn session_id(pid: u32) -> u32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let after_name = &stat[stat.rfind(')').unwrap() + 2..];
+    after_name
+        .split_whitespace()
+        .nth(3)
+        .unwrap()
+        .parse()
+        .unwrap()
 }

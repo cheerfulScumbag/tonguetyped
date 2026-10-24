@@ -268,7 +268,20 @@ impl OverlayHandle {
         self.try_send_command(Command {
             event,
             live_text: None,
+            hide: false,
             config: config.clone(),
+        })
+    }
+
+    /// Clears the overlay at once, without the dwell cue a terminal event
+    /// shows. The setup console's desktop test uses it to end its flash.
+    /// Returns `false` when no wlr-layer-shell compositor is available.
+    pub fn try_hide(&self) -> bool {
+        self.try_send_command(Command {
+            event: FeedbackEvent::Cancelled,
+            live_text: None,
+            hide: true,
+            config: OverlayConfig::default(),
         })
     }
 
@@ -292,6 +305,7 @@ impl OverlayHandle {
         self.try_send_command(Command {
             event: FeedbackEvent::Recording,
             live_text: Some(live_text),
+            hide: false,
             config: config.clone(),
         })
     }
@@ -317,6 +331,8 @@ struct Command {
     /// `FeedbackEvent::Recording`) is only a placeholder so the actor's
     /// phase/style/config handling is shared.
     live_text: Option<LiveText>,
+    /// Clear the overlay immediately; `event` and `config` are ignored.
+    hide: bool,
     config: OverlayConfig,
 }
 
@@ -577,6 +593,13 @@ struct State {
 
 impl State {
     fn handle_command(&mut self, command: Command, loop_handle: &LoopHandle<'static, State>) {
+        if command.hide {
+            self.phase = None;
+            self.deadline = None;
+            self.live_text = None;
+            self.redraw_all();
+            return;
+        }
         let paint_only = command.live_text.is_some();
         // A live-text snapshot is preview paint, not a state transition: it
         // must not advance the phase, restart the animation clock, or reset the

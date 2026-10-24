@@ -73,10 +73,10 @@ tonguetyped autostart enable
 ```
 
 `tonguetyped setup` does not choose a dictation key for you. The "Start or stop
-dictation" action is registered with your desktop by the daemon, and the wizard's
-Shortcut step only opens the desktop's own shortcut dialog when you press Ctrl+R
-there - the dashboard's Shortcut screen offers an explicit action to open that
-same dialog. If you skip it, setup finishes with no key bound. See
+dictation" action is registered with your desktop by the daemon, and pressing
+Ctrl+R in setup opens the desktop's own shortcut dialog to pick one - the
+dashboard's Shortcut screen offers an explicit action to open that same dialog.
+If you skip it, no key is bound. See
 [the desktop shortcut](#the-desktop-shortcut) for why.
 
 Sign out and back in after the first install so your desktop's portal discovers
@@ -275,6 +275,48 @@ falling back to CPU; setting any single name (`cpu`, `vulkan`, `cuda`, `rocm`,
 
 ## Using TongueTyped
 
+### Setup
+
+`tonguetyped setup` opens a four-tab settings utility in the terminal:
+
+| Tab | What it holds |
+| --- | --- |
+| **[1] Audio & Capture** | The microphone list with a live input-level meter, a Start/Stop Dictation card that drives the running daemon, the Hold or Toggle activation mode, the desktop shortcut, and the pause-media and feedback-sound switches |
+| **[2] Model & Engine** | The model catalog (ID, quantization, size, live-text support) with a detail card for the highlighted model, the inference backend (backends this build or machine cannot run are marked `×`), translation to English, and a drawer with the vocabulary prompt and the Whisper decoding knobs |
+| **[3] Output & Delivery** | The delivery method (Type, Paste, Clipboard, None) and the settings that method uses (typing helper, paste keys, pressing Enter after the text), spoken punctuation, filler removal, replacements, the cleanup command and its timeout, and transcript history with its retention limits and export folder |
+| **[4] Interface & System** | Overlay on or off, position, style, look, and waveform shape; a test that shows the real overlay on your desktop for four seconds; daemon Start, Stop, and Restart; and starting TongueTyped when you sign in |
+
+The header shows the daemon's state and inference backend while setup runs.
+Setup is keyboard-only, and the footer lists the keys for whatever has focus:
+
+| Key | Action |
+| --- | --- |
+| `1`-`4`, `Tab`/`Shift+Tab`, `[`/`]` | Switch tabs |
+| `j`/`k` or Up/Down | Move between controls |
+| `h`/`l` or Left/Right | Change a selector; on any other control, move between panes |
+| `Space` | Toggle a checkbox, pick a radio choice, or step a selector |
+| `Enter` | Run an action, edit a text field, or open the decoding drawer |
+| `Esc` | Leave a text field (dropping the edit), close the drawer, or stop waiting on the shortcut dialog; with nothing open, save and quit |
+| `Ctrl+S` | Save now |
+| `Ctrl+R` | Open the desktop's shortcut dialog |
+| `q` | Save and quit |
+| `Ctrl+C` | Quit without saving |
+
+Each change applies to setup's copy of the configuration at once; nothing is
+written until you save. Saving writes only the settings you changed onto the
+current `config.toml`, so edits made elsewhere in the meantime are kept, and a
+running daemon applies the file live. A value the configuration rejects is
+reported in setup and nothing is written. Start Dictation runs on the saved
+configuration, so press Ctrl+S first to try unsaved changes. When the daemon
+types a transcript into the setup terminal, setup shows it in the dictation
+card instead of treating it as key presses.
+
+Setup paints its own dark background, so it reads the same on a light
+terminal. With `NO_COLOR` set it uses no colours; selection and focus stay
+marked with symbols and reverse video. When standard input or output is not a
+terminal, `tonguetyped setup` falls back to numbered prompts read one per
+line, so it stays scriptable.
+
 ### The dashboard
 
 Run `tonguetyped` with no subcommand:
@@ -301,8 +343,8 @@ cycles the filter; a running download shows a progress gauge. **Output** picks
 the delivery method and toggles transcript history with Space; **History**
 toggles it with Space and edits the retention fields. Both save on Enter.
 **Setup** lists the five chapters (Model, Output, History, App, Review): Enter
-launches the existing guided setup console, `g` opens the full Settings screen
-below, and `c` opens Commands.
+opens the [setup utility](#setup), `g` opens the full Settings screen below, and
+`c` opens Commands.
 
 The full Settings screen groups the fifteen configuration areas into four
 sections - **Language & model**, **Capture & activation**, **Output**, and
@@ -312,7 +354,7 @@ output, Typing backend, Transcript folder, History retention, Startup,
 Overlay, and Media pause. A Commands row below them opens a separate screen
 listing the remaining commands, where Up/Down selects a command and Enter runs
 it. Selecting a settings row opens a screen that edits just that area, with the
-same live microphone preview and shortcut dialog the setup wizard uses. The
+same live microphone preview and shortcut dialog that setup uses. The
 **Transcript output** screen also holds the **Save transcript history** toggle,
 which is off by default. Esc from the Settings overview returns to the Deck.
 
@@ -326,9 +368,7 @@ backend, Transcript output, Shortcut, and Daemon apply only on Enter. Free-text
 rows keep Left/Right for the cursor and Backspace for deleting, with Esc as the
 way back. The Overlay screen previews the highlighted style, look, waveform
 shape, and position as you step them, so a choice is visible before Enter or
-backing out saves it. The setup wizard walks most of the same settings one step
-at a time with the same Overlay preview: Enter advances and Esc (or Backspace on
-its list steps) goes back.
+backing out saves it.
 
 ### Commands
 
@@ -360,7 +400,8 @@ TongueTyped registers the action **"Start or stop dictation"** with your
 desktop's global-shortcuts portal but deliberately never chooses a key for it.
 The binding belongs to the desktop, so you set it in your own shortcut dialog -
 KDE's System Settings, GNOME's Keyboard settings, and so on. The dashboard's
-Shortcut screen offers an explicit action to open that dialog for you.
+Shortcut screen offers an explicit action to open that dialog for you, and
+Ctrl+R in `tonguetyped setup` does the same.
 
 This means a fresh install starts **unbound**: nothing responds until you assign
 a key. `tonguetyped shortcut-test` waits up to 15 seconds for you to press
@@ -497,6 +538,11 @@ sweep with your voice. The `plain` look is the resting shape with no waveform.
 Loud speech is a big response; silence is calm, with the waveform's quiet
 stretches rendered as tiny dots.
 
+To see a combination before saving it, run **Test Overlay on Desktop** in
+`tonguetyped setup`'s Interface & System tab: it shows the real overlay on your
+desktop for four seconds with the style, position, look, and shape set there,
+and follows any change you make while it is up.
+
 `border` and `half-circle` ignore `overlay.position`; the other styles honour
 `overlay.position` (`top-left`, `top-right`, `bottom-left`, `bottom-right`,
 `top`, `bottom`, or `center`).
@@ -531,9 +577,10 @@ feedback_volume = 0.7
 ### Transcript output
 
 The configuration file defaults `output.method` to `none`, which delivers
-nothing. `tonguetyped setup` opens on `type` when saving transcripts is off and
-a typing helper is available, so a fresh install types into the focused
-application. Pick a method in the dashboard's **Transcript output** screen or
+nothing. On a fresh install with no `config.toml` yet, `tonguetyped setup`
+starts on `type` when a typing helper is available, so saving from setup types
+into the focused application. An existing `none` is left alone, with a warning
+in setup while saving transcripts is off. Pick a method in the dashboard's **Transcript output** screen or
 in `tonguetyped setup`:
 
 | `output.method` | What happens to the transcript |
@@ -786,7 +833,7 @@ denied request), typing falls back to leaving the transcript on the clipboard.
 
 The Nix package and the AUR package both carry the helpers, so a normal install
 works out of the box. When a method's helper is missing, the dashboard and the
-setup wizard say so and name the remedy for your compositor - install the missing
+setup utility say so and name the remedy for your compositor - install the missing
 helper, or switch to the built-in `libei` backend where it works - and refuse to
 save an output method that could never work. `paste` needs both the clipboard
 helper and a typing helper, which presses the paste keys.

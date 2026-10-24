@@ -6,10 +6,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// Identical wordmark to `setup::console::LOGO`, reused here rather than
-/// imported since the console draws it left-aligned while the dashboard must
-/// center it - the two call sites intentionally diverge only in alignment,
-/// not content.
+/// The block-letter wordmark, centered by `centered_logo`.
 const FULL_LOGO: &str = "████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗\n╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗\n   ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║\n   ██║   ██║   ██║██║╚██╗██║██║   ██║██║   ██║██╔══╝     ██║     ╚██╔╝  ██╔═══╝ ██╔══╝  ██║  ██║\n   ██║   ╚██████╔╝██║ ╚████║╚██████╔╝╚██████╔╝███████╗   ██║      ██║   ██║     ███████╗██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚═╝     ╚══════╝╚═════╝\n\n                              ░▒▓  S P E A K .  T Y P E .  R E P E A T .  ▓▒░";
 
 pub const FULL_LOGO_HEIGHT: u16 = 8;
@@ -31,8 +28,7 @@ fn centered_line(text: &str, width: u16, style: Style) -> Line<'static> {
 
 /// Centers the wordmark within `width` columns using the full block-art logo
 /// when it fits, falling back to a compact text wordmark otherwise so a
-/// narrow terminal never clips the logo into garbage - the setup console has
-/// no such fallback, which is a gap this dashboard must close. Returns the
+/// narrow terminal never clips the logo into garbage. Returns the
 /// rendered lines plus their total height so callers can size their layout
 /// chunk.
 pub fn centered_logo(width: u16) -> (Vec<Line<'static>>, u16) {

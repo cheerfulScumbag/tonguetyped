@@ -1,113 +1,2022 @@
-use super::{
-    output_summary, paste_keys_labels, Capabilities, ModelRequirement, ProvisionHandle,
-    ReconfigureHandle, SetupOutcome, AUTO_SUBMIT_LABELS, OUTPUT_METHODS,
-};
+//! The interactive setup console: a four-tab Ratatui utility (Audio &
+//! Capture, Model & Engine, Output & Delivery, Interface & System) that edits
+//! the in-memory `Config` as each control changes and writes it to disk on
+//! `Ctrl+S` or on leaving from the root (`q`, or `Esc` with no sub-menu open).
+//!
+//! The state machine (`App`) is pure: key handling only edits state and
+//! queues `Effect`s for anything that touches the outside world (daemon IPC,
+//! the desktop overlay, the shortcut portal, model downloads). `run` executes
+//! those effects on background threads and feeds their `TaskResult`s back, so
+//! the render loop never blocks and tests can drive every key path headlessly.
+
+use super::{Capabilities, ProvisionHandle, ReconfigureHandle, SetupOutcome};
 use crate::activation::ReconfigureOutcome;
-use crate::audio::{self, level_to_ratio};
-use crate::config::{ActivationMode, Config, OutputMethod, PasteKeys};
+use crate::audio;
+use crate::config::{ActivationMode, Config, OutputMethod, OverlayConfig, PasteKeys};
+use crate::feedback::FeedbackEvent;
+use crate::ipc::{Request, Response};
 use crate::overlay::{
-    clamp_look_value as overlay_clamp_look_value, default_shape as overlay_default_shape,
-    has_look_choice as overlay_has_look_choice, look_label as overlay_look_label,
-    shape_label as overlay_shape_label, shows_shape_choice as overlay_shows_shape_choice,
-    style_look_options as overlay_style_look_options, POSITION_VALUES as OVERLAY_POSITION_VALUES,
-    SHAPE_LABELS as OVERLAY_SHAPE_LABELS, SHAPE_VALUES as OVERLAY_SHAPE_VALUES,
-    STYLE_LABELS as OVERLAY_STYLE_LABELS, STYLE_VALUES as OVERLAY_STYLE_VALUES,
+    clamp_look_value, default_shape, has_look_choice, shows_shape_choice, style_look_options,
+    OverlayHandle, POSITION_VALUES, SHAPE_VALUES, STYLE_VALUES,
 };
 use crate::text_input::TextField;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
-use ratatui::{Frame, Terminal};
+use ratatui::Terminal;
+use std::cell::Cell;
 use std::io;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-const LOGO: &str = r#"████████╗ ██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗██████╗ ███████╗██████╗
-╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝ ██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗
-   ██║   ██║   ██║██╔██╗ ██║██║  ███╗██║   ██║█████╗     ██║    ╚████╔╝ ██████╔╝█████╗  ██║  ██║
-   ██║   ██║   ██║██║╚██╗██║██║   ██║██║   ██║██╔══╝     ██║     ╚██╔╝  ██╔═══╝ ██╔══╝  ██║  ██║
-   ██║   ╚██████╔╝██║ ╚████║╚██████╔╝╚██████╔╝███████╗   ██║      ██║   ██║     ███████╗██████╔╝
-   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ╚═╝     ╚══════╝╚═════╝
+mod render;
+#[cfg(test)]
+mod tests;
+mod theme;
 
-                              ░▒▓  S P E A K .  T Y P E .  R E P E A T .  ▓▒░"#;
-const LOGO_HEIGHT: u16 = 8;
+use theme::Theme;
 
-const ACTIVATION_LABELS: [&str; 2] = crate::config::ACTIVATION_MODE_LABELS;
-const STARTUP_LABELS: [&str; 2] = crate::config::STARTUP_LABELS;
-const OVERLAY_ENABLED_LABELS: [&str; 2] = ["Disabled", "Enabled"];
-/// The transcript-history choice: off (the default) or saving both the local
-/// database and the transcript-folder export.
-const HISTORY_ENABLED_LABELS: [&str; 2] = ["Off", "Save transcript history"];
+/// How long the desktop overlay test keeps the real overlay on screen.
+const OVERLAY_TEST_DURATION: Duration = Duration::from_secs(4);
+/// After a dictation finishes, the daemon may still be typing the transcript
+/// into this terminal. Keys keep landing in the capture box for this long
+/// after the daemon reports idle, so typed text never fires setup commands.
+const CAPTURE_GRACE: Duration = Duration::from_millis(1500);
+/// How often the background poller asks the daemon for its status.
+const STATUS_INTERVAL: Duration = Duration::from_millis(500);
+/// How long an informational message stays in the message row.
+const INFO_MESSAGE_TTL: Duration = Duration::from_secs(5);
 
-/// The Overlay steps' preview band height in rows, including its border and
-/// title - the same modest band the dashboard uses, so the two read as one UI.
-const PREVIEW_BAND_HEIGHT: u16 = 7;
-const TRANSLATE_LABELS: [&str; 2] = crate::config::TRANSLATE_LABELS;
-
-/// The two opt-in text passes as one four-way choice, in the order
-/// `text_pass_selection` stores them: `spoken + 2 * fillers`.
-const TEXT_PASS_LABELS: [&str; 4] = [
-    "No spoken punctuation or filler removal",
-    "Spoken punctuation only",
-    "Filler removal only (English dictation only)",
-    "Spoken punctuation and filler removal",
+/// The output methods in the order the Delivery selector lists them.
+const DELIVERY_METHODS: [OutputMethod; 4] = [
+    OutputMethod::Type,
+    OutputMethod::Paste,
+    OutputMethod::Clipboard,
+    OutputMethod::None,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepKind {
+pub(super) enum Tab {
+    Audio,
     Model,
-    Downloading,
-    InferenceBackend,
-    Translation,
-    Decoding,
-    TextProcessing,
-    TextPasses,
-    Microphone,
-    Activation,
-    Shortcut,
     Output,
-    OutputBackend,
-    OutputPasteKeys,
-    OutputSubmit,
-    Startup,
+    System,
+}
+
+impl Tab {
+    const ALL: [Tab; 4] = [Tab::Audio, Tab::Model, Tab::Output, Tab::System];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    fn offset(self, delta: isize) -> Tab {
+        let len = Self::ALL.len() as isize;
+        Self::ALL[(self.index() as isize + delta).rem_euclid(len) as usize]
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Tab::Audio => "Audio & Capture",
+            Tab::Model => "Model & Engine",
+            Tab::Output => "Output & Delivery",
+            Tab::System => "Interface & System",
+        }
+    }
+
+    fn short_title(self) -> &'static str {
+        match self {
+            Tab::Audio => "Audio",
+            Tab::Model => "Model",
+            Tab::Output => "Output",
+            Tab::System => "System",
+        }
+    }
+
+    /// The control focus lands on the first time the tab opens.
+    fn first_control(self) -> Control {
+        match self {
+            Tab::Audio => Control::Microphone(0),
+            Tab::Model => Control::ModelTable,
+            Tab::Output => Control::OutputMethod,
+            Tab::System => Control::OverlayEnabled,
+        }
+    }
+}
+
+/// Every focusable control. Which ones a tab shows depends on the current
+/// configuration (`App::layout`), so focus is stored as a `Control` rather
+/// than a position and falls back to the tab's first control when its control
+/// disappears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Control {
+    Microphone(usize),
+    Dictation,
+    ActivationMode,
+    Shortcut,
+    PauseMedia,
+    FeedbackSounds,
+    ModelTable,
+    Backend,
+    Translate,
+    Decoding,
+    OutputMethod,
+    TypingBackend,
+    PasteKeys,
+    AutoSubmit,
+    SpokenPunctuation,
+    RemoveFillers,
     HistoryEnabled,
-    HistoryRetention,
-    TranscriptFolder,
+    Field(Field),
     OverlayEnabled,
     OverlayPosition,
     OverlayStyle,
     OverlayLook,
     OverlayShape,
-    Confirm,
+    OverlayTest,
+    DaemonStart,
+    DaemonStop,
+    DaemonRestart,
+    Autostart,
 }
 
-enum ControlFlow {
-    Continue,
-    Finish(SetupOutcome),
+/// The editable text fields. `Decode(0)` is the vocabulary prompt and
+/// `Decode(1..)` the `DECODE_KNOBS` knobs, all shown in the decoding drawer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Field {
+    Replacements,
+    CleanupCommand,
+    CleanupTimeout,
+    MaxEntries,
+    MaxAge,
+    TranscriptFolder,
+    Decode(usize),
 }
+
+/// How a control responds to keys, which also decides its footer hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// One option of a vertical radio list: Space selects it.
+    Radio,
+    /// A checkbox: Space toggles it.
+    Check,
+    /// A horizontal selector or stepper: h/l (or arrows) step it, Space
+    /// cycles to the next choice.
+    Choice,
+    /// A button: Enter (or Space) runs it.
+    Action,
+    /// A text field: Enter starts editing it.
+    Text,
+    /// The model catalog table: j/k move its cursor, Space selects the row.
+    Table,
+}
+
+impl Control {
+    pub(super) fn kind(self) -> Kind {
+        match self {
+            Control::Microphone(_) => Kind::Radio,
+            Control::PauseMedia
+            | Control::FeedbackSounds
+            | Control::Translate
+            | Control::AutoSubmit
+            | Control::SpokenPunctuation
+            | Control::RemoveFillers
+            | Control::HistoryEnabled
+            | Control::Autostart => Kind::Check,
+            Control::ActivationMode
+            | Control::Backend
+            | Control::OutputMethod
+            | Control::TypingBackend
+            | Control::PasteKeys
+            | Control::OverlayEnabled
+            | Control::OverlayPosition
+            | Control::OverlayStyle
+            | Control::OverlayLook
+            | Control::OverlayShape => Kind::Choice,
+            Control::Dictation
+            | Control::Shortcut
+            | Control::Decoding
+            | Control::OverlayTest
+            | Control::DaemonStart
+            | Control::DaemonStop
+            | Control::DaemonRestart => Kind::Action,
+            Control::Field(_) => Kind::Text,
+            Control::ModelTable => Kind::Table,
+        }
+    }
+}
+
+/// The colour role of a piece of informational text. Every role that carries
+/// meaning also carries it in words or symbols, never in colour alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tone {
+    Text,
+    Dim,
+    Accent,
+    Ok,
+    Warn,
+    Error,
+    Recording,
+}
+
+pub(super) enum Row {
+    Control(Control),
+    /// One line of label-free information, cut to the pane width.
+    Info(Vec<(String, Tone)>),
+    /// A sentence wrapped onto as many lines as the pane width needs.
+    Wrapped(String, Tone),
+    /// The live microphone input-level gauge.
+    Meter,
+}
+
+pub(super) struct Pane {
+    pub(super) title: &'static str,
+    pub(super) rows: Vec<Row>,
+}
+
+/// One tab's panes. On a wide terminal `left` and `right` sit side by side;
+/// on a narrow one they stack into a single scrolling column. The Model tab
+/// also shows the catalog table, which takes the left column (or the top of
+/// the narrow column) by itself.
+pub(super) struct TabLayout {
+    pub(super) table: bool,
+    pub(super) left: Vec<Pane>,
+    pub(super) right: Vec<Pane>,
+}
+
+impl TabLayout {
+    /// Every focusable control in focus order.
+    fn controls(&self) -> Vec<Control> {
+        let mut controls = Vec::new();
+        if self.table {
+            controls.push(Control::ModelTable);
+        }
+        for pane in self.left.iter().chain(&self.right) {
+            controls.extend(pane.controls());
+        }
+        controls
+    }
+
+    /// The controls grouped by pane, in focus order, with the table (if any)
+    /// as its own group, so h/l can jump between panes.
+    fn groups(&self, wide: bool) -> Vec<Vec<Control>> {
+        let mut groups = Vec::new();
+        if self.table {
+            groups.push(vec![Control::ModelTable]);
+        }
+        if wide && !self.table {
+            // Side by side, h/l moves between the two columns.
+            for column in [&self.left, &self.right] {
+                let controls: Vec<Control> = column.iter().flat_map(Pane::controls).collect();
+                if !controls.is_empty() {
+                    groups.push(controls);
+                }
+            }
+        } else {
+            for pane in self.left.iter().chain(&self.right) {
+                let controls = pane.controls();
+                if !controls.is_empty() {
+                    groups.push(controls);
+                }
+            }
+        }
+        groups
+    }
+}
+
+impl Pane {
+    fn controls(&self) -> Vec<Control> {
+        self.rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Control(control) => Some(*control),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// What the daemon reported on the last status poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DaemonState {
+    /// No poll has answered yet.
+    Unknown,
+    Stopped,
+    Idle,
+    Recording,
+    Processing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DaemonSnapshot {
+    pub(super) state: DaemonState,
+    /// The backend the daemon resolved, e.g. `transcribe.cpp/vulkan`.
+    pub(super) backend: Option<String>,
+    pub(super) error: Option<String>,
+}
+
+impl DaemonSnapshot {
+    const UNKNOWN: Self = Self {
+        state: DaemonState::Unknown,
+        backend: None,
+        error: None,
+    };
+
+    fn from_response(response: &Response) -> Self {
+        match response {
+            Response::Status {
+                state,
+                backend,
+                operation_error,
+                ..
+            } => Self {
+                state: match state.as_str() {
+                    "recording" => DaemonState::Recording,
+                    "processing" => DaemonState::Processing,
+                    _ => DaemonState::Idle,
+                },
+                backend: backend.clone(),
+                error: operation_error.clone(),
+            },
+            _ => Self {
+                state: DaemonState::Idle,
+                backend: None,
+                error: None,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DaemonAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl DaemonAction {
+    fn progress(self) -> &'static str {
+        match self {
+            DaemonAction::Start => "Starting the daemon...",
+            DaemonAction::Stop => "Stopping the daemon...",
+            DaemonAction::Restart => "Restarting the daemon...",
+        }
+    }
+}
+
+/// Work the run loop performs outside the state machine.
+#[derive(Debug, Clone)]
+pub(super) enum Effect {
+    /// `true` starts a dictation, `false` stops the running one.
+    Dictation(bool),
+    Daemon(DaemonAction),
+    FetchLastResult,
+    OverlayShow(OverlayConfig),
+    OverlayHide,
+    OpenShortcutDialog,
+    CancelShortcutDialog,
+    Download(String),
+}
+
+/// A finished (or progressing) piece of background work, applied by
+/// `App::apply`.
+#[derive(Debug, Clone)]
+pub(super) enum TaskResult {
+    Status(DaemonSnapshot),
+    Dictation(Result<(), String>),
+    Daemon(Result<String, String>),
+    /// The daemon's newest transcript and when it was delivered (Unix
+    /// seconds), if it has one.
+    LastResult(Option<(String, u64)>),
+    /// Whether the desktop accepted the overlay test (a layer-shell
+    /// compositor is available).
+    OverlayShown(bool),
+    Shortcut(Result<ReconfigureOutcome, String>),
+    DownloadProgress(u64, u64),
+    Download(Result<crate::model::DownloadOutcome, String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Message {
+    pub(super) text: String,
+    pub(super) tone: Tone,
+    expires: Option<Instant>,
+}
+
+/// Text the daemon typed into this terminal while a dictation finished.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Capture {
+    pub(super) text: String,
+    /// When capturing ends; `None` while the daemon is still processing.
+    until: Option<Instant>,
+}
+
+pub(super) struct OverlayTest {
+    pub(super) until: Instant,
+    shown: OverlayConfig,
+}
+
+pub(super) struct Download {
+    pub(super) id: String,
+    pub(super) progress: (u64, u64),
+    pub(super) result: Option<Result<crate::model::DownloadOutcome, String>>,
+}
+
+pub(super) struct App {
+    pub(super) config: Config,
+    /// The configuration as last read from or written to disk. Saving applies
+    /// only the fields that differ from it onto the current file.
+    baseline: Config,
+    pub(super) capabilities: Capabilities,
+    theme: Theme,
+    pub(super) tab: Tab,
+    focus: [Control; 4],
+    pub(super) model_cursor: usize,
+    pub(super) installed: Vec<bool>,
+    pub(super) editing: Option<(Field, TextField)>,
+    pub(super) drawer: Option<usize>,
+    pub(super) message: Option<Message>,
+    pub(super) daemon: DaemonSnapshot,
+    pub(super) daemon_busy: Option<DaemonAction>,
+    pub(super) dictation_pending: bool,
+    pub(super) capture: Option<Capture>,
+    /// When the dictation in progress (or the last one) started, in Unix
+    /// seconds, so an older transcript is never shown as its result.
+    dictation_since: Option<u64>,
+    pub(super) last_result: Option<String>,
+    pub(super) overlay_test: Option<OverlayTest>,
+    pub(super) shortcut_waiting: bool,
+    pub(super) shortcut_feedback: Option<Result<ReconfigureOutcome, String>>,
+    pub(super) download: Option<Download>,
+    pub(super) mic_monitor: audio::MicMonitor,
+    effects: Vec<Effect>,
+    saved: bool,
+    exit: Option<SetupOutcome>,
+    /// Whether the last render had room for two columns; h/l pane movement
+    /// follows what is on screen.
+    pub(super) wide: Cell<bool>,
+    pub(super) scroll: [Cell<u16>; 2],
+    /// The catalog table's first visible row; `None` until the first frame
+    /// centres the active model.
+    pub(super) table_scroll: Cell<Option<usize>>,
+    pub(super) drawer_scroll: Cell<u16>,
+}
+
+impl App {
+    /// `fresh` is true when no config file exists yet. The defaults deliver
+    /// nothing (`none` with history off), so a fresh install starts on
+    /// typing, the primary dictation path, as an unsaved edit like any other.
+    /// An existing file's `none` is the user's choice and is left alone.
+    fn new(mut config: Config, capabilities: Capabilities, theme: Theme, fresh: bool) -> Self {
+        let baseline = config.clone();
+        if fresh
+            && !config.history.enabled
+            && config.output.method == OutputMethod::None
+            && capabilities
+                .output_method_problem(OutputMethod::Type)
+                .is_none()
+        {
+            config.output.method = OutputMethod::Type;
+        }
+        let model_cursor = crate::catalog::ENTRIES
+            .iter()
+            .position(|entry| entry.id == config.model.active_model)
+            .unwrap_or(0);
+        let installed = crate::catalog::ENTRIES
+            .iter()
+            .map(|entry| crate::catalog::is_installed(entry.id))
+            .collect();
+        let microphone = capabilities.microphone_index(&config.audio.microphone);
+        Self {
+            config,
+            baseline,
+            capabilities,
+            theme,
+            tab: Tab::Audio,
+            focus: [
+                Control::Microphone(microphone),
+                Tab::Model.first_control(),
+                Tab::Output.first_control(),
+                Tab::System.first_control(),
+            ],
+            model_cursor,
+            installed,
+            editing: None,
+            drawer: None,
+            message: None,
+            daemon: DaemonSnapshot::UNKNOWN,
+            daemon_busy: None,
+            dictation_pending: false,
+            capture: None,
+            dictation_since: None,
+            last_result: None,
+            overlay_test: None,
+            shortcut_waiting: false,
+            shortcut_feedback: None,
+            download: None,
+            mic_monitor: audio::MicMonitor::new(),
+            effects: Vec::new(),
+            saved: false,
+            exit: None,
+            wide: Cell::new(true),
+            scroll: [Cell::new(0), Cell::new(0)],
+            table_scroll: Cell::new(None),
+            drawer_scroll: Cell::new(0),
+        }
+    }
+
+    pub(super) fn take_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
+    /// Whether the in-memory configuration differs from what is on disk.
+    pub(super) fn dirty(&self) -> bool {
+        toml::Value::try_from(&self.config).ok() != toml::Value::try_from(&self.baseline).ok()
+    }
+
+    pub(super) fn focused(&self) -> Control {
+        let wanted = self.focus[self.tab.index()];
+        let controls = self.layout().controls();
+        if controls.contains(&wanted) {
+            wanted
+        } else {
+            controls
+                .first()
+                .copied()
+                .unwrap_or(self.tab.first_control())
+        }
+    }
+
+    fn set_focus(&mut self, control: Control) {
+        let previous = self.focused();
+        self.focus[self.tab.index()] = control;
+        if matches!(control, Control::Microphone(_)) && control != previous {
+            self.mic_monitor.defer_restart();
+        }
+    }
+
+    fn info(&mut self, text: impl Into<String>) {
+        self.message = Some(Message {
+            text: text.into(),
+            tone: Tone::Ok,
+            expires: Some(Instant::now() + INFO_MESSAGE_TTL),
+        });
+    }
+
+    fn warn(&mut self, text: impl Into<String>) {
+        self.message = Some(Message {
+            text: text.into(),
+            tone: Tone::Warn,
+            expires: None,
+        });
+    }
+
+    /// A usage hint for the control being edited, shown until the edit ends.
+    fn hint(&mut self, text: impl Into<String>) {
+        self.message = Some(Message {
+            text: text.into(),
+            tone: Tone::Dim,
+            expires: None,
+        });
+    }
+
+    fn error(&mut self, text: impl Into<String>) {
+        self.message = Some(Message {
+            text: text.into(),
+            tone: Tone::Error,
+            expires: None,
+        });
+    }
+
+    // ---- layout -------------------------------------------------------
+
+    pub(super) fn layout(&self) -> TabLayout {
+        match self.tab {
+            Tab::Audio => self.audio_layout(),
+            Tab::Model => self.model_layout(),
+            Tab::Output => self.output_layout(),
+            Tab::System => self.system_layout(),
+        }
+    }
+
+    pub(super) fn selected_microphone(&self) -> usize {
+        self.capabilities
+            .microphone_index(&self.config.audio.microphone)
+    }
+
+    pub(super) fn dictation_badge(&self) -> (&'static str, Tone) {
+        if self.dictation_pending {
+            return ("[ WAITING... ]", Tone::Dim);
+        }
+        match self.daemon.state {
+            DaemonState::Recording => ("[ \u{1F534} RECORDING... ]", Tone::Recording),
+            DaemonState::Processing => ("[ TRANSCRIBING... ]", Tone::Accent),
+            DaemonState::Stopped => ("[ DAEMON STOPPED ]", Tone::Warn),
+            DaemonState::Unknown => ("[ CHECKING... ]", Tone::Dim),
+            DaemonState::Idle => ("[ IDLE ]", Tone::Text),
+        }
+    }
+
+    fn audio_layout(&self) -> TabLayout {
+        // The meter leads, so a long device list never scrolls it away.
+        let microphone: Vec<Row> = std::iter::once(Row::Meter)
+            .chain(
+                (0..self.capabilities.microphones.len())
+                    .map(|index| Row::Control(Control::Microphone(index))),
+            )
+            .collect();
+
+        let (badge, tone) = self.dictation_badge();
+        let mut dictation = vec![
+            Row::Info(vec![("Status  ".into(), Tone::Dim), (badge.into(), tone)]),
+            Row::Control(Control::Dictation),
+        ];
+        if let Some(capture) = &self.capture {
+            dictation.push(Row::Info(vec![
+                ("Typed here: ".into(), Tone::Dim),
+                (capture_preview(&capture.text), Tone::Text),
+            ]));
+        } else if let Some(text) = &self.last_result {
+            dictation.push(Row::Info(vec![
+                ("Last result: ".into(), Tone::Dim),
+                (text.clone(), Tone::Text),
+            ]));
+        }
+        if self.dirty() {
+            dictation.push(Row::Wrapped(
+                "Dictation uses the saved settings; Ctrl+S applies your edits.".into(),
+                Tone::Dim,
+            ));
+        }
+
+        let mut activation = vec![
+            Row::Control(Control::ActivationMode),
+            Row::Control(Control::Shortcut),
+        ];
+        if self.shortcut_waiting {
+            activation.push(Row::Wrapped(
+                "A shortcut window is open on your desktop. Set the key there and close it; \
+                 Enter or Esc keeps the current one."
+                    .into(),
+                Tone::Warn,
+            ));
+        } else if let Some(feedback) = &self.shortcut_feedback {
+            activation.push(match feedback {
+                Ok(ReconfigureOutcome::Changed {
+                    trigger_description,
+                }) => Row::Info(vec![(
+                    format!(
+                        "Bound: {}",
+                        crate::activation::keybind_label(trigger_description)
+                    ),
+                    Tone::Ok,
+                )]),
+                Ok(ReconfigureOutcome::Unchanged {
+                    trigger_description,
+                }) => Row::Info(vec![(
+                    format!(
+                        "No change: still {}",
+                        crate::activation::keybind_display(trigger_description)
+                    ),
+                    Tone::Warn,
+                )]),
+                Err(error) => Row::Wrapped(format!("Error: {error}"), Tone::Error),
+            });
+        }
+
+        TabLayout {
+            table: false,
+            left: vec![Pane {
+                title: "Microphone",
+                rows: microphone,
+            }],
+            right: vec![
+                Pane {
+                    title: "Live dictation",
+                    rows: dictation,
+                },
+                Pane {
+                    title: "Activation",
+                    rows: activation,
+                },
+                Pane {
+                    title: "Audio",
+                    rows: vec![
+                        Row::Control(Control::PauseMedia),
+                        Row::Control(Control::FeedbackSounds),
+                    ],
+                },
+            ],
+        }
+    }
+
+    fn model_layout(&self) -> TabLayout {
+        let entry =
+            &crate::catalog::ENTRIES[self.model_cursor.min(crate::catalog::ENTRIES.len() - 1)];
+        let info = entry.info();
+        let status = self.model_status(entry.id);
+        let detail = vec![
+            Row::Info(vec![(entry.id.to_string(), Tone::Accent)]),
+            Row::Info(vec![
+                ("Family   ".into(), Tone::Dim),
+                (info.family_label().into(), Tone::Text),
+            ]),
+            Row::Info(vec![
+                ("License  ".into(), Tone::Dim),
+                (entry.license_spdx.into(), Tone::Text),
+            ]),
+            Row::Info(vec![
+                ("Language ".into(), Tone::Dim),
+                (info.language_summary(), Tone::Text),
+            ]),
+            Row::Info(vec![
+                ("Input    ".into(), Tone::Dim),
+                (input_limit(info.long_form), Tone::Text),
+            ]),
+            Row::Info(vec![("Status   ".into(), Tone::Dim), status]),
+        ];
+
+        let mut backend = vec![Row::Control(Control::Backend)];
+        let unavailable: Vec<&str> = self
+            .capabilities
+            .inference_backends
+            .iter()
+            .filter(|choice| choice.unavailable.is_some())
+            .map(|choice| choice.name)
+            .collect();
+        if !unavailable.is_empty() {
+            backend.push(Row::Wrapped(
+                format!("\u{00d7} unavailable here: {}", unavailable.join(", ")),
+                Tone::Dim,
+            ));
+        }
+
+        TabLayout {
+            table: true,
+            left: Vec::new(),
+            right: vec![
+                Pane {
+                    title: "Model detail",
+                    rows: detail,
+                },
+                Pane {
+                    title: "Inference backend",
+                    rows: backend,
+                },
+                Pane {
+                    title: "Translation & decoding",
+                    rows: vec![
+                        Row::Control(Control::Translate),
+                        Row::Control(Control::Decoding),
+                    ],
+                },
+            ],
+        }
+    }
+
+    fn model_status(&self, id: &str) -> (String, Tone) {
+        if let Some(download) = self.download.as_ref().filter(|download| download.id == id) {
+            return match &download.result {
+                None => {
+                    let (done, total) = download.progress;
+                    let percent = (done * 100).checked_div(total).unwrap_or(0);
+                    (format!("Downloading {percent}%"), Tone::Accent)
+                }
+                Some(Ok(outcome)) => (
+                    format!("Installed ({})", super::outcome_label(*outcome)),
+                    Tone::Ok,
+                ),
+                Some(Err(error)) => (format!("Download failed: {error}"), Tone::Error),
+            };
+        }
+        let installed = crate::catalog::ENTRIES
+            .iter()
+            .position(|entry| entry.id == id)
+            .and_then(|index| self.installed.get(index).copied())
+            .unwrap_or(false);
+        let active = self.config.model.active_model == id;
+        match (active, installed) {
+            (true, true) => ("\u{25cf} Active, installed".into(), Tone::Ok),
+            (true, false) => ("\u{25cf} Active, not downloaded".into(), Tone::Warn),
+            (false, true) => ("Installed - Space selects".into(), Tone::Text),
+            (false, false) => ("Not downloaded - Space fetches".into(), Tone::Dim),
+        }
+    }
+
+    fn output_layout(&self) -> TabLayout {
+        let method = self.config.output.method;
+        let mut delivery = vec![Row::Control(Control::OutputMethod)];
+        if method.inserts_text() && self.capabilities.has_type_backend() {
+            delivery.push(Row::Control(Control::TypingBackend));
+        }
+        if method == OutputMethod::Paste {
+            delivery.push(Row::Control(Control::PasteKeys));
+        }
+        if method.inserts_text() {
+            delivery.push(Row::Control(Control::AutoSubmit));
+        }
+        if let Some(problem) = self.capabilities.output_method_problem(method) {
+            delivery.push(Row::Wrapped(format!("! {problem}"), Tone::Warn));
+        } else if method == OutputMethod::None && !self.config.history.enabled {
+            delivery.push(Row::Wrapped(
+                "! Transcripts go nowhere: nothing is delivered and history is off. Type \
+                 types into the focused application."
+                    .into(),
+                Tone::Warn,
+            ));
+        } else {
+            let blocked: Vec<String> = DELIVERY_METHODS
+                .iter()
+                .filter(|candidate| {
+                    self.capabilities
+                        .output_method_problem(**candidate)
+                        .is_some()
+                })
+                .map(|candidate| method_label(*candidate).to_string())
+                .collect();
+            if !blocked.is_empty() {
+                delivery.push(Row::Info(vec![(
+                    format!(
+                        "\u{00d7} {} need a missing helper (see doctor)",
+                        blocked.join(", ")
+                    ),
+                    Tone::Dim,
+                )]));
+            }
+        }
+
+        let filters = vec![
+            Row::Control(Control::SpokenPunctuation),
+            Row::Control(Control::RemoveFillers),
+            Row::Control(Control::Field(Field::Replacements)),
+            Row::Control(Control::Field(Field::CleanupCommand)),
+            Row::Control(Control::Field(Field::CleanupTimeout)),
+        ];
+
+        let mut history = vec![Row::Control(Control::HistoryEnabled)];
+        if self.config.history.enabled {
+            history.push(Row::Control(Control::Field(Field::MaxEntries)));
+            history.push(Row::Control(Control::Field(Field::MaxAge)));
+            history.push(Row::Control(Control::Field(Field::TranscriptFolder)));
+        } else {
+            history.push(Row::Wrapped(
+                "Off: no history database or transcript files are written.".into(),
+                Tone::Dim,
+            ));
+        }
+
+        TabLayout {
+            table: false,
+            left: vec![
+                Pane {
+                    title: "Delivery",
+                    rows: delivery,
+                },
+                Pane {
+                    title: "History & logs",
+                    rows: history,
+                },
+            ],
+            right: vec![Pane {
+                title: "Text filters",
+                rows: filters,
+            }],
+        }
+    }
+
+    fn system_layout(&self) -> TabLayout {
+        let mut overlay = vec![
+            Row::Control(Control::OverlayEnabled),
+            Row::Control(Control::OverlayPosition),
+            Row::Control(Control::OverlayStyle),
+        ];
+        if has_look_choice(&self.config.overlay.style) {
+            overlay.push(Row::Control(Control::OverlayLook));
+        }
+        if shows_shape_choice(&self.config.overlay.style, &self.overlay_look()) {
+            overlay.push(Row::Control(Control::OverlayShape));
+        }
+
+        let mut test = vec![Row::Control(Control::OverlayTest)];
+        if let Some(seconds) = self.overlay_seconds_left() {
+            test.push(Row::Info(vec![(
+                format!("Showing on your desktop now, {seconds}s left"),
+                Tone::Accent,
+            )]));
+        } else {
+            test.push(Row::Wrapped(
+                "Shows the real overlay for 4 seconds with the style, position, look, and \
+                 shape set above."
+                    .into(),
+                Tone::Dim,
+            ));
+            if !self.config.overlay.enabled {
+                test.push(Row::Wrapped(
+                    "The overlay is off for dictation; the test still shows it.".into(),
+                    Tone::Dim,
+                ));
+            }
+        }
+
+        let mut daemon = vec![Row::Info(vec![
+            ("State  ".into(), Tone::Dim),
+            daemon_state_label(self.daemon.state),
+        ])];
+        if let Some(action) = self.daemon_busy {
+            daemon.push(Row::Info(vec![(action.progress().into(), Tone::Accent)]));
+        }
+        daemon.extend([
+            Row::Control(Control::DaemonStart),
+            Row::Control(Control::DaemonStop),
+            Row::Control(Control::DaemonRestart),
+            Row::Control(Control::Autostart),
+        ]);
+
+        TabLayout {
+            table: false,
+            left: vec![
+                Pane {
+                    title: "Desktop overlay",
+                    rows: overlay,
+                },
+                Pane {
+                    title: "Live screen test",
+                    rows: test,
+                },
+            ],
+            right: vec![Pane {
+                title: "Daemon",
+                rows: daemon,
+            }],
+        }
+    }
+
+    /// Whole seconds left in the desktop overlay test, while one runs.
+    pub(super) fn overlay_seconds_left(&self) -> Option<u64> {
+        self.overlay_test.as_ref().map(|test| {
+            test.until
+                .saturating_duration_since(Instant::now())
+                .as_secs_f32()
+                .ceil() as u64
+        })
+    }
+
+    // ---- choices --------------------------------------------------------
+
+    /// The options of a `Kind::Choice` control: each label, whether it can be
+    /// picked here, and the index of the current value.
+    pub(super) fn choice(&self, control: Control) -> (Vec<(String, bool)>, usize) {
+        match control {
+            Control::ActivationMode => (
+                vec![("Hold".into(), true), ("Toggle".into(), true)],
+                usize::from(self.config.activation.mode == ActivationMode::Toggle),
+            ),
+            Control::Backend => {
+                let options: Vec<(String, bool)> =
+                    if self.capabilities.inference_backends.is_empty() {
+                        vec![("auto".into(), true)]
+                    } else {
+                        self.capabilities
+                            .inference_backends
+                            .iter()
+                            .map(|choice| (choice.name.to_string(), choice.unavailable.is_none()))
+                            .collect()
+                    };
+                let current = options
+                    .iter()
+                    .position(|(name, _)| *name == self.config.model.preferred_backend)
+                    .unwrap_or(0);
+                (options, current)
+            }
+            Control::OutputMethod => (
+                DELIVERY_METHODS
+                    .iter()
+                    .map(|method| {
+                        (
+                            method_label(*method).to_string(),
+                            self.capabilities.output_method_problem(*method).is_none(),
+                        )
+                    })
+                    .collect(),
+                DELIVERY_METHODS
+                    .iter()
+                    .position(|method| *method == self.config.output.method)
+                    .unwrap_or(0),
+            ),
+            Control::TypingBackend => {
+                let values = self.capabilities.typing_backend_values();
+                let current = values
+                    .iter()
+                    .position(|value| *value == self.config.output.typing_backend)
+                    .unwrap_or(0);
+                (
+                    values.into_iter().map(|value| (value, true)).collect(),
+                    current,
+                )
+            }
+            Control::PasteKeys => (
+                PasteKeys::ALL
+                    .iter()
+                    .map(|keys| (keys.to_string(), true))
+                    .collect(),
+                PasteKeys::ALL
+                    .iter()
+                    .position(|keys| *keys == self.config.output.paste_keys)
+                    .unwrap_or(0),
+            ),
+            Control::OverlayEnabled => (
+                vec![("Off".into(), true), ("On".into(), true)],
+                usize::from(self.config.overlay.enabled),
+            ),
+            Control::OverlayPosition => (
+                POSITION_VALUES
+                    .iter()
+                    .map(|value| (value.to_string(), true))
+                    .collect(),
+                POSITION_VALUES
+                    .iter()
+                    .position(|value| *value == self.config.overlay.position)
+                    .unwrap_or(0),
+            ),
+            Control::OverlayStyle => (
+                crate::overlay::STYLE_LABELS
+                    .iter()
+                    .map(|label| (label.to_string(), true))
+                    .collect(),
+                STYLE_VALUES
+                    .iter()
+                    .position(|value| *value == self.config.overlay.style)
+                    .unwrap_or(0),
+            ),
+            Control::OverlayLook => {
+                let options = style_look_options(&self.config.overlay.style);
+                let look = self.overlay_look();
+                (
+                    options
+                        .iter()
+                        .map(|(_, label)| (label.to_string(), true))
+                        .collect(),
+                    options
+                        .iter()
+                        .position(|(value, _)| *value == look)
+                        .unwrap_or(0),
+                )
+            }
+            Control::OverlayShape => (
+                crate::overlay::SHAPE_LABELS
+                    .iter()
+                    .map(|label| (label.to_string(), true))
+                    .collect(),
+                SHAPE_VALUES
+                    .iter()
+                    .position(|value| *value == self.config.overlay.waveform_shape)
+                    .unwrap_or(0),
+            ),
+            _ => (Vec::new(), 0),
+        }
+    }
+
+    /// The configured look, resolved against what the style offers.
+    fn overlay_look(&self) -> String {
+        clamp_look_value(&self.config.overlay.style, &self.config.overlay.look)
+    }
+
+    /// Moves a choice `delta` steps, skipping options that cannot work here
+    /// and wrapping at the ends.
+    fn step(&mut self, control: Control, delta: isize) {
+        let (options, current) = self.choice(control);
+        if options.is_empty() {
+            return;
+        }
+        let len = options.len() as isize;
+        let mut next = current as isize;
+        for _ in 0..options.len() {
+            next = (next + delta).rem_euclid(len);
+            if options[next as usize].1 {
+                break;
+            }
+        }
+        let next = next as usize;
+        if next == current || !options[next].1 {
+            return;
+        }
+        self.set_choice(control, next);
+    }
+
+    fn set_choice(&mut self, control: Control, index: usize) {
+        let config = &mut self.config;
+        match control {
+            Control::ActivationMode => {
+                config.activation.mode = if index == 0 {
+                    ActivationMode::Hold
+                } else {
+                    ActivationMode::Toggle
+                };
+            }
+            Control::Backend => {
+                if let Some(choice) = self.capabilities.inference_backends.get(index) {
+                    config.model.preferred_backend = choice.name.to_string();
+                }
+            }
+            Control::OutputMethod => {
+                let method = DELIVERY_METHODS[index];
+                config.output.method = method;
+                if !method.inserts_text() {
+                    config.output.typing_backend = "auto".to_string();
+                    config.output.auto_submit = false;
+                }
+            }
+            Control::TypingBackend => {
+                if let Some(value) = self.capabilities.typing_backend_values().get(index) {
+                    config.output.typing_backend = value.clone();
+                }
+            }
+            Control::PasteKeys => config.output.paste_keys = PasteKeys::ALL[index],
+            Control::OverlayEnabled => config.overlay.enabled = index == 1,
+            Control::OverlayPosition => {
+                config.overlay.position = POSITION_VALUES[index].to_string();
+            }
+            Control::OverlayStyle => {
+                config.overlay.style = STYLE_VALUES[index].to_string();
+                // A new style may offer a different set of looks: keep a
+                // stored look it still offers, otherwise snap to its first,
+                // then start its own waveform shape.
+                config.overlay.look = clamp_look_value(&config.overlay.style, &config.overlay.look);
+                config.overlay.waveform_shape = default_shape(&config.overlay.style).to_string();
+            }
+            Control::OverlayLook => {
+                if let Some((value, _)) = style_look_options(&config.overlay.style).get(index) {
+                    config.overlay.look = value.to_string();
+                }
+            }
+            Control::OverlayShape => {
+                config.overlay.waveform_shape = SHAPE_VALUES[index].to_string();
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn checked(&self, control: Control) -> bool {
+        let config = &self.config;
+        match control {
+            Control::PauseMedia => config.audio.pause_media,
+            Control::FeedbackSounds => config.audio.feedback_sounds,
+            Control::Translate => config.transcription.translate,
+            Control::AutoSubmit => config.output.auto_submit,
+            Control::SpokenPunctuation => config.text.spoken_punctuation,
+            Control::RemoveFillers => config.text.remove_fillers,
+            Control::HistoryEnabled => config.history.enabled,
+            Control::Autostart => config.startup.autostart,
+            _ => false,
+        }
+    }
+
+    fn toggle(&mut self, control: Control) {
+        let config = &mut self.config;
+        let flag = match control {
+            Control::PauseMedia => &mut config.audio.pause_media,
+            Control::FeedbackSounds => &mut config.audio.feedback_sounds,
+            Control::Translate => &mut config.transcription.translate,
+            Control::AutoSubmit => &mut config.output.auto_submit,
+            Control::SpokenPunctuation => &mut config.text.spoken_punctuation,
+            Control::RemoveFillers => &mut config.text.remove_fillers,
+            Control::HistoryEnabled => &mut config.history.enabled,
+            Control::Autostart => &mut config.startup.autostart,
+            _ => return,
+        };
+        *flag = !*flag;
+    }
+
+    // ---- text fields ----------------------------------------------------
+
+    pub(super) fn field_value(&self, field: Field) -> String {
+        let config = &self.config;
+        match field {
+            Field::Replacements => config.text.replacements_form_value(),
+            Field::CleanupCommand => config.text.post_process_command.clone(),
+            Field::CleanupTimeout => config.text.post_process_timeout_seconds.to_string(),
+            Field::MaxEntries => config.history.max_entries.to_string(),
+            Field::MaxAge => config.history.max_age_days.to_string(),
+            Field::TranscriptFolder => config.history.transcript_folder.clone(),
+            Field::Decode(0) => config.transcription.initial_prompt.clone(),
+            Field::Decode(index) => config
+                .transcription
+                .decoding_form_values()
+                .get(index - 1)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Validates and applies an edited text field, leaving the configuration
+    /// untouched and returning the problem when the value is invalid.
+    fn apply_field(&mut self, field: Field, raw: &str) -> Result<(), String> {
+        let config = &mut self.config;
+        match field {
+            Field::Replacements => config.text.apply_replacements_form(raw)?,
+            Field::CleanupCommand => config.text.post_process_command = raw.trim().to_string(),
+            Field::CleanupTimeout => match raw.trim().parse::<u64>() {
+                Ok(value) if value > 0 => config.text.post_process_timeout_seconds = value,
+                _ => return Err("Timeout must be a whole number of seconds (at least 1).".into()),
+            },
+            Field::MaxEntries => match raw.trim().parse::<u64>() {
+                Ok(value) => config.history.max_entries = value,
+                Err(_) => {
+                    return Err("Maximum entries must be a whole number (0 = no limit).".into())
+                }
+            },
+            Field::MaxAge => match raw.trim().parse::<u64>() {
+                Ok(value) if value <= i64::MAX as u64 / 86_400 => {
+                    config.history.max_age_days = value
+                }
+                Ok(_) => return Err("Maximum age is too large.".into()),
+                Err(_) => return Err("Maximum age must be a whole number (0 = no limit).".into()),
+            },
+            Field::TranscriptFolder => {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    config.history.transcript_folder = String::new();
+                } else {
+                    let expanded = crate::history::expand_home(raw);
+                    if !expanded.is_absolute() {
+                        return Err(
+                            "Enter an absolute folder path, or one starting with ~/.".into()
+                        );
+                    }
+                    config.history.transcript_folder = expanded.to_string_lossy().into_owned();
+                }
+            }
+            Field::Decode(index) => {
+                let mut prompt = config.transcription.initial_prompt.clone();
+                let mut knobs = config.transcription.decoding_form_values();
+                if index == 0 {
+                    prompt = raw.to_string();
+                } else if let Some(knob) = knobs.get_mut(index - 1) {
+                    *knob = raw.to_string();
+                }
+                let knobs: [&str; crate::config::DECODE_KNOBS.len()] =
+                    std::array::from_fn(|knob| knobs[knob].as_str());
+                config.transcription.apply_decoding_form(&prompt, &knobs)?;
+            }
+        }
+        Ok(())
+    }
+
+    // ---- keys -----------------------------------------------------------
+
+    pub(super) fn handle_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
+            self.quit_discarding();
+            return;
+        }
+        if self.capture.is_some() {
+            self.handle_capture_key(key);
+            return;
+        }
+        if self.editing.is_some() {
+            self.handle_edit_key(key);
+            return;
+        }
+        if self
+            .message
+            .as_ref()
+            .is_some_and(|message| message.tone == Tone::Error)
+        {
+            // An error stays until the next key so it cannot flash past.
+            self.message = None;
+        }
+        if ctrl && key.code == KeyCode::Char('s') {
+            self.save();
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char('r') {
+            self.open_shortcut_dialog();
+            return;
+        }
+        if self.shortcut_waiting && matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            self.keep_current_shortcut();
+            return;
+        }
+        if let Some(row) = self.drawer {
+            if self.handle_drawer_key(key, row) {
+                return;
+            }
+        }
+        match key.code {
+            KeyCode::Char(digit @ '1'..='4') => {
+                self.switch_tab(Tab::ALL[digit as usize - '1' as usize]);
+            }
+            KeyCode::Char(']') | KeyCode::Tab => self.switch_tab(self.tab.offset(1)),
+            KeyCode::Char('[') | KeyCode::BackTab => self.switch_tab(self.tab.offset(-1)),
+            KeyCode::Down | KeyCode::Char('j') => self.move_vertical(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_vertical(-1),
+            KeyCode::PageDown => self.move_table(10),
+            KeyCode::PageUp => self.move_table(-10),
+            KeyCode::Left | KeyCode::Char('h') => self.move_horizontal(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.move_horizontal(1),
+            KeyCode::Char(' ') => self.activate(false),
+            KeyCode::Enter => self.activate(true),
+            KeyCode::Char('q') | KeyCode::Esc => self.quit_saving(),
+            _ => {}
+        }
+    }
+
+    pub(super) fn handle_paste(&mut self, text: &str) {
+        if let Some(capture) = &mut self.capture {
+            capture.text.push_str(text);
+        } else if let Some((_, field)) = &mut self.editing {
+            for c in text.chars().filter(|c| !c.is_control()) {
+                field.insert(c);
+            }
+        }
+    }
+
+    fn handle_capture_key(&mut self, key: KeyEvent) {
+        let Some(capture) = &mut self.capture else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.end_capture(),
+            KeyCode::Enter => capture.text.push('\n'),
+            KeyCode::Tab => capture.text.push('\t'),
+            KeyCode::Backspace => {
+                capture.text.pop();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                capture.text.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_edit_key(&mut self, key: KeyEvent) {
+        let Some((field_id, field)) = &mut self.editing else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.editing = None;
+                self.message = None;
+            }
+            KeyCode::Enter => {
+                let field_id = *field_id;
+                let raw = field.value().to_string();
+                match self.apply_field(field_id, &raw) {
+                    Ok(()) => {
+                        self.editing = None;
+                        self.message = None;
+                    }
+                    Err(problem) => self.error(problem),
+                }
+            }
+            KeyCode::Left => field.move_left(),
+            KeyCode::Right => field.move_right(),
+            KeyCode::Home => field.home(),
+            KeyCode::End => field.end(),
+            KeyCode::Backspace => field.backspace(),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => field.insert(c),
+            _ => {}
+        }
+    }
+
+    /// The decoding drawer's own keys. Returns `false` for a key the drawer
+    /// leaves to the tab (tab switches close it first).
+    fn handle_drawer_key(&mut self, key: KeyEvent, row: usize) -> bool {
+        let rows = 1 + crate::config::DECODE_KNOBS.len();
+        match key.code {
+            KeyCode::Esc => self.drawer = None,
+            KeyCode::Down | KeyCode::Char('j') => self.drawer = Some((row + 1).min(rows - 1)),
+            KeyCode::Up | KeyCode::Char('k') => self.drawer = Some(row.saturating_sub(1)),
+            KeyCode::Enter | KeyCode::Char(' ') => self.start_editing(Field::Decode(row)),
+            KeyCode::Char('1'..='4' | '[' | ']' | 'q') | KeyCode::Tab | KeyCode::BackTab => {
+                self.drawer = None;
+                return false;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn start_editing(&mut self, field: Field) {
+        self.editing = Some((field, TextField::new(self.field_value(field))));
+        let hint = match field {
+            Field::Replacements => Some(format!(
+                "Write from {} to, separating entries with '{}'; escape '{}', '>', and '\\' \
+                 with '\\'. Empty clears them.",
+                crate::config::REPLACEMENT_ARROW,
+                crate::config::REPLACEMENT_ENTRY_SEPARATOR,
+                crate::config::REPLACEMENT_ENTRY_SEPARATOR,
+            )),
+            Field::CleanupCommand => {
+                Some("A command that reads the transcript on stdin and prints the cleaned text. Empty turns it off.".into())
+            }
+            Field::TranscriptFolder => Some(
+                "An absolute folder (or ~/...) that gets one file per transcript. Empty turns it off."
+                    .into(),
+            ),
+            Field::MaxEntries | Field::MaxAge => Some("0 means no limit.".into()),
+            _ => None,
+        };
+        match hint {
+            Some(hint) => self.hint(hint),
+            None => self.message = None,
+        }
+    }
+
+    fn switch_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.drawer = None;
+    }
+
+    fn move_vertical(&mut self, delta: isize) {
+        let focused = self.focused();
+        if focused == Control::ModelTable {
+            let last = crate::catalog::ENTRIES.len() - 1;
+            let next = self.model_cursor as isize + delta;
+            if (0..=last as isize).contains(&next) {
+                self.model_cursor = next as usize;
+                return;
+            }
+            if delta < 0 {
+                return;
+            }
+        }
+        let controls = self.layout().controls();
+        let Some(index) = controls.iter().position(|control| *control == focused) else {
+            return;
+        };
+        let next = (index as isize + delta).clamp(0, controls.len() as isize - 1) as usize;
+        self.set_focus(controls[next]);
+    }
+
+    fn move_table(&mut self, delta: isize) {
+        if self.focused() == Control::ModelTable {
+            let last = crate::catalog::ENTRIES.len() as isize - 1;
+            self.model_cursor = (self.model_cursor as isize + delta).clamp(0, last) as usize;
+        }
+    }
+
+    fn move_horizontal(&mut self, delta: isize) {
+        let focused = self.focused();
+        if focused.kind() == Kind::Choice {
+            self.step(focused, delta);
+            return;
+        }
+        let groups = self.layout().groups(self.wide.get());
+        let Some(group) = groups.iter().position(|group| group.contains(&focused)) else {
+            return;
+        };
+        let next = (group as isize + delta).clamp(0, groups.len() as isize - 1) as usize;
+        if next != group {
+            self.set_focus(groups[next][0]);
+        }
+    }
+
+    /// Space (`enter == false`) or Enter on the focused control.
+    fn activate(&mut self, enter: bool) {
+        let focused = self.focused();
+        match focused.kind() {
+            Kind::Radio => {
+                if let Control::Microphone(index) = focused {
+                    if let Some((value, _)) = self.capabilities.microphones.get(index) {
+                        self.config.audio.microphone = value.clone();
+                    }
+                }
+            }
+            Kind::Check => self.toggle(focused),
+            Kind::Choice => self.step(focused, 1),
+            Kind::Table => self.select_model(),
+            Kind::Text => {
+                if let Control::Field(field) = focused {
+                    self.start_editing(field);
+                }
+            }
+            Kind::Action => self.run_action(focused, enter),
+        }
+    }
+
+    fn run_action(&mut self, control: Control, _enter: bool) {
+        match control {
+            Control::Dictation => self.toggle_dictation(),
+            Control::Shortcut => self.open_shortcut_dialog(),
+            Control::Decoding => self.drawer = Some(0),
+            Control::OverlayTest => self.start_overlay_test(),
+            Control::DaemonStart => self.daemon_action(DaemonAction::Start),
+            Control::DaemonStop => self.daemon_action(DaemonAction::Stop),
+            Control::DaemonRestart => self.daemon_action(DaemonAction::Restart),
+            _ => {}
+        }
+    }
+
+    fn select_model(&mut self) {
+        let entry = &crate::catalog::ENTRIES[self.model_cursor];
+        let installed = self.installed[self.model_cursor];
+        let downloading = self
+            .download
+            .as_ref()
+            .is_some_and(|download| download.result.is_none());
+        if !installed && downloading && self.download.as_ref().is_some_and(|d| d.id != entry.id) {
+            self.warn("Another model is still downloading; select this one when it finishes.");
+            return;
+        }
+        let previous = self.config.model.active_model.clone();
+        self.config.model.active_model = entry.id.to_string();
+        if let Err(error) = self.config.validate() {
+            // A model whose input cap is below the configured recording limit
+            // would make the whole file invalid; refuse it with the reason.
+            self.config.model.active_model = previous;
+            self.error(error.to_string());
+            return;
+        }
+        if !installed && !downloading {
+            self.download = Some(Download {
+                id: entry.id.to_string(),
+                progress: (0, 0),
+                result: None,
+            });
+            self.effects.push(Effect::Download(entry.id.to_string()));
+        }
+    }
+
+    fn toggle_dictation(&mut self) {
+        if self.dictation_pending {
+            return;
+        }
+        match self.daemon.state {
+            DaemonState::Stopped => {
+                self.error("The daemon is not running. Start it in [4] Interface & System.");
+            }
+            DaemonState::Processing => {}
+            DaemonState::Recording => {
+                self.dictation_pending = true;
+                // The daemon types the transcript into whatever has focus,
+                // usually this terminal: capture it rather than act on it.
+                self.capture = Some(Capture::default());
+                self.effects.push(Effect::Dictation(false));
+            }
+            DaemonState::Idle | DaemonState::Unknown => {
+                self.dictation_pending = true;
+                self.last_result = None;
+                self.effects.push(Effect::Dictation(true));
+            }
+        }
+    }
+
+    fn end_capture(&mut self) {
+        if let Some(capture) = self.capture.take() {
+            if !capture.text.trim().is_empty() {
+                self.last_result = Some(capture.text.trim().to_string());
+            }
+            self.effects.push(Effect::FetchLastResult);
+        }
+    }
+
+    /// Opens the desktop dialog, or reopens it while one is already open
+    /// (the executor waits for the old request to settle first).
+    fn open_shortcut_dialog(&mut self) {
+        self.shortcut_waiting = true;
+        self.shortcut_feedback = None;
+        self.effects.push(Effect::OpenShortcutDialog);
+    }
+
+    /// The user closed the desktop dialog without a change: stop waiting and
+    /// settle on whatever is bound, reported as "no change", not a failure.
+    fn keep_current_shortcut(&mut self) {
+        self.shortcut_waiting = false;
+        self.effects.push(Effect::CancelShortcutDialog);
+        self.shortcut_feedback = Some(Ok(ReconfigureOutcome::Unchanged {
+            trigger_description: self.config.activation.keybind.clone(),
+        }));
+    }
+
+    fn start_overlay_test(&mut self) {
+        let shown = self.config.overlay.clone();
+        self.overlay_test = Some(OverlayTest {
+            until: Instant::now() + OVERLAY_TEST_DURATION,
+            shown: shown.clone(),
+        });
+        self.effects.push(Effect::OverlayShow(shown));
+    }
+
+    fn daemon_action(&mut self, action: DaemonAction) {
+        if self.daemon_busy.is_some() {
+            return;
+        }
+        self.daemon_busy = Some(action);
+        self.effects.push(Effect::Daemon(action));
+    }
+
+    // ---- background results and timers -------------------------------
+
+    pub(super) fn apply(&mut self, result: TaskResult) {
+        match result {
+            TaskResult::Status(snapshot) => self.apply_status(snapshot),
+            TaskResult::Dictation(outcome) => {
+                self.dictation_pending = false;
+                if let Err(error) = outcome {
+                    self.capture = None;
+                    self.error(format!("Dictation request failed: {error}"));
+                }
+            }
+            TaskResult::Daemon(outcome) => {
+                self.daemon_busy = None;
+                match outcome {
+                    Ok(text) => self.info(text),
+                    Err(error) => self.error(error),
+                }
+            }
+            TaskResult::LastResult(result) => {
+                let since = self.dictation_since.unwrap_or(0);
+                self.last_result = Some(match result {
+                    Some((text, delivered)) if delivered >= since && !text.trim().is_empty() => {
+                        text
+                    }
+                    _ => NO_SPEECH.to_string(),
+                });
+            }
+            TaskResult::OverlayShown(true) => {}
+            TaskResult::OverlayShown(false) => {
+                self.overlay_test = None;
+                self.error(
+                    "This desktop offers no layer-shell overlay, so dictation uses desktop \
+                     notifications here instead.",
+                );
+            }
+            TaskResult::Shortcut(outcome) => {
+                self.shortcut_waiting = false;
+                if let Ok(ReconfigureOutcome::Changed {
+                    trigger_description,
+                }) = &outcome
+                {
+                    self.config.activation.keybind =
+                        crate::activation::keybind_label(trigger_description);
+                }
+                self.shortcut_feedback = Some(outcome);
+            }
+            TaskResult::DownloadProgress(done, total) => {
+                if let Some(download) = &mut self.download {
+                    download.progress = (done, total);
+                }
+            }
+            TaskResult::Download(outcome) => {
+                if let Some(download) = &mut self.download {
+                    if outcome.is_ok() {
+                        if let Some(index) = crate::catalog::ENTRIES
+                            .iter()
+                            .position(|entry| entry.id == download.id)
+                        {
+                            self.installed[index] = true;
+                        }
+                    }
+                    download.result = Some(outcome);
+                }
+            }
+        }
+    }
+
+    fn apply_status(&mut self, snapshot: DaemonSnapshot) {
+        let previous = self.daemon.state;
+        let now = snapshot.state;
+        if now == DaemonState::Recording && previous != DaemonState::Recording {
+            // A second of slack for the clock tick between here and delivery.
+            self.dictation_since = Some(unix_seconds().saturating_sub(1));
+            self.last_result = None;
+        }
+        if now == DaemonState::Processing && self.capture.is_none() {
+            // A dictation stopped from the desktop shortcut types into this
+            // terminal too.
+            self.capture = Some(Capture::default());
+        }
+        if let Some(capture) = &mut self.capture {
+            if matches!(now, DaemonState::Idle | DaemonState::Stopped) && capture.until.is_none() {
+                capture.until = Some(Instant::now() + CAPTURE_GRACE);
+            }
+        }
+        if previous == DaemonState::Recording && now == DaemonState::Idle && self.capture.is_none()
+        {
+            self.effects.push(Effect::FetchLastResult);
+        }
+        self.daemon = snapshot;
+    }
+
+    /// Per-frame timers: the overlay test countdown (and its live restyle),
+    /// the capture grace period, and message expiry.
+    pub(super) fn tick(&mut self, now: Instant) {
+        if let Some(test) = &mut self.overlay_test {
+            if now >= test.until {
+                self.overlay_test = None;
+                self.effects.push(Effect::OverlayHide);
+            } else if !overlay_matches(&test.shown, &self.config.overlay) {
+                test.shown = self.config.overlay.clone();
+                self.effects.push(Effect::OverlayShow(test.shown.clone()));
+            }
+        }
+        if self
+            .capture
+            .as_ref()
+            .and_then(|capture| capture.until)
+            .is_some_and(|until| now >= until)
+        {
+            self.end_capture();
+        }
+        if self
+            .message
+            .as_ref()
+            .and_then(|message| message.expires)
+            .is_some_and(|expires| now >= expires)
+        {
+            self.message = None;
+        }
+    }
+
+    /// Keeps the live level meter bound to the right microphone: the focused
+    /// row on the Audio tab (so moving through the list is audible before
+    /// selecting), the selected one otherwise, and the selected one during the
+    /// overlay test so its waveform follows the voice.
+    pub(super) fn refresh_mic(&mut self) {
+        let wanted = if self.overlay_test.is_some() {
+            Some(self.selected_microphone())
+        } else if self.tab == Tab::Audio {
+            match self.focused() {
+                Control::Microphone(index) => Some(index),
+                _ => Some(self.selected_microphone()),
+            }
+        } else {
+            None
+        };
+        let settled = self.mic_monitor.poll();
+        match wanted {
+            None => {
+                if self.mic_monitor.active_index().is_some() || self.mic_monitor.restart_pending() {
+                    self.mic_monitor.stop();
+                }
+            }
+            Some(index) => {
+                let stale = self.mic_monitor.active_index() != Some(index)
+                    && !self.mic_monitor.restart_pending();
+                if settled || stale {
+                    if let Some((device, _)) = self.capabilities.microphones.get(index) {
+                        let device = device.clone();
+                        self.mic_monitor.sync(index, &device);
+                    }
+                }
+            }
+        }
+        if self.overlay_test.is_some() {
+            audio::publish_level(self.mic_monitor.level());
+        }
+    }
+
+    // ---- saving ---------------------------------------------------------
+
+    fn save(&mut self) {
+        match self.persist() {
+            Ok(true) => self.info("Saved. A running daemon applies it live."),
+            Ok(false) => self.info("No changes to save."),
+            Err(error) => self.error(format!("Not saved: {error}")),
+        }
+    }
+
+    /// Writes the fields that changed since the last load or save onto the
+    /// current file, so edits made elsewhere meanwhile survive. Returns
+    /// whether anything was written.
+    fn persist(&mut self) -> anyhow::Result<bool> {
+        let edited = toml::Value::try_from(&self.config)?;
+        let baseline = toml::Value::try_from(&self.baseline)?;
+        if edited == baseline {
+            return Ok(false);
+        }
+        if self.config.output.method != self.baseline.output.method {
+            if let Some(problem) = self
+                .capabilities
+                .output_method_problem(self.config.output.method)
+            {
+                anyhow::bail!("{problem}");
+            }
+        }
+        let mut current = toml::Value::try_from(&read_config()?)?;
+        merge_changes(&baseline, &edited, &mut current);
+        let merged: Config = current.try_into()?;
+        merged.validate()?;
+        write_config(&merged)?;
+        self.baseline = merged.clone();
+        self.config = merged;
+        self.saved = true;
+        Ok(true)
+    }
+
+    fn quit_saving(&mut self) {
+        match self.persist() {
+            Ok(_) => self.finish(),
+            Err(error) => self.error(format!(
+                "Not saved: {error} Fix it, or press Ctrl+C to quit without saving."
+            )),
+        }
+    }
+
+    fn quit_discarding(&mut self) {
+        if self.dirty() {
+            self.exit = Some(SetupOutcome::Cancelled);
+            self.cleanup();
+        } else {
+            self.finish();
+        }
+    }
+
+    fn finish(&mut self) {
+        self.exit = Some(if self.saved {
+            SetupOutcome::Saved
+        } else {
+            SetupOutcome::Unchanged
+        });
+        self.cleanup();
+    }
+
+    /// Leaves nothing running on the desktop after setup closes.
+    fn cleanup(&mut self) {
+        if self.overlay_test.take().is_some() {
+            self.effects.push(Effect::OverlayHide);
+        }
+        if self.shortcut_waiting {
+            self.shortcut_waiting = false;
+            self.effects.push(Effect::CancelShortcutDialog);
+        }
+        self.mic_monitor.stop();
+    }
+}
+
+#[cfg(not(test))]
+fn read_config() -> anyhow::Result<Config> {
+    Config::reload()
+}
+
+#[cfg(not(test))]
+fn write_config(config: &Config) -> anyhow::Result<()> {
+    crate::autostart::save_configuration(config)
+}
+
+// Unit tests never touch the real config directory or autostart entry: the
+// file is a per-thread value they seed and inspect.
+#[cfg(test)]
+thread_local! {
+    static TEST_DISK: std::cell::RefCell<Config> = std::cell::RefCell::new(Config::default());
+}
+
+#[cfg(test)]
+fn read_config() -> anyhow::Result<Config> {
+    Ok(TEST_DISK.with(|disk| disk.borrow().clone()))
+}
+
+#[cfg(test)]
+fn write_config(config: &Config) -> anyhow::Result<()> {
+    config.validate()?;
+    TEST_DISK.with(|disk| *disk.borrow_mut() = config.clone());
+    Ok(())
+}
+
+/// Applies every leaf that differs between `base` and `edited` onto `target`,
+/// recursing into tables so unrelated keys in `target` are kept. A key that
+/// `edited` dropped (an unset optional, a removed replacement) is removed.
+pub(super) fn merge_changes(base: &toml::Value, edited: &toml::Value, target: &mut toml::Value) {
+    use toml::Value;
+    match (base, edited, target) {
+        (Value::Table(base), Value::Table(edited), Value::Table(target)) => {
+            for (key, value) in edited {
+                match (base.get(key), target.get_mut(key)) {
+                    (Some(old), _) if old == value => {}
+                    (Some(old), Some(slot)) if old.is_table() && value.is_table() => {
+                        merge_changes(old, value, slot);
+                    }
+                    _ => {
+                        target.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            for key in base.keys() {
+                if !edited.contains_key(key) {
+                    target.remove(key);
+                }
+            }
+        }
+        (_, edited, target) => *target = edited.clone(),
+    }
+}
+
+/// What the Live dictation card shows when a dictation produced no text.
+const NO_SPEECH: &str = "(no speech heard)";
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+fn overlay_matches(a: &OverlayConfig, b: &OverlayConfig) -> bool {
+    toml::Value::try_from(a).ok() == toml::Value::try_from(b).ok()
+}
+
+pub(super) fn method_label(method: OutputMethod) -> &'static str {
+    match method {
+        OutputMethod::Type => "Type",
+        OutputMethod::Paste => "Paste",
+        OutputMethod::Clipboard => "Clipboard",
+        OutputMethod::None => "None",
+    }
+}
+
+fn input_limit(long_form: crate::catalog::LongForm) -> String {
+    match long_form {
+        crate::catalog::LongForm::Unbounded => "any length".into(),
+        crate::catalog::LongForm::SoftWindow { window_seconds } => {
+            format!("best under {window_seconds}s")
+        }
+        crate::catalog::LongForm::HardCap { cap_seconds } => format!("at most {cap_seconds}s"),
+    }
+}
+
+pub(super) fn daemon_state_label(state: DaemonState) -> (String, Tone) {
+    match state {
+        DaemonState::Unknown => ("\u{25cc} CHECKING".into(), Tone::Dim),
+        DaemonState::Stopped => ("\u{25cb} STOPPED".into(), Tone::Warn),
+        DaemonState::Idle => ("\u{25cf} ACTIVE".into(), Tone::Ok),
+        DaemonState::Recording => ("\u{25cf} RECORDING".into(), Tone::Recording),
+        DaemonState::Processing => ("\u{25cf} TRANSCRIBING".into(), Tone::Accent),
+    }
+}
+
+/// The captured text on one line: newlines shown as a return symbol.
+fn capture_preview(text: &str) -> String {
+    if text.is_empty() {
+        "(waiting for the transcript...)".into()
+    } else {
+        text.replace('\n', " \u{23ce} ").replace('\t', " ")
+    }
+}
+
+// ---- running ---------------------------------------------------------------
 
 pub(super) fn run(capabilities: Capabilities) -> anyhow::Result<SetupOutcome> {
+    let fresh = !Config::config_path()?.exists();
     let config = Config::reload()?;
-    let mut state = ConsoleState::new(config, capabilities);
+    let mut app = App::new(config, capabilities, Theme::from_env(), fresh);
+    let mut executor = Executor::start();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    let mut guard = TerminalGuard { terminal };
-
-    let outcome = state.run_loop(&mut guard.terminal);
+    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
+        let _ = disable_raw_mode();
+        return Err(error.into());
+    }
+    let mut guard = TerminalGuard {
+        terminal: Terminal::new(CrosstermBackend::new(stdout))?,
+    };
+    let outcome = run_loop(&mut app, &mut executor, &mut guard.terminal);
+    for effect in app.take_effects() {
+        executor.run(effect);
+    }
     drop(guard);
     outcome
 }
 
+fn run_loop(
+    app: &mut App,
+    executor: &mut Executor,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> anyhow::Result<SetupOutcome> {
+    loop {
+        for result in executor.poll() {
+            app.apply(result);
+        }
+        app.tick(Instant::now());
+        app.refresh_mic();
+        for effect in app.take_effects() {
+            executor.run(effect);
+        }
+        if let Some(outcome) = app.exit.take() {
+            return Ok(outcome);
+        }
+        terminal.draw(|frame| app.render(frame))?;
+        if event::poll(Duration::from_millis(66))? {
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => app.handle_key(key),
+                Event::Paste(text) => app.handle_paste(&text),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Restores the terminal however setup ends - a normal exit, an error, or a
+/// panic unwinding through `run`.
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
 }
@@ -115,2497 +2024,289 @@ struct TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
+        let _ = self.terminal.show_cursor();
     }
 }
 
-struct ConsoleState {
-    config: Config,
-    capabilities: Capabilities,
-    step: StepKind,
-    model_values: Vec<String>,
-    /// Display labels matching `model_values` position for position: the id,
-    /// plus a "live text with a live-text look" tag for a streaming model (with
-    /// an "English only" note when that holds) so the trade-off is visible at
-    /// selection time.
-    model_labels: Vec<String>,
-    model_selection: usize,
-    inference_backend_values: Vec<&'static str>,
-    inference_backend_selection: usize,
-    translate_selection: usize,
-    /// The vocabulary prompt followed by one field per `DECODE_KNOBS` knob.
-    decoding_fields: Vec<TextField>,
-    decoding_field: usize,
-    /// The replacement table, cleanup command, and timeout - one field each.
-    text_processing_fields: Vec<TextField>,
-    text_processing_field: usize,
-    /// `spoken_punctuation` plus twice `remove_fillers`, indexed into
-    /// `TEXT_PASS_LABELS`.
-    text_pass_selection: usize,
-    mic_selection: usize,
-    activation_selection: usize,
-    output_labels: Vec<String>,
-    output_selection: usize,
-    backend_values: Vec<String>,
-    backend_selection: usize,
-    paste_keys_selection: usize,
-    submit_selection: usize,
-    startup_selection: usize,
-    history_enabled_selection: usize,
-    retention_fields: Vec<TextField>,
-    retention_field: usize,
-    folder_field: TextField,
-    overlay_enabled_selection: usize,
-    overlay_position_selection: usize,
-    overlay_style_selection: usize,
-    overlay_look_selection: usize,
-    overlay_shape_selection: usize,
-    shortcut_handle: Option<ReconfigureHandle>,
-    reopen_shortcut_dialog: bool,
-    shortcut_feedback: Option<Result<ReconfigureOutcome, String>>,
-    error: Option<String>,
-    mic_monitor: audio::MicMonitor,
-    download_queue: Vec<ModelRequirement>,
-    download_active_label: Option<String>,
-    download_handle: Option<ProvisionHandle>,
-    download_log: Vec<(String, Result<crate::model::DownloadOutcome, String>)>,
-    downloading_needed: bool,
+/// The overlay this process flashes for the desktop test - separate from the
+/// daemon's own, so testing never disturbs a dictation in progress.
+static TEST_OVERLAY: OverlayHandle = OverlayHandle::new();
+
+type Slot = Arc<Mutex<Option<TaskResult>>>;
+
+/// Runs effects on background threads (each with its own small tokio
+/// runtime, since setup's render loop is synchronous) and collects their
+/// results, plus a long-lived daemon status poller.
+struct Executor {
+    slots: Vec<Slot>,
+    status: Arc<Mutex<Option<DaemonSnapshot>>>,
+    stop: Arc<AtomicBool>,
+    /// Overlay commands run in order on one worker, so a hide can never
+    /// overtake the show it ends while the first show is still probing.
+    overlay: std::sync::mpsc::Sender<(Effect, Slot)>,
+    shortcut: Option<ReconfigureHandle>,
+    /// A reopen requested while `shortcut` was still open: its wait was
+    /// cancelled, and the replacement dialog opens only once that wait
+    /// settles. Starting it immediately would race the cancel (the daemon
+    /// could reject the new dialog as "already open", or the stale cancel
+    /// could end the new one).
+    shortcut_reopen: bool,
+    download: Option<ProvisionHandle>,
+    download_progress: (u64, u64),
 }
 
-impl ConsoleState {
-    fn new(config: Config, capabilities: Capabilities) -> Self {
-        let model_values: Vec<String> = crate::catalog::ENTRIES
-            .iter()
-            .map(|entry| entry.id.to_string())
-            .collect();
-        let model_labels: Vec<String> = crate::catalog::ENTRIES
-            .iter()
-            .map(|entry| {
-                let info = entry.info();
-                match (info.supports_streaming(), info.is_english_only()) {
-                    (false, _) => entry.id.to_string(),
-                    (true, true) => {
-                        format!(
-                            "{}  (live text with a live-text look, English only)",
-                            entry.id
-                        )
-                    }
-                    (true, false) => format!("{}  (live text with a live-text look)", entry.id),
-                }
-            })
-            .collect();
-        let model_selection = model_values
-            .iter()
-            .position(|name| name == &config.model.active_model)
-            .unwrap_or(0);
-        // Only choices that can work on this build and host are selectable,
-        // with one exception: a configured backend that can't run here stays
-        // in the list so the step opens on it and never silently replaces the
-        // saved pin with `auto`. It is shown as unavailable.
-        let mut inference_backend_values: Vec<&'static str> = capabilities
-            .inference_backends
-            .iter()
-            .filter(|choice| choice.unavailable.is_none())
-            .map(|choice| choice.name)
-            .collect();
-        if let Some(configured) = capabilities.inference_backends.iter().find(|choice| {
-            choice.name == config.model.preferred_backend && choice.unavailable.is_some()
-        }) {
-            inference_backend_values.push(configured.name);
-        }
-        if inference_backend_values.is_empty() {
-            inference_backend_values.push("auto");
-        }
-        let inference_backend_selection = inference_backend_values
-            .iter()
-            .position(|name| *name == config.model.preferred_backend)
-            .unwrap_or(0);
-        let translate_selection = usize::from(config.transcription.translate);
-        let decoding_fields = std::iter::once(config.transcription.initial_prompt.clone())
-            .chain(config.transcription.decoding_form_values())
-            .map(TextField::new)
-            .collect();
-        let text_processing_fields = vec![
-            TextField::new(config.text.replacements_form_value()),
-            TextField::new(config.text.post_process_command.clone()),
-            TextField::new(config.text.post_process_timeout_seconds.to_string()),
-        ];
-        let text_pass_selection = usize::from(config.text.spoken_punctuation)
-            + 2 * usize::from(config.text.remove_fillers);
-        let mic_selection = capabilities.microphone_index(&config.audio.microphone);
-        let activation_selection = usize::from(config.activation.mode == ActivationMode::Toggle);
-        let output_labels = capabilities.output_labels();
-        let output_selection = capabilities.setup_output_index(&config);
-        let paste_keys_selection = PasteKeys::ALL
-            .iter()
-            .position(|keys| *keys == config.output.paste_keys)
-            .unwrap_or(0);
-        let submit_selection = usize::from(config.output.auto_submit);
-        let backend_values = capabilities.typing_backend_values();
-        let backend_selection = backend_values
-            .iter()
-            .position(|backend| backend == &config.output.typing_backend)
-            .unwrap_or(0);
-        let startup_selection = usize::from(config.startup.autostart);
-        let history_enabled_selection = usize::from(config.history.enabled);
-        let retention_fields = vec![
-            TextField::new(config.history.max_entries.to_string()),
-            TextField::new(config.history.max_age_days.to_string()),
-        ];
-        let retention_field = 0;
-        let folder_field = TextField::new(config.history.transcript_folder.clone());
-        let overlay_enabled_selection = usize::from(config.overlay.enabled);
-        let overlay_position_selection = OVERLAY_POSITION_VALUES
-            .iter()
-            .position(|value| *value == config.overlay.position)
-            .unwrap_or(2);
-        let overlay_style_selection = OVERLAY_STYLE_VALUES
-            .iter()
-            .position(|value| *value == config.overlay.style)
-            .unwrap_or(0);
-        let overlay_style = OVERLAY_STYLE_VALUES
-            .get(overlay_style_selection)
-            .copied()
-            .unwrap_or(OVERLAY_STYLE_VALUES[0]);
-        let overlay_look_selection = overlay_style_look_options(overlay_style)
-            .iter()
-            .position(|(value, _)| *value == config.overlay.look)
-            .unwrap_or(0);
-        let overlay_shape_selection = OVERLAY_SHAPE_VALUES
-            .iter()
-            .position(|value| *value == config.overlay.waveform_shape)
-            .unwrap_or(0);
-
+impl Executor {
+    fn start() -> Self {
+        let status = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        let status_for_thread = status.clone();
+        let stop_for_thread = stop.clone();
+        std::thread::spawn(move || poll_status(status_for_thread, stop_for_thread));
+        let (overlay, overlay_commands) = std::sync::mpsc::channel();
+        std::thread::spawn(move || run_overlay_commands(overlay_commands));
         Self {
-            config,
-            capabilities,
-            step: StepKind::Model,
-            model_values,
-            model_labels,
-            model_selection,
-            inference_backend_values,
-            inference_backend_selection,
-            translate_selection,
-            decoding_fields,
-            decoding_field: 0,
-            text_processing_fields,
-            text_processing_field: 0,
-            text_pass_selection,
-            mic_selection,
-            activation_selection,
-            output_labels,
-            output_selection,
-            backend_values,
-            backend_selection,
-            paste_keys_selection,
-            submit_selection,
-            startup_selection,
-            history_enabled_selection,
-            retention_fields,
-            retention_field,
-            folder_field,
-            overlay_enabled_selection,
-            overlay_position_selection,
-            overlay_style_selection,
-            overlay_look_selection,
-            overlay_shape_selection,
-            shortcut_handle: None,
-            reopen_shortcut_dialog: false,
-            shortcut_feedback: None,
-            error: None,
-            mic_monitor: audio::MicMonitor::new(),
-            download_queue: Vec::new(),
-            download_active_label: None,
-            download_handle: None,
-            download_log: Vec::new(),
-            downloading_needed: false,
+            slots: Vec::new(),
+            status,
+            stop,
+            overlay,
+            shortcut: None,
+            shortcut_reopen: false,
+            download: None,
+            download_progress: (0, 0),
         }
     }
 
-    fn backend_unavailable(&self, name: &str) -> bool {
-        self.capabilities
-            .inference_backends
-            .iter()
-            .any(|choice| choice.name == name && choice.unavailable.is_some())
-    }
-
-    fn run_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> anyhow::Result<SetupOutcome> {
-        loop {
-            self.refresh_mic_monitor();
-            self.refresh_downloads();
-            self.refresh_shortcut_reconfigure();
-            terminal.draw(|frame| self.render(frame))?;
-            if event::poll(Duration::from_millis(66))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match self.handle_key(key)? {
-                            ControlFlow::Continue => {}
-                            ControlFlow::Finish(SetupOutcome::Saved) => {
-                                crate::autostart::save_configuration(&self.config)?;
-                                return Ok(SetupOutcome::Saved);
-                            }
-                            ControlFlow::Finish(SetupOutcome::Cancelled) => {
-                                return Ok(SetupOutcome::Cancelled);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn handle_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Ok(ControlFlow::Finish(SetupOutcome::Cancelled));
-        }
-        match self.step {
-            StepKind::Shortcut => self.handle_shortcut_key(key),
-            StepKind::Confirm => self.handle_confirm_key(key),
-            StepKind::Downloading => self.handle_downloading_key(key),
-            StepKind::Decoding
-            | StepKind::HistoryRetention
-            | StepKind::TranscriptFolder
-            | StepKind::TextProcessing => self.handle_text_step_key(key),
-            _ => self.handle_list_key(key),
-        }
-    }
-
-    /// The free-text steps ("Decoding", "History retention", "Transcript
-    /// folder").
-    /// Unlike the list steps, `h`/`l`/`q` type literal characters here rather
-    /// than retreat/advance/cancel, so Escape is the way back and Enter
-    /// advances (validating the fields first).
-    fn handle_text_step_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Enter => return self.advance(),
-            KeyCode::Esc => return Ok(self.retreat()),
-            KeyCode::Up | KeyCode::BackTab if self.text_field_count() > 1 => {
-                self.move_text_field(-1)
-            }
-            KeyCode::Down | KeyCode::Tab if self.text_field_count() > 1 => self.move_text_field(1),
-            KeyCode::Left => self.selected_text_field_mut().move_left(),
-            KeyCode::Right => self.selected_text_field_mut().move_right(),
-            KeyCode::Home => self.selected_text_field_mut().home(),
-            KeyCode::End => self.selected_text_field_mut().end(),
-            KeyCode::Backspace => self.selected_text_field_mut().backspace(),
-            KeyCode::Char(c) if !ctrl => self.selected_text_field_mut().insert(c),
-            _ => {}
-        }
-        Ok(ControlFlow::Continue)
-    }
-
-    fn text_field_count(&self) -> usize {
-        match self.step {
-            StepKind::Decoding => self.decoding_fields.len(),
-            StepKind::HistoryRetention => self.retention_fields.len(),
-            StepKind::TextProcessing => self.text_processing_fields.len(),
-            StepKind::TranscriptFolder => 1,
-            _ => 0,
-        }
-    }
-
-    fn move_text_field(&mut self, delta: i32) {
-        let len = self.text_field_count() as i32;
-        if len == 0 {
-            return;
-        }
-        let field = match self.step {
-            StepKind::Decoding => &mut self.decoding_field,
-            StepKind::HistoryRetention => &mut self.retention_field,
-            StepKind::TextProcessing => &mut self.text_processing_field,
-            _ => return,
-        };
-        *field = (*field as i32 + delta).clamp(0, len - 1) as usize;
-    }
-
-    fn selected_text_field_mut(&mut self) -> &mut TextField {
-        match self.step {
-            StepKind::Decoding => &mut self.decoding_fields[self.decoding_field],
-            StepKind::HistoryRetention => &mut self.retention_fields[self.retention_field],
-            StepKind::TextProcessing => {
-                let field = self.text_processing_field;
-                &mut self.text_processing_fields[field]
-            }
-            StepKind::TranscriptFolder => &mut self.folder_field,
-            _ => unreachable!("no text field for this step"),
-        }
-    }
-
-    fn downloads_finished(&self) -> bool {
-        self.download_handle.is_none() && self.download_queue.is_empty()
-    }
-
-    fn handle_downloading_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
-        match key.code {
-            KeyCode::Char('q') => return Ok(ControlFlow::Finish(SetupOutcome::Cancelled)),
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                return Ok(self.retreat());
-            }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.downloads_finished() => {
-                return self.advance();
-            }
-            _ => {}
-        }
-        Ok(ControlFlow::Continue)
-    }
-
-    fn handle_list_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
-        match key.code {
-            KeyCode::Char('q') => return Ok(ControlFlow::Finish(SetupOutcome::Cancelled)),
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => return self.advance(),
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                return Ok(self.retreat());
-            }
-            _ => {}
-        }
-        Ok(ControlFlow::Continue)
-    }
-
-    fn handle_shortcut_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
-        if self.shortcut_handle.is_some() {
-            return match key.code {
-                // Leaving the step must also stop the background wait: without
-                // this the handle stays pending across a retreat/return (and
-                // Ctrl+R stays swallowed) until the 120s timeout, which is the
-                // "stuck in the shortcut menu" dead end.
-                KeyCode::Esc | KeyCode::Backspace => {
-                    self.cancel_shortcut_reconfigure();
-                    Ok(self.retreat())
-                }
-                // The immediate way past a desktop dialog that was closed with
-                // no change: keep whatever is bound now instead of waiting out
-                // the timeout. Distinct from a failure - see `render_shortcut`.
-                KeyCode::Enter => {
-                    self.settle_shortcut_unchanged();
-                    Ok(ControlFlow::Continue)
-                }
-                // Reopen the dialog without waiting out the old wait.
-                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.reopen_shortcut_reconfigure();
-                    Ok(ControlFlow::Continue)
-                }
-                _ => Ok(ControlFlow::Continue),
-            };
-        }
-        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.start_shortcut_reconfigure();
-            return Ok(ControlFlow::Continue);
-        }
-        match key.code {
-            KeyCode::Enter => return self.advance(),
-            KeyCode::Esc | KeyCode::Backspace => return Ok(self.retreat()),
-            _ => {}
-        }
-        Ok(ControlFlow::Continue)
-    }
-
-    /// Stops the in-flight portal wait, if any. The background thread settles
-    /// on its own (an `Unchanged` outcome) once the cancellation lands; its
-    /// late result is simply never polled again.
-    fn cancel_shortcut_reconfigure(&mut self) {
-        self.reopen_shortcut_dialog = false;
-        if let Some(handle) = self.shortcut_handle.take() {
-            handle.cancel();
-        }
-    }
-
-    /// Ctrl+R while the desktop dialog is open: cancel the current wait but
-    /// keep the handle, and open the replacement only after that wait settles.
-    /// Starting it immediately would race the cancel (the daemon could reject
-    /// the new dialog as "already open", or the stale cancel could end the new
-    /// one).
-    fn reopen_shortcut_reconfigure(&mut self) {
-        match self.shortcut_handle.as_ref() {
-            Some(handle) => {
-                handle.cancel();
-                self.reopen_shortcut_dialog = true;
-            }
-            None => self.start_shortcut_reconfigure(),
-        }
-    }
-
-    /// The user kept the current binding (typically after closing a desktop
-    /// settings window without applying a change): stop waiting and settle on
-    /// whatever is bound, reporting it as "no change", not a failure.
-    fn settle_shortcut_unchanged(&mut self) {
-        self.cancel_shortcut_reconfigure();
-        self.shortcut_feedback = Some(Ok(ReconfigureOutcome::Unchanged {
-            trigger_description: self.config.activation.keybind.clone(),
-        }));
-    }
-
-    fn handle_confirm_key(&mut self, key: KeyEvent) -> anyhow::Result<ControlFlow> {
-        Ok(match key.code {
-            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                ControlFlow::Finish(SetupOutcome::Saved)
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
-                ControlFlow::Finish(SetupOutcome::Cancelled)
-            }
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => self.retreat(),
-            _ => ControlFlow::Continue,
-        })
-    }
-
-    fn move_selection(&mut self, delta: i32) {
-        let len = self.current_options_len() as i32;
-        if len == 0 {
-            return;
-        }
-        let previous = *self.current_index_mut();
-        let next = (previous as i32 + delta).clamp(0, len - 1) as usize;
-        *self.current_index_mut() = next;
-        if self.step == StepKind::Microphone && next != previous {
-            self.defer_mic_monitor();
-        }
-    }
-
-    fn current_options_len(&self) -> usize {
-        match self.step {
-            StepKind::Model => self.model_values.len(),
-            StepKind::InferenceBackend => self.inference_backend_values.len(),
-            StepKind::Translation => TRANSLATE_LABELS.len(),
-            StepKind::Microphone => self.capabilities.microphones.len(),
-            StepKind::Activation => ACTIVATION_LABELS.len(),
-            StepKind::Output => self.output_labels.len(),
-            StepKind::OutputBackend => self.backend_values.len(),
-            StepKind::OutputPasteKeys => PasteKeys::ALL.len(),
-            StepKind::OutputSubmit => AUTO_SUBMIT_LABELS.len(),
-            StepKind::Startup => STARTUP_LABELS.len(),
-            StepKind::HistoryEnabled => HISTORY_ENABLED_LABELS.len(),
-            StepKind::TextPasses => TEXT_PASS_LABELS.len(),
-            StepKind::OverlayEnabled => OVERLAY_ENABLED_LABELS.len(),
-            StepKind::OverlayPosition => OVERLAY_POSITION_VALUES.len(),
-            StepKind::OverlayStyle => OVERLAY_STYLE_VALUES.len(),
-            StepKind::OverlayLook => self.overlay_look_option_count(),
-            StepKind::OverlayShape => OVERLAY_SHAPE_VALUES.len(),
-            StepKind::Shortcut
-            | StepKind::Confirm
-            | StepKind::Downloading
-            | StepKind::Decoding
-            | StepKind::TextProcessing
-            | StepKind::HistoryRetention
-            | StepKind::TranscriptFolder => 0,
-        }
-    }
-
-    fn current_index_mut(&mut self) -> &mut usize {
-        match self.step {
-            StepKind::Model => &mut self.model_selection,
-            StepKind::InferenceBackend => &mut self.inference_backend_selection,
-            StepKind::Translation => &mut self.translate_selection,
-            StepKind::Microphone => &mut self.mic_selection,
-            StepKind::Activation => &mut self.activation_selection,
-            StepKind::Output => &mut self.output_selection,
-            StepKind::OutputBackend => &mut self.backend_selection,
-            StepKind::OutputPasteKeys => &mut self.paste_keys_selection,
-            StepKind::OutputSubmit => &mut self.submit_selection,
-            StepKind::Startup => &mut self.startup_selection,
-            StepKind::HistoryEnabled => &mut self.history_enabled_selection,
-            StepKind::TextPasses => &mut self.text_pass_selection,
-            StepKind::OverlayEnabled => &mut self.overlay_enabled_selection,
-            StepKind::OverlayPosition => &mut self.overlay_position_selection,
-            StepKind::OverlayStyle => &mut self.overlay_style_selection,
-            StepKind::OverlayLook => &mut self.overlay_look_selection,
-            StepKind::OverlayShape => &mut self.overlay_shape_selection,
-            StepKind::Shortcut
-            | StepKind::Confirm
-            | StepKind::Downloading
-            | StepKind::Decoding
-            | StepKind::TextProcessing
-            | StepKind::HistoryRetention
-            | StepKind::TranscriptFolder => {
-                unreachable!("no list selection for this step")
-            }
-        }
-    }
-
-    fn selected_output_method(&self) -> OutputMethod {
-        OUTPUT_METHODS[self.output_selection]
-    }
-
-    fn has_backend_step(&self) -> bool {
-        self.selected_output_method().inserts_text() && self.capabilities.has_type_backend()
-    }
-
-    /// The overlay's position/style/look sub-steps are only worth configuring
-    /// once the overlay itself is enabled - mirrors `has_backend_step`'s
-    /// pattern of skipping a sub-step whose parent choice ruled it out.
-    fn overlay_options_shown(&self) -> bool {
-        self.overlay_enabled_selection == 1
-    }
-
-    /// The currently selected overlay style value.
-    fn overlay_style_value(&self) -> &'static str {
-        OVERLAY_STYLE_VALUES
-            .get(self.overlay_style_selection)
-            .copied()
-            .unwrap_or(OVERLAY_STYLE_VALUES[0])
-    }
-
-    /// How many look options the selected style offers.
-    fn overlay_look_option_count(&self) -> usize {
-        overlay_style_look_options(self.overlay_style_value()).len()
-    }
-
-    /// The look value the current selection names for the selected style.
-    fn overlay_look_value(&self) -> String {
-        let options = overlay_style_look_options(self.overlay_style_value());
-        let index = self
-            .overlay_look_selection
-            .min(options.len().saturating_sub(1));
-        options
-            .get(index)
-            .map(|(value, _)| (*value).to_string())
-            .unwrap_or_else(|| "waveform".to_string())
-    }
-
-    /// Whether the overlay-shape step applies: the selected style offers the
-    /// shape and the selected look is the waveform.
-    fn overlay_shape_shown(&self) -> bool {
-        overlay_shows_shape_choice(self.overlay_style_value(), &self.overlay_look_value())
-    }
-
-    /// The full ordered list of steps this run would actually visit, given
-    /// the current conditional choices (model download queue, output
-    /// backend, overlay enabled). Deriving `next_step`/`prev_step`/
-    /// `step_index`/`step_total` from one sequence keeps them from drifting
-    /// out of sync as conditional steps are added.
-    fn step_sequence(&self) -> Vec<StepKind> {
-        use StepKind::*;
-        let mut steps = vec![Model];
-        if self.downloading_needed {
-            steps.push(Downloading);
-        }
-        steps.push(InferenceBackend);
-        steps.push(Translation);
-        steps.push(Decoding);
-        steps.push(TextProcessing);
-        steps.push(TextPasses);
-        steps.push(Microphone);
-        steps.push(Activation);
-        steps.push(Shortcut);
-        steps.push(Output);
-        if self.has_backend_step() {
-            steps.push(OutputBackend);
-        }
-        if self.selected_output_method() == OutputMethod::Paste {
-            steps.push(OutputPasteKeys);
-        }
-        if self.selected_output_method().inserts_text() {
-            steps.push(OutputSubmit);
-        }
-        steps.push(Startup);
-        steps.push(HistoryEnabled);
-        if self.history_enabled_selection == 1 {
-            steps.push(HistoryRetention);
-            steps.push(TranscriptFolder);
-        }
-        steps.push(OverlayEnabled);
-        if self.overlay_options_shown() {
-            steps.push(OverlayPosition);
-            steps.push(OverlayStyle);
-            if overlay_has_look_choice(self.overlay_style_value()) {
-                steps.push(OverlayLook);
-            }
-            if self.overlay_shape_shown() {
-                steps.push(OverlayShape);
-            }
-        }
-        steps.push(Confirm);
-        steps
-    }
-
-    fn next_step(&self) -> Option<StepKind> {
-        let sequence = self.step_sequence();
-        let index = sequence.iter().position(|step| *step == self.step)?;
-        sequence.get(index + 1).copied()
-    }
-
-    fn prev_step(&self) -> Option<StepKind> {
-        let sequence = self.step_sequence();
-        let index = sequence.iter().position(|step| *step == self.step)?;
-        index.checked_sub(1).and_then(|i| sequence.get(i).copied())
-    }
-
-    fn advance(&mut self) -> anyhow::Result<ControlFlow> {
-        match self.step {
-            StepKind::Model => {
-                self.config.model.active_model = self.model_values[self.model_selection].clone();
-                self.download_queue = super::model_requirements(&self.config)
-                    .into_iter()
-                    .filter(|requirement| !requirement.already_present)
-                    .collect();
-                self.download_log.clear();
-                self.downloading_needed = !self.download_queue.is_empty();
-                if self.downloading_needed {
-                    self.start_next_download();
-                }
-            }
-            StepKind::InferenceBackend => {
-                let selected = self.inference_backend_values[self.inference_backend_selection];
-                if !self.backend_unavailable(selected) {
-                    self.config.model.preferred_backend = selected.to_string();
-                }
-            }
-            StepKind::Translation => {
-                self.config.transcription.translate = self.translate_selection == 1;
-            }
-            StepKind::Decoding => {
-                let (prompt, knobs) = self
-                    .decoding_fields
-                    .split_first()
-                    .expect("the decoding step has a prompt field");
-                let knobs: [&str; crate::config::DECODE_KNOBS.len()] =
-                    std::array::from_fn(|index| knobs[index].value());
-                if let Err(message) = self
-                    .config
-                    .transcription
-                    .apply_decoding_form(prompt.value(), &knobs)
-                {
-                    self.error = Some(message);
-                    return Ok(ControlFlow::Continue);
-                }
-            }
-            StepKind::TextProcessing => {
-                let mut text = self.config.text.clone();
-                if let Err(message) =
-                    text.apply_replacements_form(self.text_processing_fields[0].value())
-                {
-                    self.error = Some(message);
-                    return Ok(ControlFlow::Continue);
-                }
-                text.post_process_command =
-                    self.text_processing_fields[1].value().trim().to_string();
-                let timeout = match self.text_processing_fields[2].value().trim().parse::<u64>() {
-                    Ok(value) if value > 0 => value,
-                    _ => {
-                        self.error =
-                            Some("Timeout must be a whole number of seconds (at least 1).".into());
-                        return Ok(ControlFlow::Continue);
-                    }
-                };
-                text.post_process_timeout_seconds = timeout;
-                self.config.text = text;
-            }
-            StepKind::TextPasses => {
-                self.config.text.spoken_punctuation = matches!(self.text_pass_selection, 1 | 3);
-                self.config.text.remove_fillers = matches!(self.text_pass_selection, 2 | 3);
-            }
-            StepKind::Microphone => {
-                self.config.audio.microphone =
-                    self.capabilities.microphones[self.mic_selection].0.clone();
-            }
-            StepKind::Activation => {
-                self.config.activation.mode = if self.activation_selection == 0 {
-                    ActivationMode::Hold
-                } else {
-                    ActivationMode::Toggle
-                };
-            }
-            StepKind::Shortcut => {
-                // The binding is set entirely by the desktop's own dialog
-                // (`Ctrl+R` -> `start_shortcut_reconfigure`); there is no
-                // typed value to validate or store, so Enter just continues.
-            }
-            StepKind::Output => {
-                let method = self.selected_output_method();
-                if let Some(problem) = self.capabilities.output_method_problem(method) {
-                    // Only a method that works here may be selected: stay on
-                    // this step and explain what to install instead of saving
-                    // an output method that can never deliver a transcript.
-                    self.error = Some(problem.to_string());
-                    return Ok(ControlFlow::Continue);
-                }
-                self.config.output.method = method;
-                if !method.inserts_text() {
-                    self.config.output.typing_backend = "auto".to_string();
-                    self.config.output.auto_submit = false;
-                }
-            }
-            StepKind::OutputBackend => {
-                self.config.output.typing_backend =
-                    self.backend_values[self.backend_selection].clone();
-            }
-            StepKind::OutputPasteKeys => {
-                self.config.output.paste_keys = PasteKeys::ALL[self.paste_keys_selection];
-            }
-            StepKind::OutputSubmit => {
-                self.config.output.auto_submit = self.submit_selection == 1;
-            }
-            StepKind::Startup => {
-                self.config.startup.autostart = self.startup_selection == 1;
-                self.config.validate()?;
-            }
-            StepKind::HistoryEnabled => {
-                self.config.history.enabled = self.history_enabled_selection == 1;
-            }
-            StepKind::HistoryRetention => {
-                let entries = match self.retention_fields[0].value().trim().parse::<u64>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        self.error =
-                            Some("Maximum entries must be a whole number (0 = no limit).".into());
-                        return Ok(ControlFlow::Continue);
-                    }
-                };
-                let age = match self.retention_fields[1].value().trim().parse::<u64>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        self.error =
-                            Some("Maximum age must be a whole number (0 = no limit).".into());
-                        return Ok(ControlFlow::Continue);
-                    }
-                };
-                self.config.history.max_entries = entries;
-                self.config.history.max_age_days = age;
-                self.config.validate()?;
-            }
-            StepKind::TranscriptFolder => {
-                let raw = self.folder_field.value().trim();
-                if raw.is_empty() {
-                    self.config.history.transcript_folder = String::new();
-                } else {
-                    let expanded = crate::history::expand_home(raw);
-                    if !expanded.is_absolute() {
-                        self.error =
-                            Some("Enter an absolute folder path, or one starting with ~/.".into());
-                        return Ok(ControlFlow::Continue);
-                    }
-                    self.config.history.transcript_folder = expanded.to_string_lossy().into_owned();
-                }
-            }
-            StepKind::OverlayEnabled => {
-                self.config.overlay.enabled = self.overlay_enabled_selection == 1;
-            }
-            StepKind::OverlayPosition => {
-                self.config.overlay.position =
-                    OVERLAY_POSITION_VALUES[self.overlay_position_selection].to_string();
-            }
-            StepKind::OverlayStyle => {
-                let changed = self.config.overlay.style != self.overlay_style_value();
-                self.config.overlay.style = self.overlay_style_value().to_string();
-                if changed {
-                    // A new style may offer a different set of looks; keep a
-                    // stored look it still offers and otherwise snap to its
-                    // first, then start its own waveform shape.
-                    self.config.overlay.look = overlay_clamp_look_value(
-                        &self.config.overlay.style,
-                        &self.config.overlay.look,
-                    );
-                    self.overlay_look_selection =
-                        overlay_style_look_options(&self.config.overlay.style)
-                            .iter()
-                            .position(|(value, _)| *value == self.config.overlay.look)
-                            .unwrap_or(0);
-                    self.config.overlay.waveform_shape =
-                        overlay_default_shape(&self.config.overlay.style).to_string();
-                    self.overlay_shape_selection = OVERLAY_SHAPE_VALUES
-                        .iter()
-                        .position(|value| *value == self.config.overlay.waveform_shape)
-                        .unwrap_or(0);
-                }
-            }
-            StepKind::OverlayLook => {
-                self.config.overlay.look = self.overlay_look_value();
-            }
-            StepKind::OverlayShape => {
-                self.config.overlay.waveform_shape = OVERLAY_SHAPE_VALUES[self
-                    .overlay_shape_selection
-                    .min(OVERLAY_SHAPE_VALUES.len() - 1)]
-                .to_string();
-            }
-            StepKind::Downloading => {}
-            StepKind::Confirm => unreachable!("confirm handled separately"),
-        }
-        self.error = None;
-        if let Some(next) = self.next_step() {
-            self.step = next;
-            self.sync_mic_monitor();
-        }
-        Ok(ControlFlow::Continue)
-    }
-
-    fn retreat(&mut self) -> ControlFlow {
-        match self.prev_step() {
-            Some(step) => {
-                self.step = step;
-                self.error = None;
-                self.sync_mic_monitor();
-                ControlFlow::Continue
-            }
-            None => ControlFlow::Finish(SetupOutcome::Cancelled),
-        }
-    }
-
-    /// Live VU meter follows whichever microphone is currently highlighted in the
-    /// list, not just the one last confirmed, so switching the selection is audible
-    /// feedback before the user commits to it.
-    fn sync_mic_monitor(&mut self) {
-        if self.step != StepKind::Microphone {
-            self.mic_monitor.stop();
-            return;
-        }
-        let device_name = self.capabilities.microphones[self.mic_selection].0.clone();
-        self.mic_monitor.sync(self.mic_selection, &device_name);
-    }
-
-    fn defer_mic_monitor(&mut self) {
-        self.mic_monitor.defer_restart();
-    }
-
-    fn refresh_mic_monitor(&mut self) {
-        if self.mic_monitor.poll() {
-            self.sync_mic_monitor();
-        }
-    }
-
-    fn start_next_download(&mut self) {
-        if self.download_queue.is_empty() {
-            self.download_active_label = None;
-            return;
-        }
-        let requirement = self.download_queue.remove(0);
-        self.download_active_label = Some(requirement.label.clone());
-        self.download_handle = Some(super::provision_model_async(requirement));
-    }
-
-    fn refresh_downloads(&mut self) {
-        let Some(handle) = &self.download_handle else {
-            return;
-        };
-        let finished = handle.result.lock().ok().and_then(|mut guard| guard.take());
-        let Some(outcome) = finished else {
-            return;
-        };
-        let label = self.download_active_label.take().unwrap_or_default();
-        self.download_log.push((label, outcome));
-        self.download_handle = None;
-        self.start_next_download();
-    }
-
-    /// Starts the portal's native "press your new shortcut" dialog in the
-    /// background (`setup::reconfigure_shortcut_async`) - the only way to set
-    /// the "activation" shortcut, since TongueTyped registers no default
-    /// trigger.
-    fn start_shortcut_reconfigure(&mut self) {
-        if self.shortcut_handle.is_some() {
-            return;
-        }
-        self.error = None;
-        self.shortcut_feedback = None;
-        self.shortcut_handle = Some(super::reconfigure_shortcut_async());
-    }
-
-    /// Polled every render tick while a reconfigure dialog is in flight,
-    /// same shape as `refresh_downloads`/`refresh_mic_monitor` above.
-    fn refresh_shortcut_reconfigure(&mut self) {
-        let Some(handle) = &self.shortcut_handle else {
-            return;
-        };
-        let finished = handle.result.lock().ok().and_then(|mut guard| guard.take());
-        let Some(outcome) = finished else {
-            return;
-        };
-        self.shortcut_handle = None;
-        if let Ok(ReconfigureOutcome::Changed {
-            trigger_description,
-        }) = &outcome
-        {
-            self.config.activation.keybind = crate::activation::keybind_label(trigger_description);
-        }
-        if self.reopen_shortcut_dialog {
-            self.reopen_shortcut_dialog = false;
-            if self.step == StepKind::Shortcut {
-                self.start_shortcut_reconfigure();
-            }
-            return;
-        }
-        self.shortcut_feedback = Some(outcome);
-    }
-
-    fn step_title(&self) -> &'static str {
-        match self.step {
-            StepKind::Model => "Speech model",
-            StepKind::Downloading => "Fetching speech model",
-            StepKind::InferenceBackend => "Inference backend",
-            StepKind::Translation => "Translation",
-            StepKind::Decoding => "Decoding",
-            StepKind::TextProcessing => "Text processing",
-            StepKind::TextPasses => "Text passes",
-            StepKind::Microphone => "Microphone",
-            StepKind::Activation => "Activation",
-            StepKind::Shortcut => "Shortcut",
-            StepKind::Output => "Transcript output",
-            StepKind::OutputBackend => "Typing backend",
-            StepKind::OutputPasteKeys => "Paste keys",
-            StepKind::OutputSubmit => "After the text",
-            StepKind::Startup => "Startup",
-            StepKind::HistoryEnabled => "Transcript history",
-            StepKind::HistoryRetention => "History retention",
-            StepKind::TranscriptFolder => "Transcript folder",
-            StepKind::OverlayEnabled => "Overlay",
-            StepKind::OverlayPosition => "Overlay position",
-            StepKind::OverlayStyle => "Overlay style",
-            StepKind::OverlayLook => "Overlay look",
-            StepKind::OverlayShape => "Overlay waveform shape",
-            StepKind::Confirm => "Review",
-        }
-    }
-
-    fn step_index(&self) -> usize {
-        let sequence = self.step_sequence();
-        sequence
-            .iter()
-            .position(|step| *step == self.step)
-            .map(|index| index + 1)
-            .unwrap_or(1)
-    }
-
-    fn step_total(&self) -> usize {
-        self.step_sequence().len()
-    }
-
-    fn render(&self, frame: &mut Frame) {
-        let area = frame.area();
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(LOGO_HEIGHT),
-                Constraint::Length(1),
-                Constraint::Min(5),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-        frame.render_widget(
-            Paragraph::new(Text::styled(
-                LOGO,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            chunks[0],
-        );
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Step {} of {}   Setup \u{203a} {}",
-                self.step_index(),
-                self.step_total(),
-                self.step_title()
-            )),
-            chunks[1],
-        );
-        self.render_body(frame, chunks[2]);
-
-        let footer = if let Some(error) = &self.error {
-            Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)))
-        } else if self.step == StepKind::Output {
-            match self
-                .capabilities
-                .output_method_problem(self.selected_output_method())
+    /// Runs `future` on its own thread; `failed` builds the result reported
+    /// when that thread cannot even start its runtime.
+    fn spawn<F>(&mut self, future: F, failed: fn(String) -> TaskResult)
+    where
+        F: std::future::Future<Output = TaskResult> + Send + 'static,
+    {
+        let slot: Slot = Arc::new(Mutex::new(None));
+        let slot_for_thread = slot.clone();
+        std::thread::spawn(move || {
+            let result = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
             {
-                Some(warning) => {
-                    Line::from(Span::styled(warning, Style::default().fg(Color::Yellow)))
-                }
-                None => Line::from(self.hint_text()),
-            }
-        } else {
-            Line::from(self.hint_text())
-        };
-        frame.render_widget(Paragraph::new(footer), chunks[3]);
-    }
-
-    fn hint_text(&self) -> &'static str {
-        match self.step {
-            StepKind::Shortcut if self.shortcut_handle.is_some() => {
-                "Enter keep current   Ctrl+R reopen   Esc/\u{232b} back"
-            }
-            StepKind::Shortcut => "Ctrl+R dialog   Enter next   Esc/\u{232b} back",
-            StepKind::Confirm => "Enter/y save   n/q discard   Esc back",
-            StepKind::Downloading if !self.downloads_finished() => {
-                "Fetching...   Esc/\u{232b} back   q quit"
-            }
-            StepKind::Downloading => "Enter next   Esc/\u{232b} back   q quit",
-            StepKind::Decoding | StepKind::HistoryRetention | StepKind::TextProcessing => {
-                "↑/↓ row   ←/→ edit   Enter next   Esc back"
-            }
-            StepKind::TranscriptFolder => "←/→ edit   Enter next   Esc back",
-            _ => "↑/↓ row   ←/→ back/next   Enter next   Esc/\u{232b} back   q quit",
-        }
-    }
-
-    fn render_body(&self, frame: &mut Frame, area: Rect) {
-        match self.step {
-            StepKind::Model => frame.render_widget(
-                list_paragraph(
-                    &self.model_labels,
-                    self.model_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::Downloading => self.render_downloading(frame, area),
-            StepKind::InferenceBackend => self.render_inference_backend(frame, area),
-            StepKind::Translation => frame.render_widget(
-                list_paragraph(
-                    &TRANSLATE_LABELS.map(String::from),
-                    self.translate_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::Decoding => self.render_decoding(frame, area),
-            StepKind::TextProcessing => self.render_text_fields(
-                frame,
-                area,
-                &["Replacements", "Cleanup command", "Timeout (seconds)"],
-                &self.text_processing_fields,
-                self.text_processing_field,
-                &[
-                    "vox type => Voxtype; tee vee => TV (';', '>', and '\\' escaped with '\\')"
-                        .to_string(),
-                    "empty disables it".to_string(),
-                    String::new(),
-                ],
-            ),
-            StepKind::TextPasses => frame.render_widget(
-                list_paragraph(
-                    &TEXT_PASS_LABELS.map(String::from),
-                    self.text_pass_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::Microphone => self.render_microphone(frame, area),
-            StepKind::Activation => frame.render_widget(
-                list_paragraph(
-                    &ACTIVATION_LABELS.map(String::from),
-                    self.activation_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::Shortcut => self.render_shortcut(frame, area),
-            StepKind::Output => frame.render_widget(
-                list_paragraph(
-                    &self.output_labels,
-                    self.output_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::OutputBackend => frame.render_widget(
-                list_paragraph(
-                    &self.backend_values,
-                    self.backend_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::OutputPasteKeys => frame.render_widget(
-                list_paragraph(
-                    &paste_keys_labels(),
-                    self.paste_keys_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::OutputSubmit => frame.render_widget(
-                list_paragraph(
-                    &AUTO_SUBMIT_LABELS.map(String::from),
-                    self.submit_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::Startup => frame.render_widget(
-                list_paragraph(
-                    &STARTUP_LABELS.map(String::from),
-                    self.startup_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::HistoryEnabled => frame.render_widget(
-                list_paragraph(
-                    &HISTORY_ENABLED_LABELS.map(String::from),
-                    self.history_enabled_selection,
-                    self.step_title(),
-                    area.height,
-                ),
-                area,
-            ),
-            StepKind::HistoryRetention => self.render_text_fields(
-                frame,
-                area,
-                &["Maximum entries", "Maximum age (days)"],
-                &self.retention_fields,
-                self.retention_field,
-                &[],
-            ),
-            StepKind::TranscriptFolder => self.render_text_fields(
-                frame,
-                area,
-                &["Folder"],
-                std::slice::from_ref(&self.folder_field),
-                0,
-                &["Empty disables it; only written while keeping transcripts is on".to_string()],
-            ),
-            StepKind::OverlayEnabled => self.render_overlay_step(
-                frame,
-                area,
-                &OVERLAY_ENABLED_LABELS.map(String::from),
-                self.overlay_enabled_selection,
-            ),
-            StepKind::OverlayPosition => self.render_overlay_step(
-                frame,
-                area,
-                &OVERLAY_POSITION_VALUES.map(String::from),
-                self.overlay_position_selection,
-            ),
-            StepKind::OverlayStyle => self.render_overlay_step(
-                frame,
-                area,
-                &OVERLAY_STYLE_LABELS.map(String::from),
-                self.overlay_style_selection,
-            ),
-            StepKind::OverlayLook => {
-                let labels: Vec<String> = overlay_style_look_options(self.overlay_style_value())
-                    .iter()
-                    .map(|(_, label)| label.to_string())
-                    .collect();
-                self.render_overlay_step(frame, area, &labels, self.overlay_look_selection)
-            }
-            StepKind::OverlayShape => self.render_overlay_step(
-                frame,
-                area,
-                &OVERLAY_SHAPE_LABELS.map(String::from),
-                self.overlay_shape_selection,
-            ),
-            StepKind::Confirm => self.render_confirm(frame, area),
-        }
-    }
-
-    /// One of the Overlay steps: the option list plus a live preview band that
-    /// follows the current enable/position/style/look selections, so the
-    /// overlay is visible before the wizard finishes. Falls back to the plain
-    /// list when the terminal is too short for the band.
-    fn render_overlay_step(&self, frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
-        if area.height < PREVIEW_BAND_HEIGHT + 3 {
-            frame.render_widget(
-                list_paragraph(rows, selected, self.step_title(), area.height),
-                area,
-            );
-            return;
-        }
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(PREVIEW_BAND_HEIGHT)])
-            .split(area);
-        frame.render_widget(
-            list_paragraph(rows, selected, self.step_title(), chunks[0].height),
-            chunks[0],
-        );
-
-        let style_index = self
-            .overlay_style_selection
-            .min(OVERLAY_STYLE_VALUES.len() - 1);
-        let position_index = self
-            .overlay_position_selection
-            .min(OVERLAY_POSITION_VALUES.len() - 1);
-        let style = OVERLAY_STYLE_VALUES[style_index];
-        let position = OVERLAY_POSITION_VALUES[position_index];
-        let look = self.overlay_look_value();
-        let shape = OVERLAY_SHAPE_VALUES
-            .get(self.overlay_shape_selection)
-            .copied()
-            .unwrap_or(OVERLAY_SHAPE_VALUES[0]);
-        let enabled = self.overlay_enabled_selection == 1;
-
-        let title = format!(
-            "Preview \u{00b7} {} \u{00b7} {position}",
-            OVERLAY_STYLE_LABELS[style_index]
-        );
-        let block = Block::default().borders(Borders::ALL).title(title);
-        let inner = block.inner(chunks[1]);
-        frame.render_widget(block, chunks[1]);
-        if enabled && inner.width > 2 && inner.height > 0 {
-            let stage = inner.inner(ratatui::layout::Margin::new(1, 0));
-            let cells =
-                crate::tui::overlay_preview_cells(style, &look, shape, stage.width, stage.height);
-            let cols = cells.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
-            let rows = cells.len() as u16;
-            frame.render_widget(
-                Paragraph::new(cells),
-                crate::tui::placed_rect(stage, cols, rows, position),
-            );
-        }
-    }
-
-    fn render_downloading(&self, frame: &mut Frame, area: Rect) {
-        let mut lines: Vec<Line> = self
-            .download_log
-            .iter()
-            .map(|(label, outcome)| match outcome {
-                Ok(outcome) => Line::from(Span::styled(
-                    format!("  {label}: {}", super::outcome_label(*outcome)),
-                    Style::default().fg(Color::Green),
-                )),
-                Err(error) => Line::from(Span::styled(
-                    format!("  {label}: failed - {error}"),
-                    Style::default().fg(Color::Red),
-                )),
-            })
-            .collect();
-        if let Some(label) = &self.download_active_label {
-            lines.push(Line::from(format!("> Fetching {label}...")));
-        } else if self.downloads_finished() {
-            lines.push(Line::from(Span::styled(
-                "All required files are ready.",
-                Style::default().fg(Color::Green),
-            )));
-        }
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(area);
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(self.step_title()),
-            ),
-            chunks[0],
-        );
-
-        let (downloaded, total) = self
-            .download_handle
-            .as_ref()
-            .and_then(|handle| handle.progress.lock().ok().map(|guard| *guard))
-            .unwrap_or((0, 0));
-        let ratio = if total == 0 {
-            0.0
-        } else {
-            (downloaded as f64 / total as f64).clamp(0.0, 1.0)
-        };
-        let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Progress"))
-            .gauge_style(Style::default().fg(Color::Cyan))
-            .ratio(ratio);
-        frame.render_widget(gauge, chunks[1]);
-    }
-
-    fn render_inference_backend(&self, frame: &mut Frame, area: Rect) {
-        // A configured backend that can't run here is shown in the list above
-        // (marked unavailable); the panel below only explains the rest.
-        let unavailable: Vec<Line> = self
-            .capabilities
-            .inference_backends
-            .iter()
-            .filter(|choice| !self.inference_backend_values.contains(&choice.name))
-            .filter_map(|choice| {
-                choice.unavailable.as_ref().map(|reason| {
-                    Line::from(Span::styled(
-                        format!("  {}: {reason}", choice.name),
-                        Style::default().fg(Color::DarkGray),
-                    ))
-                })
-            })
-            .collect();
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(if unavailable.is_empty() {
-                    0
-                } else {
-                    unavailable.len() as u16 + 2
-                }),
-            ])
-            .split(area);
-
-        let labels: Vec<String> = self
-            .inference_backend_values
-            .iter()
-            .map(|name| {
-                let label = crate::inference::backend_preference_label(name);
-                if self.backend_unavailable(name) {
-                    format!("{label} (unavailable here)")
-                } else {
-                    label.to_string()
-                }
-            })
-            .collect();
-        frame.render_widget(
-            list_paragraph(
-                &labels,
-                self.inference_backend_selection,
-                self.step_title(),
-                chunks[0].height,
-            ),
-            chunks[0],
-        );
-        if !unavailable.is_empty() {
-            frame.render_widget(
-                Paragraph::new(unavailable).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Not available here"),
-                ),
-                chunks[1],
-            );
-        }
-    }
-
-    fn render_microphone(&self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(area);
-
-        let labels: Vec<String> = self
-            .capabilities
-            .microphones
-            .iter()
-            .map(|(_, label)| label.clone())
-            .collect();
-        frame.render_widget(
-            list_paragraph(
-                &labels,
-                self.mic_selection,
-                self.step_title(),
-                chunks[0].height,
-            ),
-            chunks[0],
-        );
-
-        if let Some(error) = self.mic_monitor.error() {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    format!("Unavailable: {error}"),
-                    Style::default().fg(Color::Red),
-                ))
-                .block(Block::default().borders(Borders::ALL).title("Input level")),
-                chunks[1],
-            );
-            return;
-        }
-
-        let level = self.mic_monitor.level();
-        let ratio = level_to_ratio(level);
-        let color = if ratio > 0.85 {
-            Color::Red
-        } else if ratio > 0.5 {
-            Color::Yellow
-        } else {
-            Color::Green
-        };
-        let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Input level"))
-            .gauge_style(Style::default().fg(color))
-            .ratio(ratio);
-        frame.render_widget(gauge, chunks[1]);
-    }
-
-    fn render_shortcut(&self, frame: &mut Frame, area: Rect) {
-        let mut lines = vec![Line::from(format!(
-            "Shortcut: {}",
-            crate::activation::keybind_display(&self.config.activation.keybind)
-        ))];
-        lines.push(Line::from(""));
-        if self.shortcut_handle.is_some() {
-            lines.push(Line::from(Span::styled(
-                "A shortcut settings window is open. Set or change your shortcut there, then \
-                 close it.",
-                Style::default().fg(Color::Yellow),
-            )));
-        } else if let Some(feedback) = &self.shortcut_feedback {
-            match feedback {
-                Ok(ReconfigureOutcome::Changed {
-                    trigger_description,
-                }) => lines.push(Line::from(Span::styled(
-                    format!(
-                        "Shortcut bound: {}",
-                        crate::activation::keybind_label(trigger_description)
-                    ),
-                    Style::default().fg(Color::Green),
-                ))),
-                // Not a failure: the user closed the desktop's settings window
-                // without applying anything, or kept the binding on purpose.
-                Ok(ReconfigureOutcome::Unchanged {
-                    trigger_description,
-                }) => lines.push(Line::from(Span::styled(
-                    format!(
-                        "No change was made - the shortcut is still {}",
-                        crate::activation::keybind_display(trigger_description)
-                    ),
-                    Style::default().fg(Color::Yellow),
-                ))),
-                Err(error) => lines.push(Line::from(Span::styled(
-                    format!("Reconfigure failed: {error}"),
-                    Style::default().fg(Color::Red),
-                ))),
-            }
-        } else if self.config.activation.keybind.is_empty() {
-            lines.push(Line::from(
-                "No shortcut set yet. TongueTyped registers the dictation action with the \
-                 desktop and never picks a key - press Ctrl+R to choose one in your desktop's \
-                 own shortcut dialog.",
-            ));
-        } else {
-            lines.push(Line::from(
-                "Ctrl+R opens your desktop's own shortcut dialog to change this binding.",
-            ));
-        }
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(self.step_title()),
-            ),
-            area,
-        );
-    }
-
-    /// The decoding step: the vocabulary prompt and the Whisper decode knobs,
-    /// with a one-line explanation under the fields.
-    fn render_decoding(&self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
-        let mut labels = vec![crate::config::INITIAL_PROMPT_LABEL];
-        labels.extend(crate::config::DECODE_KNOBS.iter().map(|knob| knob.label));
-        self.render_text_fields(
-            frame,
-            chunks[0],
-            &labels,
-            &self.decoding_fields,
-            self.decoding_field,
-            &crate::config::TranscriptionConfig::decoding_form_placeholders(),
-        );
-        frame.render_widget(Paragraph::new(crate::config::DECODING_HINT), chunks[1]);
-    }
-
-    /// A labeled set of editable text fields, the selected one highlighted
-    /// with a reversed cursor cell and an empty one showing its dim
-    /// placeholder (indexed like `fields`; missing entries show nothing) -
-    /// the console's counterpart to the dashboard's `TextFieldsScreen`
-    /// rendering.
-    fn render_text_fields(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        labels: &[&str],
-        fields: &[TextField],
-        selected: usize,
-        placeholders: &[String],
-    ) {
-        let label_width = labels
-            .iter()
-            .map(|label| label.chars().count())
-            .max()
-            .unwrap_or(0);
-        let lines: Vec<Line> = labels
-            .iter()
-            .zip(fields)
-            .enumerate()
-            .map(|(index, (label, field))| {
-                let highlighted = index == selected;
-                let marker = if highlighted { "> " } else { "  " };
-                let style = if highlighted {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                let mut spans = vec![Span::styled(
-                    format!("{marker}{label:<label_width$}  "),
-                    style,
-                )];
-                let placeholder = placeholders.get(index).filter(|_| field.value().is_empty());
-                let dim = Style::default().fg(Color::DarkGray);
-                if let Some(placeholder) = placeholder {
-                    // The cursor sits on the hint's first character so the
-                    // hint starts in the same column on every row.
-                    let mut chars = placeholder.chars();
-                    match chars.next().filter(|_| highlighted) {
-                        Some(first) => {
-                            spans.push(Span::styled(
-                                first.to_string(),
-                                dim.add_modifier(Modifier::REVERSED),
-                            ));
-                            spans.push(Span::styled(chars.as_str().to_string(), dim));
-                        }
-                        None => spans.push(Span::styled(placeholder.clone(), dim)),
-                    }
-                } else if highlighted {
-                    let (before, cursor_char, after) = field.split_at_cursor();
-                    spans.push(Span::raw(before));
-                    spans.push(Span::styled(
-                        cursor_char.map(String::from).unwrap_or_else(|| " ".into()),
-                        Style::default().add_modifier(Modifier::REVERSED),
-                    ));
-                    spans.push(Span::raw(after));
-                } else {
-                    spans.push(Span::raw(field.value().to_string()));
-                }
-                Line::from(spans)
-            })
-            .collect();
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(self.step_title()),
-            ),
-            area,
-        );
-    }
-
-    fn render_confirm(&self, frame: &mut Frame, area: Rect) {
-        let mut lines = vec![
-            Line::from(format!("Model:       {}", self.config.model.active_model)),
-            Line::from(format!(
-                "Backend:     {}",
-                crate::inference::backend_preference_label(&self.config.model.preferred_backend)
-            )),
-            Line::from(format!(
-                "Translation: {}",
-                self.config.transcription.translate_label()
-            )),
-            Line::from(format!(
-                "Decoding:    {}",
-                self.config.transcription.decoding_summary()
-            )),
-            Line::from(format!(
-                "Text:        {}",
-                self.config.text.processing_summary()
-            )),
-            Line::from(format!("Microphone:  {}", self.config.audio.microphone)),
-            Line::from(format!(
-                "Activation:  {} with {}",
-                self.config.activation.mode,
-                crate::activation::keybind_display(&self.config.activation.keybind)
-            )),
-            Line::from(format!("Output:      {}", output_summary(&self.config))),
-            Line::from(if self.config.history.enabled {
-                format!(
-                    "History:     on, {}{}",
-                    self.config.history.retention_summary(),
-                    if self.config.history.transcript_folder.trim().is_empty() {
-                        ", no transcript folder".to_string()
-                    } else {
-                        format!(", folder {}", self.config.history.transcript_folder)
-                    }
-                )
-            } else {
-                "History:     off (no database or transcript folder)".to_string()
-            }),
-            Line::from(format!(
-                "Autostart:   {}",
-                if self.config.startup.autostart {
-                    "yes"
-                } else {
-                    "no"
-                }
-            )),
-            Line::from(format!(
-                "Overlay:     {}",
-                if self.config.overlay.enabled {
-                    let style = &self.config.overlay.style;
-                    let look = if overlay_style_look_options(style).is_empty() {
-                        "no options".to_string()
-                    } else {
-                        let resolved = overlay_clamp_look_value(style, &self.config.overlay.look);
-                        format!("{} look", overlay_look_label(&resolved).to_lowercase())
-                    };
-                    let shape = if overlay_shows_shape_choice(style, &self.config.overlay.look) {
-                        format!(
-                            ", {}",
-                            overlay_shape_label(&self.config.overlay.waveform_shape).to_lowercase()
-                        )
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "enabled, {}, {} style, {}{}",
-                        self.config.overlay.position, self.config.overlay.style, look, shape
-                    )
-                } else {
-                    "disabled".to_string()
-                }
-            )),
-        ];
-        if self.config.history.enabled {
-            lines.push(Line::from(
-                "             Turn it off in Transcript output > Save transcript history.",
-            ));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from("Write this configuration?"));
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(self.step_title()),
-            ),
-            area,
-        );
-    }
-}
-
-fn list_paragraph<'a>(
-    labels: &[String],
-    selected: usize,
-    title: &'a str,
-    height: u16,
-) -> Paragraph<'a> {
-    let lines: Vec<Line> = labels
-        .iter()
-        .enumerate()
-        .map(|(index, label)| {
-            let marker = if index == selected { "> " } else { "  " };
-            let text = format!("{marker}{label}");
-            let style = if index == selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
+                Ok(runtime) => runtime.block_on(future),
+                Err(error) => failed(error.to_string()),
             };
-            Line::from(Span::styled(text, style))
-        })
-        .collect();
-    let visible_rows = usize::from(height.saturating_sub(2)).max(1);
-    let scroll = selected.saturating_sub(visible_rows - 1) as u16;
-    Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .scroll((scroll, 0))
+            if let Ok(mut guard) = slot_for_thread.lock() {
+                *guard = Some(result);
+            }
+        });
+        self.slots.push(slot);
+    }
+
+    fn run(&mut self, effect: Effect) {
+        match effect {
+            Effect::Dictation(start) => self.spawn(
+                async move {
+                    let request = if start { Request::Start } else { Request::Stop };
+                    TaskResult::Dictation(match crate::commands::send_ipc(request).await {
+                        Ok(Response::Error { message }) => Err(message),
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    })
+                },
+                |error| TaskResult::Dictation(Err(error)),
+            ),
+            Effect::Daemon(action) => self.spawn(
+                async move { TaskResult::Daemon(run_daemon_action(action).await) },
+                |error| TaskResult::Daemon(Err(error)),
+            ),
+            Effect::FetchLastResult => self.spawn(
+                async {
+                    TaskResult::LastResult(
+                        match crate::commands::send_ipc(Request::GetLastResult).await {
+                            Ok(Response::LastResult { text, timestamp }) => Some((text, timestamp)),
+                            _ => None,
+                        },
+                    )
+                },
+                |_| TaskResult::LastResult(None),
+            ),
+            effect @ (Effect::OverlayShow(_) | Effect::OverlayHide) => {
+                let reports = matches!(effect, Effect::OverlayShow(_));
+                let slot: Slot = Arc::new(Mutex::new(None));
+                if self.overlay.send((effect, slot.clone())).is_ok() && reports {
+                    self.slots.push(slot);
+                }
+            }
+            Effect::OpenShortcutDialog => match &self.shortcut {
+                Some(handle) => {
+                    handle.cancel();
+                    self.shortcut_reopen = true;
+                }
+                None => self.shortcut = Some(super::reconfigure_shortcut_async()),
+            },
+            Effect::CancelShortcutDialog => {
+                self.shortcut_reopen = false;
+                if let Some(handle) = self.shortcut.take() {
+                    handle.cancel();
+                }
+            }
+            Effect::Download(id) => {
+                self.download_progress = (0, 0);
+                self.download = Some(super::provision_model_async(id));
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Vec<TaskResult> {
+        let mut results = Vec::new();
+        if let Some(snapshot) = self.status.lock().ok().and_then(|mut guard| guard.take()) {
+            results.push(TaskResult::Status(snapshot));
+        }
+        self.slots.retain(
+            |slot| match slot.lock().ok().and_then(|mut guard| guard.take()) {
+                Some(result) => {
+                    results.push(result);
+                    false
+                }
+                None => true,
+            },
+        );
+        if let Some(handle) = &self.shortcut {
+            if let Some(outcome) = handle.result.lock().ok().and_then(|mut guard| guard.take()) {
+                self.shortcut = None;
+                if std::mem::take(&mut self.shortcut_reopen) {
+                    self.shortcut = Some(super::reconfigure_shortcut_async());
+                } else {
+                    results.push(TaskResult::Shortcut(outcome));
+                }
+            }
+        }
+        if let Some(handle) = &self.download {
+            let progress = handle.progress.lock().map(|guard| *guard).unwrap_or((0, 0));
+            if progress != self.download_progress {
+                self.download_progress = progress;
+                results.push(TaskResult::DownloadProgress(progress.0, progress.1));
+            }
+            if let Some(outcome) = handle.result.lock().ok().and_then(|mut guard| guard.take()) {
+                self.download = None;
+                results.push(TaskResult::Download(outcome));
+            }
+        }
+        results
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, Mutex};
-
-    fn no_mic_capabilities() -> Capabilities {
-        Capabilities {
-            microphones: vec![(
-                "default".to_string(),
-                "System default microphone".to_string(),
-            )],
-            typing_backends: Vec::new(),
-            clipboard: false,
-            inference_backends: Vec::new(),
-        }
+impl Drop for Executor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
+}
 
-    #[test]
-    fn completed_download_records_outcome_and_starts_the_next_queued_requirement() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Downloading;
-        state.downloading_needed = true;
-        state.download_active_label = Some("first-model".to_string());
-        state.download_handle = Some(ProvisionHandle {
-            progress: Arc::new(Mutex::new((10, 10))),
-            result: Arc::new(Mutex::new(Some(Ok(crate::model::DownloadOutcome::Fresh)))),
-        });
-        state.download_queue = vec![crate::setup::ModelRequirement {
-            label: "second-model".to_string(),
-            already_present: false,
-            id: "whisper-small-q5_k_m".to_string(),
-        }];
-
-        state.refresh_downloads();
-
-        assert_eq!(
-            state.download_log,
-            vec![(
-                "first-model".to_string(),
-                Ok(crate::model::DownloadOutcome::Fresh)
-            )]
-        );
-        assert_eq!(
-            state.download_active_label,
-            Some("second-model".to_string())
-        );
-        assert!(state.download_queue.is_empty());
-        assert!(!state.downloads_finished());
-    }
-
-    #[test]
-    fn download_failure_is_recorded_and_enter_waits_for_the_queue_to_drain() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Downloading;
-        state.downloading_needed = true;
-        state.download_active_label = Some("flaky-model".to_string());
-        state.download_handle = Some(ProvisionHandle {
-            progress: Arc::new(Mutex::new((0, 0))),
-            result: Arc::new(Mutex::new(Some(Err("network unreachable".to_string())))),
-        });
-
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(!state.downloads_finished());
-        state.handle_downloading_key(enter).unwrap();
-        assert_eq!(
-            state.step,
-            StepKind::Downloading,
-            "Enter must not skip past an in-flight download"
-        );
-
-        state.refresh_downloads();
-        assert!(state.downloads_finished());
-        assert_eq!(
-            state.download_log,
-            vec![(
-                "flaky-model".to_string(),
-                Err("network unreachable".to_string())
-            )]
-        );
-
-        state.handle_downloading_key(enter).unwrap();
-        assert_eq!(
-            state.step,
-            StepKind::InferenceBackend,
-            "a failed download is non-fatal - the user can still continue setup"
-        );
-    }
-
-    #[test]
-    fn overlay_steps_are_skipped_when_the_overlay_is_disabled() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::OverlayEnabled;
-        state.overlay_enabled_selection = 0;
-
-        state.advance().unwrap();
-        assert!(!state.config.overlay.enabled);
-        assert_eq!(
-            state.step,
-            StepKind::Confirm,
-            "disabling the overlay should skip straight to Confirm, not Position/Waveform"
-        );
-    }
-
-    #[test]
-    fn enabling_the_overlay_walks_through_position_style_look_and_shape_before_confirm() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::OverlayEnabled;
-        state.overlay_enabled_selection = 1;
-        state.advance().unwrap();
-        assert_eq!(state.step, StepKind::OverlayPosition);
-
-        state.overlay_position_selection = OVERLAY_POSITION_VALUES
-            .iter()
-            .position(|value| *value == "bottom-left")
-            .unwrap();
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.position, "bottom-left");
-        assert_eq!(state.step, StepKind::OverlayStyle);
-
-        state.overlay_style_selection = OVERLAY_STYLE_VALUES
-            .iter()
-            .position(|value| *value == "pill")
-            .unwrap();
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.style, "pill");
-        assert_eq!(state.step, StepKind::OverlayLook);
-
-        // The wide pill offers plain or waveform; pick the waveform.
-        state.overlay_look_selection = 1;
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.look, "waveform");
-        assert_eq!(state.step, StepKind::OverlayShape);
-
-        // Pick the squiggly line, then the wizard is done.
-        state.overlay_shape_selection = 1;
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.waveform_shape, "squiggle");
-        assert_eq!(state.step, StepKind::Confirm);
-    }
-
-    #[test]
-    fn a_blob_overlay_skips_the_look_and_shape_steps() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::OverlayStyle;
-        state.overlay_style_selection = OVERLAY_STYLE_VALUES
-            .iter()
-            .position(|value| *value == "blob")
-            .unwrap();
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.style, "blob");
-        assert_eq!(
-            state.step,
-            StepKind::Confirm,
-            "the blob has no look options, so it skips straight to Confirm"
-        );
-    }
-
-    #[test]
-    fn a_single_option_box_overlay_skips_the_look_step() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::OverlayStyle;
-        state.overlay_style_selection = OVERLAY_STYLE_VALUES
-            .iter()
-            .position(|value| *value == "live-text-box")
-            .unwrap();
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.style, "live-text-box");
-        assert_eq!(state.config.overlay.look, "live-text");
-        assert_eq!(
-            state.step,
-            StepKind::Confirm,
-            "the box offers a single look, so it skips straight to Confirm"
-        );
-    }
-
-    #[test]
-    fn keeping_the_same_style_does_not_reset_the_stored_look() {
-        // Re-choosing the style the config already has must not silently
-        // replace the stored look with the style's first option.
-        let mut config = Config::default();
-        config.overlay.style = "pill".to_string();
-        config.overlay.look = "waveform".to_string();
-        let mut state = ConsoleState::new(config, no_mic_capabilities());
-        state.step = StepKind::OverlayStyle;
-        state.overlay_style_selection = OVERLAY_STYLE_VALUES
-            .iter()
-            .position(|value| *value == "pill")
-            .unwrap();
-
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.look, "waveform");
-        assert_eq!(state.overlay_look_selection, 1);
-
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.look, "waveform");
-    }
-
-    #[test]
-    fn choosing_the_long_pill_defaults_the_shape_to_its_squiggle() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::OverlayStyle;
-        state.overlay_style_selection = OVERLAY_STYLE_VALUES
-            .iter()
-            .position(|value| *value == "long-pill")
-            .unwrap();
-
-        state.advance().unwrap();
-        assert_eq!(state.config.overlay.style, "long-pill");
-        assert_eq!(state.config.overlay.waveform_shape, "squiggle");
-        assert_eq!(state.overlay_shape_selection, 1);
-    }
-
-    fn rendered_confirm(state: &ConsoleState) -> String {
-        let backend = ratatui::backend::TestBackend::new(120, 40);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| state.render_confirm(frame, frame.area()))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let area = *buffer.area();
-        let mut text = String::new();
-        for y in area.y..area.y + area.height {
-            for x in area.x..area.x + area.width {
-                text.push_str(buffer[(x, y)].symbol());
+/// The overlay worker. The first show probes the compositor (up to two
+/// seconds), so none of this runs on the render thread. A hide before any
+/// show has nothing to clear and never starts the overlay.
+fn run_overlay_commands(commands: std::sync::mpsc::Receiver<(Effect, Slot)>) {
+    for (effect, slot) in commands {
+        let result = match effect {
+            Effect::OverlayShow(config) => Some(TaskResult::OverlayShown(
+                TEST_OVERLAY.try_send(FeedbackEvent::Recording, &config),
+            )),
+            _ => {
+                if TEST_OVERLAY.is_started() {
+                    TEST_OVERLAY.try_hide();
+                }
+                None
             }
-            text.push('\n');
+        };
+        if let Ok(mut guard) = slot.lock() {
+            *guard = result;
         }
-        text
     }
+}
 
-    #[test]
-    fn confirm_summary_shows_no_options_for_the_optionless_blob() {
-        // A style with no look options must not repeat the previous style's
-        // stale look in the Confirm summary.
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.config.overlay.enabled = true;
-        state.config.overlay.style = "blob".to_string();
-        state.config.overlay.look = "live-text".to_string();
-
-        let text = rendered_confirm(&state);
-        assert!(
-            text.contains("blob style, no options"),
-            "the optionless blob must summarize as no options:\n{text}"
-        );
-        assert!(
-            !text.to_lowercase().contains("live text look"),
-            "the summary must not show a look the blob cannot paint:\n{text}"
-        );
+fn poll_status(latest: Arc<Mutex<Option<DaemonSnapshot>>>, stop: Arc<AtomicBool>) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    while !stop.load(Ordering::Relaxed) {
+        let snapshot = runtime.block_on(daemon_snapshot());
+        if let Ok(mut guard) = latest.lock() {
+            *guard = Some(snapshot);
+        }
+        std::thread::sleep(STATUS_INTERVAL);
     }
+}
 
-    #[test]
-    fn retreating_from_confirm_returns_to_look_when_overlay_is_enabled_and_to_overlay_enabled_otherwise(
-    ) {
-        let mut enabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        enabled_state.step = StepKind::Confirm;
-        enabled_state.overlay_enabled_selection = 1;
-        assert_eq!(enabled_state.prev_step(), Some(StepKind::OverlayLook));
-
-        let mut disabled_state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        disabled_state.step = StepKind::Confirm;
-        disabled_state.overlay_enabled_selection = 0;
-        assert_eq!(disabled_state.prev_step(), Some(StepKind::OverlayEnabled));
+async fn daemon_snapshot() -> DaemonSnapshot {
+    let stopped = DaemonSnapshot {
+        state: DaemonState::Stopped,
+        backend: None,
+        error: None,
+    };
+    if !crate::commands::daemon_socket_exists() {
+        return stopped;
     }
-
-    #[test]
-    fn leaving_the_model_step_skips_downloading_when_nothing_is_missing() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Model;
-        // The real download queue only ever contains entries whose files are
-        // missing (see `model_requirements`); emulate "nothing missing" by
-        // starting from an already-empty queue rather than touching the
-        // filesystem or network in this test.
-        state.downloading_needed = false;
-
-        assert_eq!(state.next_step(), Some(StepKind::InferenceBackend));
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::commands::send_ipc(Request::Status),
+    )
+    .await
+    {
+        Ok(Ok(response)) => DaemonSnapshot::from_response(&response),
+        _ => stopped,
     }
+}
 
-    #[test]
-    fn output_step_refuses_typing_without_a_working_helper() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Output;
-        state.output_selection = 1;
-
-        state.advance().unwrap();
-        assert_eq!(
-            state.step,
-            StepKind::Output,
-            "a refused choice must keep the step open"
-        );
-        assert!(
-            state.error.is_some(),
-            "the refusal must say what to install: {:?}",
-            state.error
-        );
-        assert_eq!(state.config.output.method, OutputMethod::None);
-
-        state.output_selection = 0;
-        state.advance().unwrap();
-        assert_eq!(state.step, StepKind::Startup);
+/// Starts, stops, or restarts the daemon and waits for it to answer. A
+/// restart whose relaunch fails tries once more, so a transient failure does
+/// not leave dictation without a daemon.
+async fn run_daemon_action(action: DaemonAction) -> Result<String, String> {
+    use crate::commands;
+    match action {
+        DaemonAction::Start => {
+            if commands::daemon_socket_exists() {
+                return Ok("The daemon is already running.".into());
+            }
+            commands::spawn_daemon()
+                .map_err(|error| format!("Could not start the daemon: {error}"))?;
+            wait_for_daemon("started").await
+        }
+        DaemonAction::Stop => commands::stop_daemon()
+            .await
+            .map(|()| "Daemon stopped.".into())
+            .map_err(|error| format!("Could not stop the daemon: {error}")),
+        DaemonAction::Restart => {
+            if commands::daemon_socket_exists() {
+                commands::stop_daemon().await.map_err(|error| {
+                    format!("Could not stop the daemon, so it keeps running: {error}")
+                })?;
+            }
+            if let Err(first) = commands::spawn_daemon() {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                commands::spawn_daemon().map_err(|error| {
+                    format!("The daemon stopped but could not start again: {first}; {error}")
+                })?;
+            }
+            wait_for_daemon("restarted").await
+        }
     }
+}
 
-    #[test]
-    fn output_step_defaults_to_type_when_saving_transcripts_is_off() {
-        let capabilities = Capabilities {
-            typing_backends: vec!["wtype".to_string()],
-            ..no_mic_capabilities()
-        };
-        let state = ConsoleState::new(Config::default(), capabilities);
-        assert!(
-            !state.config.history.enabled,
-            "the fresh default must leave saving off"
-        );
-        assert_eq!(
-            state.output_selection, 1,
-            "off-by-default history must not leave the primary path delivering nothing"
-        );
+async fn wait_for_daemon(verb: &str) -> Result<String, String> {
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if crate::commands::daemon_socket_exists()
+            && crate::commands::send_ipc(Request::Status).await.is_ok()
+        {
+            return Ok(format!("Daemon {verb}."));
+        }
     }
-
-    #[test]
-    fn output_step_keeps_the_saved_no_delivery_choice_when_history_is_on() {
-        let capabilities = Capabilities {
-            typing_backends: vec!["wtype".to_string()],
-            ..no_mic_capabilities()
-        };
-        let mut config = Config::default();
-        config.history.enabled = true;
-        let state = ConsoleState::new(config, capabilities);
-        assert_eq!(
-            state.output_selection, 0,
-            "history already keeps the transcript, so the saved choice wins"
-        );
-    }
-
-    #[test]
-    fn paste_walks_through_backend_keys_and_enter_steps() {
-        let capabilities = Capabilities {
-            typing_backends: vec!["dotool".to_string()],
-            clipboard: true,
-            ..no_mic_capabilities()
-        };
-        let mut state = ConsoleState::new(Config::default(), capabilities);
-        state.step = StepKind::Output;
-        state.output_selection = 3;
-        state.advance().unwrap();
-        assert_eq!(state.config.output.method, OutputMethod::Paste);
-        assert_eq!(state.step, StepKind::OutputBackend);
-        state.advance().unwrap();
-        assert_eq!(state.step, StepKind::OutputPasteKeys);
-        state.move_selection(1);
-        state.advance().unwrap();
-        assert_eq!(state.config.output.paste_keys, PasteKeys::ShiftInsert);
-        assert_eq!(state.step, StepKind::OutputSubmit);
-        state.move_selection(1);
-        state.advance().unwrap();
-        assert!(state.config.output.auto_submit);
-        assert_eq!(state.step, StepKind::Startup);
-        assert_eq!(state.prev_step(), Some(StepKind::OutputSubmit));
-    }
-
-    #[test]
-    fn clipboard_skips_the_typing_steps_and_clears_enter_after() {
-        let capabilities = Capabilities {
-            clipboard: true,
-            ..no_mic_capabilities()
-        };
-        let mut config = Config::default();
-        config.output.method = OutputMethod::Type;
-        config.output.auto_submit = true;
-        let mut state = ConsoleState::new(config, capabilities);
-        state.step = StepKind::Output;
-        state.output_selection = 2;
-        state.advance().unwrap();
-        assert_eq!(state.config.output.method, OutputMethod::Clipboard);
-        assert!(!state.config.output.auto_submit);
-        assert_eq!(state.step, StepKind::Startup);
-        state.config.validate().unwrap();
-    }
-
-    #[test]
-    fn clipboard_is_refused_without_a_clipboard_helper() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Output;
-        state.output_selection = 2;
-        state.advance().unwrap();
-        assert_eq!(state.step, StepKind::Output);
-        let error = state.error.clone().unwrap_or_default();
-        assert!(
-            error.contains("wl-clipboard") || error.contains("xclip"),
-            "{error}"
-        );
-    }
-
-    fn capabilities_with_backends(backends: &[(&'static str, Option<&str>)]) -> Capabilities {
-        let mut capabilities = no_mic_capabilities();
-        capabilities.inference_backends = backends
-            .iter()
-            .map(|(name, reason)| crate::inference::BackendChoice {
-                name,
-                unavailable: reason.map(String::from),
-            })
-            .collect();
-        capabilities
-    }
-
-    #[test]
-    fn inference_backend_step_offers_only_usable_backends_and_saves_the_choice() {
-        let capabilities = capabilities_with_backends(&[
-            ("auto", None),
-            ("cpu", None),
-            ("vulkan", None),
-            (
-                "cuda",
-                Some("this build was compiled without the `gpu-cuda` feature"),
-            ),
-        ]);
-        let mut state = ConsoleState::new(Config::default(), capabilities);
-        assert_eq!(
-            state.inference_backend_values,
-            vec!["auto", "cpu", "vulkan"]
-        );
-        assert_eq!(state.inference_backend_selection, 0);
-
-        state.step = StepKind::InferenceBackend;
-        state.move_selection(1);
-        state.advance().unwrap();
-        assert_eq!(state.config.model.preferred_backend, "cpu");
-        assert_eq!(state.step, StepKind::Translation);
-        assert_eq!(state.prev_step(), Some(StepKind::InferenceBackend));
-    }
-
-    fn capabilities_with_unavailable_cuda() -> Capabilities {
-        capabilities_with_backends(&[
-            ("auto", None),
-            ("cpu", None),
-            (
-                "cuda",
-                Some("no usable cuda device or driver was found on this host"),
-            ),
-        ])
-    }
-
-    #[test]
-    fn a_configured_backend_that_is_unavailable_here_stays_selected_and_is_not_overwritten() {
-        let mut config = Config::default();
-        config.model.preferred_backend = "cuda".to_string();
-        let mut state = ConsoleState::new(config, capabilities_with_unavailable_cuda());
-        assert_eq!(
-            state.inference_backend_values[state.inference_backend_selection],
-            "cuda"
-        );
-
-        // Stepping through the backend step without changing anything must
-        // leave the saved pin alone rather than replacing it with `auto`.
-        state.step = StepKind::InferenceBackend;
-        state.advance().unwrap();
-        assert_eq!(state.config.model.preferred_backend, "cuda");
-
-        // Choosing a backend that does work here still saves normally.
-        let mut config = Config::default();
-        config.model.preferred_backend = "cuda".to_string();
-        let mut state = ConsoleState::new(config, capabilities_with_unavailable_cuda());
-        state.step = StepKind::InferenceBackend;
-        state.move_selection(-1);
-        state.advance().unwrap();
-        assert_eq!(state.config.model.preferred_backend, "cpu");
-
-        let mut config = Config::default();
-        config.model.preferred_backend = "cpu".to_string();
-        let state = ConsoleState::new(
-            config,
-            capabilities_with_backends(&[("auto", None), ("cpu", None)]),
-        );
-        assert_eq!(
-            state.inference_backend_values[state.inference_backend_selection],
-            "cpu"
-        );
-    }
-
-    #[test]
-    fn rapid_mic_navigation_defers_preview_restart_until_selection_settles() {
-        let capabilities = Capabilities {
-            microphones: vec![
-                ("test-mic-1".to_string(), "Test microphone 1".to_string()),
-                ("test-mic-2".to_string(), "Test microphone 2".to_string()),
-                ("test-mic-3".to_string(), "Test microphone 3".to_string()),
-            ],
-            typing_backends: Vec::new(),
-            clipboard: false,
-            inference_backends: Vec::new(),
-        };
-        let mut state = ConsoleState::new(Config::default(), capabilities);
-        state.step = StepKind::Microphone;
-        state.mic_monitor.simulate_active_preview(0);
-
-        state.move_selection(1);
-        state.move_selection(1);
-
-        assert_eq!(state.mic_selection, 2);
-        assert_eq!(state.mic_monitor.active_index(), None);
-        assert!(state.mic_monitor.restart_pending());
-    }
-
-    #[test]
-    fn async_stream_error_is_routed_into_the_mic_error_panel_instead_of_the_terminal() {
-        let capabilities = Capabilities {
-            microphones: vec![("test-mic-1".to_string(), "Test microphone 1".to_string())],
-            typing_backends: Vec::new(),
-            clipboard: false,
-            inference_backends: Vec::new(),
-        };
-        let mut state = ConsoleState::new(Config::default(), capabilities);
-        state.step = StepKind::Microphone;
-        state.mic_monitor.simulate_active_preview(0);
-
-        // Simulate what AudioRecorder's error_callback does from its background
-        // audio thread when a device disconnects mid-stream.
-        state.mic_monitor.inject_stream_error("Device disconnected");
-
-        state.refresh_mic_monitor();
-
-        assert_eq!(state.mic_monitor.error(), Some("Device disconnected"));
-        assert!(!state.mic_monitor.has_open_stream());
-        assert!(!state.mic_monitor.has_pending_stream_error());
-    }
-
-    #[test]
-    fn switching_mic_selection_discards_the_previous_device_stream_error() {
-        let capabilities = Capabilities {
-            microphones: vec![
-                ("test-mic-1".to_string(), "Test microphone 1".to_string()),
-                ("test-mic-2".to_string(), "Test microphone 2".to_string()),
-            ],
-            typing_backends: Vec::new(),
-            clipboard: false,
-            inference_backends: Vec::new(),
-        };
-        let mut state = ConsoleState::new(Config::default(), capabilities);
-        state.step = StepKind::Microphone;
-        state.mic_monitor.simulate_active_preview(0);
-
-        // Device 0 reports an async error from its background audio thread, but
-        // the user navigates to device 1 before refresh_mic_monitor() drains it.
-        state
-            .mic_monitor
-            .inject_stream_error("Device 0 disconnected");
-        state.move_selection(1);
-
-        assert_eq!(state.mic_selection, 1);
-        assert!(!state.mic_monitor.has_pending_stream_error());
-
-        state.refresh_mic_monitor();
-
-        assert_eq!(state.mic_monitor.error(), None);
-    }
-
-    #[test]
-    fn logo_preserves_the_chosen_block_shadow_spacing() {
-        let lines: Vec<_> = LOGO.lines().collect();
-
-        assert_eq!(lines.len(), usize::from(LOGO_HEIGHT));
-        assert!(lines[2].starts_with("   ██║"));
-        assert!(lines[5].starts_with("   ╚═╝"));
-        assert!(lines[6].is_empty());
-        assert!(lines[7].starts_with("                              ░▒▓"));
-    }
-
-    #[test]
-    fn completed_reconfigure_stores_the_real_trigger_and_clears_the_handle() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(Ok(
-            ReconfigureOutcome::Changed {
-                trigger_description: "Ctrl + Shift + Space".to_string(),
-            },
-        ))))));
-
-        state.refresh_shortcut_reconfigure();
-
-        assert!(state.shortcut_handle.is_none());
-        assert_eq!(state.config.activation.keybind, "Ctrl + Shift + Space");
-        assert_eq!(
-            state.shortcut_feedback,
-            Some(Ok(ReconfigureOutcome::Changed {
-                trigger_description: "Ctrl + Shift + Space".to_string(),
-            }))
-        );
-    }
-
-    #[test]
-    fn reconfigure_rewrites_kdes_meta_wording_to_super() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(Ok(
-            ReconfigureOutcome::Changed {
-                trigger_description: "Meta+O".to_string(),
-            },
-        ))))));
-
-        state.refresh_shortcut_reconfigure();
-
-        assert_eq!(state.config.activation.keybind, "Super+O");
-    }
-
-    #[test]
-    fn unchanged_reconfigure_keeps_the_binding_and_is_not_an_error() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.config.activation.keybind = "Super+O".to_string();
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(Ok(
-            ReconfigureOutcome::Unchanged {
-                trigger_description: "Meta+O".to_string(),
-            },
-        ))))));
-
-        state.refresh_shortcut_reconfigure();
-
-        assert!(state.shortcut_handle.is_none());
-        assert_eq!(
-            state.config.activation.keybind, "Super+O",
-            "a no-change settle must not rewrite the binding"
-        );
-        assert_eq!(
-            state.shortcut_feedback,
-            Some(Ok(ReconfigureOutcome::Unchanged {
-                trigger_description: "Meta+O".to_string(),
-            }))
-        );
-    }
-
-    #[test]
-    fn failed_reconfigure_reports_the_error_and_leaves_the_binding_untouched() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        let previous_binding = state.config.activation.keybind.clone();
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(Some(
-            Err("global shortcuts portal unavailable".to_string()),
-        )))));
-
-        state.refresh_shortcut_reconfigure();
-
-        assert!(state.shortcut_handle.is_none());
-        assert_eq!(state.config.activation.keybind, previous_binding);
-        assert_eq!(
-            state.shortcut_feedback,
-            Some(Err("global shortcuts portal unavailable".to_string()))
-        );
-    }
-
-    #[test]
-    fn advancing_past_the_shortcut_step_leaves_the_reported_binding_untouched() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.config.activation.keybind = "Super+O".to_string();
-
-        state.advance().unwrap();
-
-        assert_eq!(state.config.activation.keybind, "Super+O");
-    }
-
-    #[test]
-    fn enter_while_waiting_settles_on_the_current_binding_without_advancing() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.config.activation.keybind = "Super+O".to_string();
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
-
-        let flow = state
-            .handle_shortcut_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
-
-        assert!(matches!(flow, ControlFlow::Continue));
-        assert_eq!(
-            state.step,
-            StepKind::Shortcut,
-            "keeping the current binding must not skip the step"
-        );
-        assert!(state.shortcut_handle.is_none());
-        assert_eq!(state.config.activation.keybind, "Super+O");
-        assert_eq!(
-            state.shortcut_feedback,
-            Some(Ok(ReconfigureOutcome::Unchanged {
-                trigger_description: "Super+O".to_string(),
-            }))
-        );
-    }
-
-    #[test]
-    fn escape_while_waiting_cancels_the_handle_and_retreats() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
-
-        let flow = state
-            .handle_shortcut_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .unwrap();
-
-        assert!(matches!(flow, ControlFlow::Continue));
-        assert!(
-            state.shortcut_handle.is_none(),
-            "leaving must stop the wait"
-        );
-        assert_eq!(state.step, StepKind::Activation);
-    }
-
-    #[test]
-    fn ctrl_r_keeps_the_old_wait_until_it_settles() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        let old_result = Arc::new(Mutex::new(None));
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(old_result.clone()));
-
-        state
-            .handle_shortcut_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
-            .unwrap();
-
-        assert!(
-            state.reopen_shortcut_dialog,
-            "Ctrl+R must schedule a reopen after the old wait settles"
-        );
-        assert!(
-            state.shortcut_handle.is_some(),
-            "Ctrl+R must not start a second configure while the first is still open"
-        );
-
-        state
-            .handle_shortcut_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
-        assert!(
-            !state.reopen_shortcut_dialog,
-            "keeping the current binding must cancel the scheduled reopen"
-        );
-        assert!(state.shortcut_handle.is_none());
-    }
-
-    #[test]
-    fn other_keys_are_ignored_while_a_reconfigure_is_in_flight() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
-
-        state
-            .handle_shortcut_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
-            .unwrap();
-
-        assert_eq!(state.step, StepKind::Shortcut);
-        assert!(state.shortcut_handle.is_some());
-    }
-
-    #[test]
-    fn backspace_retreats_from_a_list_step() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::InferenceBackend;
-        let expected = state.prev_step().unwrap();
-
-        let flow = state
-            .handle_list_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
-            .unwrap();
-
-        assert!(matches!(flow, ControlFlow::Continue));
-        assert_eq!(state.step, expected);
-    }
-
-    #[test]
-    fn backspace_retreats_from_the_downloading_step() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Downloading;
-        state.downloading_needed = true;
-        let expected = state.prev_step().unwrap();
-
-        state
-            .handle_downloading_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
-            .unwrap();
-
-        assert_eq!(state.step, expected);
-    }
-
-    #[test]
-    fn backspace_while_waiting_cancels_the_handle_and_retreats() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        state.shortcut_handle = Some(ReconfigureHandle::for_test(Arc::new(Mutex::new(None))));
-
-        let flow = state
-            .handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
-            .unwrap();
-
-        assert!(matches!(flow, ControlFlow::Continue));
-        assert!(
-            state.shortcut_handle.is_none(),
-            "leaving must stop the wait"
-        );
-        assert_eq!(state.step, StepKind::Activation);
-    }
-
-    #[test]
-    fn backspace_retreats_from_the_shortcut_step() {
-        let mut state = ConsoleState::new(Config::default(), no_mic_capabilities());
-        state.step = StepKind::Shortcut;
-        let expected = state.prev_step().unwrap();
-
-        state
-            .handle_shortcut_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
-            .unwrap();
-
-        assert_eq!(state.step, expected);
-    }
+    Ok(format!(
+        "Daemon {verb}, but it has not answered yet (it may be loading its model)."
+    ))
 }
