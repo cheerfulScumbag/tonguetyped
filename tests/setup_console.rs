@@ -149,7 +149,7 @@ impl Session {
             parser,
             child,
         };
-        session.wait_for("TONGUETYPED", Duration::from_secs(15));
+        session.wait_for("tonguetyped", Duration::from_secs(15));
         // Let raw mode settle so the first keypress is not eaten by the
         // pty's line discipline.
         std::thread::sleep(Duration::from_millis(300));
@@ -542,10 +542,7 @@ fn pty_bare_tonguetyped_opens_the_four_tab_console() {
     let sandbox = Sandbox::with_config("bare", original);
     let mut session = Session::spawn_with_args(&sandbox, &[], 100, 32);
     let screen = session.wait_for("Microphone", Duration::from_secs(5));
-    assert!(
-        screen.contains("TONGUETYPED SETUP"),
-        "console header:\n{screen}"
-    );
+    assert!(screen.contains("tonguetyped"), "console header:\n{screen}");
     for tab in ["[1] Audio", "[2] Model", "[3] Output", "[4] Interface"] {
         assert!(screen.contains(tab), "tab bar lists {tab:?}:\n{screen}");
     }

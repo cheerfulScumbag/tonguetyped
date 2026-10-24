@@ -63,8 +63,15 @@ impl Theme {
         }
     }
 
-    pub(super) fn brand(&self) -> Style {
-        self.paint(CYAN, Modifier::BOLD)
+    /// The wordmark's body letters: the frame's own text colour, bold so the
+    /// one-line name still reads as a logo.
+    pub(super) fn wordmark(&self) -> Style {
+        self.paint(TEXT, Modifier::BOLD)
+    }
+
+    /// The two `t` glyphs of the wordmark.
+    pub(super) fn wordmark_accent(&self) -> Style {
+        self.paint(GREEN, Modifier::BOLD)
     }
 
     pub(super) fn accent(&self) -> Style {

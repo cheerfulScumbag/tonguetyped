@@ -2,8 +2,12 @@ use super::*;
 use crate::inference::BackendChoice;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 const SIZES: [(u16, u16); 2] = [(80, 24), (60, 20)];
+/// The two colours the wordmark must paint, straight from the theme.
+const WORDMARK_GREEN: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
+const WORDMARK_TEXT: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
 
 fn capabilities() -> Capabilities {
     Capabilities {
@@ -40,14 +44,23 @@ fn app() -> App {
 }
 
 fn app_with(config: Config) -> App {
+    app_with_theme(config, Theme::new(false))
+}
+
+fn app_with_theme(config: Config, theme: Theme) -> App {
     TEST_DISK.with(|disk| *disk.borrow_mut() = config.clone());
-    let mut app = App::new(config, capabilities(), Theme::new(false), false);
+    let mut app = App::new(config, capabilities(), theme, false);
     app.daemon = DaemonSnapshot {
         state: DaemonState::Idle,
         backend: Some("transcribe.cpp/vulkan".into()),
         error: None,
     };
     app
+}
+
+/// A console that paints colours, so the header's wordmark can be inspected.
+fn colored_app() -> App {
+    app_with_theme(Config::default(), Theme::new(true))
 }
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -68,10 +81,15 @@ fn type_text(app: &mut App, text: &str) {
     }
 }
 
-fn render(app: &App, width: u16, height: u16) -> Vec<String> {
+fn render_buffer(app: &App, width: u16, height: u16) -> Buffer {
     let area = Rect::new(0, 0, width, height);
     let mut buf = Buffer::empty(area);
     app.render_into(area, &mut buf);
+    buf
+}
+
+fn render(app: &App, width: u16, height: u16) -> Vec<String> {
+    let buf = render_buffer(app, width, height);
     (0..height)
         .map(|y| {
             (0..width)
@@ -79,6 +97,29 @@ fn render(app: &App, width: u16, height: u16) -> Vec<String> {
                 .collect::<String>()
         })
         .collect()
+}
+
+/// The header content row as glyphs paired with the colour each was painted.
+fn header_cells(app: &App, width: u16) -> Vec<(String, Color)> {
+    let buf = render_buffer(app, width, 10);
+    (0..width)
+        .map(|x| (buf[(x, 1)].symbol().to_string(), buf[(x, 1)].fg))
+        .collect()
+}
+
+fn header_text(cells: &[(String, Color)]) -> String {
+    cells.iter().map(|(symbol, _)| symbol.as_str()).collect()
+}
+
+/// The cell index where `needle` starts, so multi-byte borders cannot shift it.
+fn find_cells(cells: &[(String, Color)], needle: &str) -> Option<usize> {
+    let needle: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+    cells.windows(needle.len()).position(|window| {
+        window
+            .iter()
+            .zip(&needle)
+            .all(|((glyph, _), wanted)| glyph == wanted)
+    })
 }
 
 fn screen(app: &App, width: u16, height: u16) -> String {
@@ -121,22 +162,63 @@ fn expected_label(control: Control) -> String {
 #[test]
 fn the_header_wordmark_degrades_without_clipping_the_badge() {
     let app = app();
-    assert!(render(&app, 100, 10)[1].contains("TONGUETYPED SETUP"));
+    assert!(render(&app, 100, 10)[1].contains("tonguetyped"));
     let mut seen = Vec::new();
     for width in (24..=100).rev() {
         let header = render(&app, width, 10)[1].trim_end().to_string();
-        let brand = ["TONGUETYPED SETUP", "TONGUETYPED", "TT"]
+        let wordmark = ["tonguetyped", "tt"]
             .into_iter()
-            .find(|brand| header.starts_with(&format!("\u{2502} {brand}")))
+            .find(|wordmark| header.starts_with(&format!("\u{2502} {wordmark}")))
             .unwrap_or_else(|| panic!("{width} cols has no wordmark: {header}"));
         assert!(header.contains("ACTIVE"), "{width} cols: {header}");
         assert!(header.ends_with('\u{2502}'), "{width} cols: {header}");
         assert!(!header.contains('\u{1F399}'), "no emoji: {header}");
-        if seen.last() != Some(&brand) {
-            seen.push(brand);
+        if seen.last() != Some(&wordmark) {
+            seen.push(wordmark);
         }
     }
-    assert_eq!(seen, ["TONGUETYPED SETUP", "TONGUETYPED", "TT"]);
+    assert_eq!(seen, ["tonguetyped", "tt"]);
+}
+
+#[test]
+fn the_header_wordmark_paints_exactly_two_green_t_glyphs() {
+    let app = colored_app();
+    let cells = header_cells(&app, 100);
+    let text = header_text(&cells);
+    let start = find_cells(&cells, "tonguetyped").unwrap_or_else(|| panic!("no wordmark: {text}"));
+    for (offset, letter) in "tonguetyped".chars().enumerate() {
+        let (glyph, color) = &cells[start + offset];
+        let expected = if letter == 't' {
+            WORDMARK_GREEN
+        } else {
+            WORDMARK_TEXT
+        };
+        assert_eq!(glyph, &letter.to_string(), "wordmark letter {offset}");
+        assert_eq!(
+            *color, expected,
+            "wordmark letter {offset} ({letter:?}) is painted {color:?}"
+        );
+    }
+    let green_ts = cells
+        .iter()
+        .filter(|(glyph, color)| glyph == "t" && *color == WORDMARK_GREEN)
+        .count();
+    assert_eq!(green_ts, 2, "exactly the two t glyphs are green:\n{text}");
+    assert!(text.contains("Daemon: "), "the daemon badge stays:\n{text}");
+    assert!(text.contains("Vulkan"), "the backend badge stays:\n{text}");
+}
+
+#[test]
+fn the_header_wordmark_falls_back_to_tt_when_narrow() {
+    let app = colored_app();
+    let cells = header_cells(&app, 22);
+    let text = header_text(&cells);
+    assert!(!text.contains("tonguetyped"), "too narrow for it:\n{text}");
+    let start = find_cells(&cells, "tt").unwrap_or_else(|| panic!("no tt fallback: {text}"));
+    for offset in 0..2 {
+        assert_eq!(cells[start + offset], ("t".to_string(), WORDMARK_GREEN));
+    }
+    assert!(text.contains("ACTIVE"), "the badges stay:\n{text}");
 }
 
 #[test]
@@ -164,7 +246,7 @@ fn every_tab_renders_its_frame_at_both_sizes() {
             assert_eq!(lines.len(), usize::from(height));
             let text = lines.join("\n");
             assert!(
-                lines[1].contains("TONGUETYPED"),
+                lines[1].contains("tonguetyped"),
                 "{tab:?} {width}x{height}:\n{text}"
             );
             assert!(!text.contains("VOX"), "no other app's name:\n{text}");
