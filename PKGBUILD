@@ -12,7 +12,7 @@
 # pages, and app icon; installing it alongside the binary keeps the AUR
 # package at parity with the .deb and .rpm.
 pkgname=tonguetyped-bin
-pkgver=0.3.1
+pkgver=0.3.2
 pkgrel=1
 pkgdesc="Local Linux dictation controlled from the terminal or a desktop-wide keyboard shortcut"
 arch=('x86_64')
