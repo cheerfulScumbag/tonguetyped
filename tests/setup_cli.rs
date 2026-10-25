@@ -35,6 +35,11 @@ fn run_setup(
             config_home.join("systemd-user"),
         )
         .env("NO_COLOR", "1")
+        // Nix's buildRustPackage exports RUST_LOG as an empty string, and an
+        // empty EnvFilter silences every tracing event, including the warning
+        // this file asserts on. Drop any inherited filter so the app's own
+        // default filter applies, as it does in a normal user session.
+        .env_remove("RUST_LOG")
         // Pin the session so `enigo` (X11-only) can never count as a typing
         // helper on a developer's desktop, and replace PATH entirely when a
         // bin directory is given so helper detection only sees its stubs.
