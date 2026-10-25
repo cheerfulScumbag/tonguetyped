@@ -31,13 +31,16 @@ pub fn save_configuration(config: &Config) -> anyhow::Result<()> {
     if config.startup.autostart {
         if let Some(unit) = systemd_unit() {
             // The unit starts the daemon. Saving still succeeds so unrelated
-            // settings changes land, but the app must not add a second owner.
+            // settings changes land, but the app must not add a second owner,
+            // and the saved config must not claim an entry it refused to write.
             tracing::warn!(
                 "autostart is owned by {}; not writing the app's XDG autostart entry",
                 unit.display()
             );
             apply(false)?;
-            return save_config_after_apply(config, Some(false));
+            let mut config = config.clone();
+            config.startup.autostart = false;
+            return save_config_after_apply(&config, Some(false));
         }
     }
     save_configuration_locked(config, previous)
