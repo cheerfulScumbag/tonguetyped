@@ -423,6 +423,49 @@ fn space_toggles_checkboxes() {
 }
 
 #[test]
+fn enabling_feedback_sounds_previews_the_success_sound() {
+    let mut app = app();
+    app.take_effects();
+    focus(&mut app, Control::FeedbackSounds);
+    assert!(!app.checked(Control::FeedbackSounds));
+
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.checked(Control::FeedbackSounds));
+    let effects = app.take_effects();
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::FeedbackSound {
+                event: FeedbackEvent::Success,
+                ..
+            }]
+        ),
+        "turning sounds on plays success once: {effects:?}"
+    );
+
+    press(&mut app, KeyCode::Char(' '));
+    assert!(!app.checked(Control::FeedbackSounds));
+    assert!(
+        app.take_effects().is_empty(),
+        "turning sounds off does not play anything"
+    );
+}
+
+#[test]
+fn feedback_sound_failure_is_shown_with_the_real_reason() {
+    let mut app = app();
+    app.apply(TaskResult::FeedbackSound(Err(
+        "no audio output device".to_string()
+    )));
+    let message = app.message.expect("the console shows the failure");
+    assert!(
+        message.text.contains("no audio output device"),
+        "{message:?}"
+    );
+    assert_eq!(message.tone, Tone::Error);
+}
+
+#[test]
 fn space_selects_a_microphone_and_the_mode_radio_flips() {
     let mut app = app();
     focus(&mut app, Control::Microphone(1));
