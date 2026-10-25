@@ -2,6 +2,49 @@
 
 All notable changes to TongueTyped are recorded here.
 
+## 0.3.1
+
+### Added
+
+- The Speech models table in the setup console is filterable and sortable.
+  `i` cycles the installed-state filter through any, installed, and not
+  installed, `f` cycles model family, and `t` cycles quantization; `s`
+  cycles the sort order through catalog order, size ascending and
+  descending, id, quantization, and live-first, and `c` clears the filters.
+  The table header names the active sort, a status line shows the active
+  filter chips and how to clear them, and the pane title always carries the
+  entry count so a filtered view never looks like an empty catalog. Sorting
+  keeps the cursor on the same model and clamps it to a visible row, and a
+  filter that hides the active model names it instead of dropping its
+  marker.
+
+### Changed
+
+- Feedback sounds play in-process from embedded audio assets. Each feedback
+  event has one small mono WAV compiled into the binary and played through
+  cpal on an output stream at the configured `feedback_volume` (a linear
+  gain, so 0.7 is still -3.1 dB), through `feedback_device` when that names
+  a device. Turning on Feedback sounds in the setup console now plays the
+  Success sound immediately and shows a real playback error there, naming
+  whether the output device is missing or failed and including the
+  underlying error, instead of leaving a stale "install canberra-gtk-play"
+  warning in the daemon journal. The external `canberra-gtk-play` player,
+  its freedesktop theme ids, the Nix wrapper entry, and the packaging
+  dependency are gone.
+
+### Fixed
+
+- Both daemon service units set explicit start limits
+  (`StartLimitIntervalSec=300`, `StartLimitBurst=5`), so any repeated start
+  failure stops instead of restarting forever; the duplicate-daemon exit
+  status stays in `RestartPreventExitStatus`. The systemd unit is now the
+  only autostart owner: it removes the XDG entry that `tonguetyped autostart
+  enable` writes, and that command refuses to create one while the unit
+  exists, naming the unit. Saving settings still succeeds when the entry is
+  owned elsewhere, but it never writes a competing entry, and the saved
+  config records autostart as off instead of claiming an entry the app
+  refused to write.
+
 ## 0.3.0
 
 ### Added
