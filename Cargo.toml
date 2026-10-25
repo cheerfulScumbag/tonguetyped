@@ -137,8 +137,9 @@ vad-rs = { git = "https://github.com/cjpais/vad-rs", rev = "2a412ed858695b9251f3
 rusqlite = { version = "0.32", features = ["bundled"] }
 indicatif = "0.17"
 num_cpus = "1"
-# Reads WAV input for `tonguetyped transcribe <file>` (src/transcribe.rs); the
-# live capture path uses cpal/rubato and never touches WAV files.
+# Reads WAV input for `tonguetyped transcribe <file>` (src/transcribe.rs) and
+# decodes the embedded feedback sounds (src/feedback.rs); the live capture path
+# uses cpal/rubato directly.
 hound = "3"
 reqwest = { version = "0.12", features = ["stream"] }
 directories = "5"

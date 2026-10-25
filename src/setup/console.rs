@@ -382,6 +382,14 @@ pub(super) enum Effect {
     FetchLastResult,
     OverlayShow(OverlayConfig),
     OverlayHide,
+    /// Play one of the embedded feedback sounds through the same in-process
+    /// path the daemon uses. The console uses it to confirm the Feedback
+    /// sounds toggle; it never saves the config or asks the daemon.
+    FeedbackSound {
+        event: FeedbackEvent,
+        volume: f64,
+        device: String,
+    },
     OpenShortcutDialog,
     CancelShortcutDialog,
     Download(String),
@@ -400,6 +408,9 @@ pub(super) enum TaskResult {
     /// Whether the desktop accepted the overlay test (a layer-shell
     /// compositor is available).
     OverlayShown(bool),
+    /// The on-demand feedback-sound preview: `Err` carries the real playback
+    /// failure so the console can show it instead of leaving it in a journal.
+    FeedbackSound(Result<(), String>),
     Shortcut(Result<ReconfigureOutcome, String>),
     DownloadProgress(u64, u64),
     Download(Result<crate::model::DownloadOutcome, String>),
@@ -1200,6 +1211,17 @@ impl App {
             _ => return,
         };
         *flag = !*flag;
+        // Turning sounds on is the moment the user expects to hear one. Play
+        // the Success sound through the console's own cpal path immediately,
+        // with the in-memory volume and device, so a bad output device shows
+        // up here rather than in the daemon journal after the next dictation.
+        if control == Control::FeedbackSounds && self.config.audio.feedback_sounds {
+            self.effects.push(Effect::FeedbackSound {
+                event: FeedbackEvent::Success,
+                volume: self.config.audio.feedback_volume,
+                device: self.config.audio.feedback_device.clone(),
+            });
+        }
     }
 
     // ---- text fields ----------------------------------------------------
@@ -1769,6 +1791,10 @@ impl App {
                      notifications here instead.",
                 );
             }
+            TaskResult::FeedbackSound(Ok(())) => {}
+            TaskResult::FeedbackSound(Err(error)) => {
+                self.error(format!("Feedback sounds unavailable: {error}"));
+            }
             TaskResult::Shortcut(outcome) => {
                 self.shortcut_waiting = false;
                 if let Ok(ReconfigureOutcome::Changed {
@@ -2259,6 +2285,25 @@ impl Executor {
                 },
                 |_| TaskResult::LastResult(None),
             ),
+            Effect::FeedbackSound {
+                event,
+                volume,
+                device,
+            } => {
+                // Playback is a short blocking call (device open plus the
+                // sound's own length), so keep it off the render thread and
+                // report its real outcome back through the usual slot.
+                let slot: Slot = Arc::new(Mutex::new(None));
+                let slot_for_thread = slot.clone();
+                std::thread::spawn(move || {
+                    let result = crate::feedback::play_feedback_sound(event, volume, &device)
+                        .map_err(|error| error.to_string());
+                    if let Ok(mut guard) = slot_for_thread.lock() {
+                        *guard = Some(TaskResult::FeedbackSound(result));
+                    }
+                });
+                self.slots.push(slot);
+            }
             effect @ (Effect::OverlayShow(_) | Effect::OverlayHide) => {
                 let reports = matches!(effect, Effect::OverlayShow(_));
                 let slot: Slot = Arc::new(Mutex::new(None));

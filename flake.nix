@@ -136,7 +136,6 @@
                 wrapProgram $out/bin/tonguetyped \
                   --prefix PATH : ${
                     pkgs.lib.makeBinPath [
-                      pkgs.libcanberra-gtk3
                       pkgs.wtype
                       pkgs.dotool
                       pkgs.wl-clipboard
