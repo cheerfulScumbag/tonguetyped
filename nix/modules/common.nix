@@ -77,8 +77,9 @@ in
         - `none`: start it yourself, for example with `exec-once` in a
           compositor configuration.
 
-        Do not also run `tonguetyped autostart enable`; that writes a second
-        autostart entry.
+        With `systemd`, the daemon unit owns autostart: it removes the XDG
+        entry `tonguetyped autostart enable` writes, and that command refuses
+        to create one while the unit exists.
       '';
     };
 

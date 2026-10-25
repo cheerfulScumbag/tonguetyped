@@ -19,6 +19,8 @@ fn autostart_lifecycle_updates_config_and_desktop_entry() {
         Command::new(binary)
             .args(arguments)
             .env("XDG_CONFIG_HOME", &config_home)
+            // Keep the host's own NixOS module unit out of the result.
+            .env("TONGUETYPED_SYSTEMD_USER_DIR", root.join("systemd-user"))
             .output()
             .unwrap()
     };
@@ -49,6 +51,46 @@ fn autostart_lifecycle_updates_config_and_desktop_entry() {
     assert!(run(&["autostart", "enable"]).status.success());
     assert!(entry.exists());
 
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn enable_refuses_when_a_systemd_unit_owns_autostart() {
+    let root = std::env::temp_dir().join(format!(
+        "tt-autostart-systemd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let config_home = root.join("config");
+    let entry = config_home.join("autostart/tonguetyped.desktop");
+    let unit = config_home.join("systemd/user/tonguetyped.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(&unit, "[Service]\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tonguetyped"))
+        .args(["autostart", "enable"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("TONGUETYPED_SYSTEMD_USER_DIR", root.join("systemd-user"))
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "enable must fail while a systemd unit owns autostart"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let unit_display = unit.display().to_string();
+    assert!(
+        stderr.contains("owned by the systemd unit") && stderr.contains(&unit_display),
+        "the refusal must name the unit that owns autostart:\n{stderr}"
+    );
+    assert!(
+        !entry.exists(),
+        "a refused enable must not write the XDG entry"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -108,12 +150,14 @@ fn concurrent_commands_leave_config_and_entry_consistent() {
         let mut enable = Command::new(binary)
             .args(["autostart", "enable"])
             .env("XDG_CONFIG_HOME", &config_home)
+            .env("TONGUETYPED_SYSTEMD_USER_DIR", root.join("systemd-user"))
             .stdout(Stdio::null())
             .spawn()
             .unwrap();
         let mut disable = Command::new(binary)
             .args(["autostart", "disable"])
             .env("XDG_CONFIG_HOME", &config_home)
+            .env("TONGUETYPED_SYSTEMD_USER_DIR", root.join("systemd-user"))
             .stdout(Stdio::null())
             .spawn()
             .unwrap();

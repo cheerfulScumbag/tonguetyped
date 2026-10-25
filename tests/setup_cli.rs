@@ -29,6 +29,11 @@ fn run_setup(
     command
         .arg("setup")
         .env("XDG_CONFIG_HOME", config_home)
+        // Keep the host's own NixOS module unit out of the result.
+        .env(
+            "TONGUETYPED_SYSTEMD_USER_DIR",
+            config_home.join("systemd-user"),
+        )
         .env("NO_COLOR", "1")
         // Pin the session so `enigo` (X11-only) can never count as a typing
         // helper on a developer's desktop, and replace PATH entirely when a
@@ -131,6 +136,50 @@ fn setup_writes_a_complete_configuration_without_color() {
     let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
     let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
     assert!(!config.startup.autostart);
+    assert!(!root.join("autostart/tonguetyped.desktop").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn setup_does_not_persist_autostart_when_a_systemd_unit_owns_it() {
+    let root = root("systemd-owns-autostart");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let wtype = bin.join("wtype");
+    std::fs::write(&wtype, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let unit = root.join("systemd/user/tonguetyped.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(&unit, "[Service]\n").unwrap();
+
+    // Same answers as the full-config run above, choosing "yes" at autostart.
+    let output = run_setup(
+        &root,
+        &answers(&["", "", "2", "2", "2", "", "", "", "", "", "", "2", ""]),
+        Some(&bin),
+        "KDE",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("autostart is owned by"),
+        "setup must warn that the systemd unit owns autostart:\n{stderr}"
+    );
+
+    let content = std::fs::read_to_string(root.join("tonguetyped/config.toml")).unwrap();
+    let config: tonguetyped::config::Config = toml::from_str(&content).unwrap();
+    assert!(
+        !config.startup.autostart,
+        "persisted config must not claim autostart is on when a systemd unit owns it"
+    );
     assert!(!root.join("autostart/tonguetyped.desktop").exists());
     std::fs::remove_dir_all(root).unwrap();
 }

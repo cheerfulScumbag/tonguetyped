@@ -86,4 +86,14 @@ rec {
   '';
 
   serviceDescription = "TongueTyped dictation daemon";
+
+  # Start-rate limits both units share. Five failed starts inside five minutes
+  # leave the unit failed instead of retrying forever. The systemd default
+  # (five starts in ten seconds) is shorter than a NixOS rebuild, so failures
+  # from before and after a rebuild would not add up and a loop could restart
+  # after every switch.
+  unitStartLimits = {
+    StartLimitIntervalSec = 300;
+    StartLimitBurst = 5;
+  };
 }

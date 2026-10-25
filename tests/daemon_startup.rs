@@ -144,6 +144,85 @@ fn ipc_starts_when_shortcut_portal_is_unavailable() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Regression for the systemd restart loop: a manual daemon held the lock,
+/// every unit start exited 1, and `Restart=on-failure` retried forever. The
+/// duplicate start must keep exiting 3, which the units name in
+/// `RestartPreventExitStatus`, and leave the live daemon serving.
+#[test]
+fn duplicate_daemon_starts_exit_three_and_leave_the_live_daemon_running() {
+    let root = std::env::temp_dir().join(format!("tt-daemon-duplicate-{}", std::process::id()));
+    let config_home = root.join("config");
+    let data_home = root.join("data");
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(config_home.join("tonguetyped")).unwrap();
+    std::fs::create_dir_all(data_home.join("tonguetyped/models")).unwrap();
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    std::fs::write(
+        config_home.join("tonguetyped/config.toml"),
+        "[audio]\nfeedback_sounds = false\n[transcription]\nvad_enabled = false\n",
+    )
+    .unwrap();
+    install_default_model_stub(&data_home);
+
+    let binary = env!("CARGO_BIN_EXE_tonguetyped");
+    let mut daemon = Daemon(
+        Command::new(binary)
+            .arg("daemon")
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_DATA_HOME", &data_home)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let socket = runtime_dir.join("tonguetyped/control.sock");
+    wait_for_socket(&socket);
+
+    // Each attempt stands for one systemd start of the unit. All of them must
+    // fail the same non-retryable way, so count them and prove the original
+    // daemon is untouched rather than restarted.
+    for attempt in 0..3 {
+        let duplicate = Command::new(binary)
+            .arg("daemon")
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_DATA_HOME", &data_home)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+            .output()
+            .unwrap();
+        assert_eq!(
+            duplicate.status.code(),
+            Some(3),
+            "duplicate attempt {} must exit 3 so systemd does not restart it",
+            attempt + 1
+        );
+        assert!(String::from_utf8(duplicate.stderr)
+            .unwrap()
+            .contains("daemon is already running"));
+    }
+
+    assert!(
+        daemon.0.try_wait().unwrap().is_none(),
+        "the live daemon must keep running after the duplicate starts"
+    );
+    let status = Command::new(binary)
+        .arg("status")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "the live daemon must still answer IPC: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn doctor_without_daemon_defers_shortcut_binding_test() {
     let root = std::env::temp_dir().join(format!("tt-doctor-{}", std::process::id()));
