@@ -844,6 +844,311 @@ fn the_table_cursor_moves_and_pages() {
     assert_ne!(app.focused(), Control::ModelTable, "l leaves the table");
 }
 
+/// The catalog index of the default active model.
+fn active_index() -> usize {
+    crate::catalog::ENTRIES
+        .iter()
+        .position(|entry| entry.id == crate::catalog::DEFAULT_MODEL_ID)
+        .expect("the default active model is in the catalog")
+}
+
+#[test]
+fn the_table_shows_the_entry_count_and_the_filter_keys() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    let text = screen(&app, 80, 24);
+    assert!(
+        text.contains(&format!("Speech models {}", crate::catalog::ENTRIES.len())),
+        "{text}"
+    );
+    for key in ["f family", "t quant", "i installed", "s sort"] {
+        assert!(text.contains(key), "missing {key:?}:\n{text}");
+    }
+}
+
+#[test]
+fn installed_family_and_quant_filters_are_reachable_and_clearable_from_the_table() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    app.installed
+        .iter_mut()
+        .for_each(|installed| *installed = false);
+
+    // Any -> installed: nothing is installed, so the table keeps its count
+    // and says how to get the rows back.
+    press(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.model_rows(), Vec::<usize>::new());
+    let text = screen(&app, 80, 24);
+    assert!(text.contains(&format!(
+        "Speech models 0/{}",
+        crate::catalog::ENTRIES.len()
+    )));
+    assert!(text.contains("installed"), "{text}");
+    assert!(text.contains("c clear"), "{text}");
+    assert!(text.contains("No models match"), "{text}");
+
+    // Installed -> not installed: every row is back.
+    press(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.model_rows().len(), crate::catalog::ENTRIES.len());
+    assert!(screen(&app, 80, 24).contains("not installed"));
+
+    // Installed -> any, then the family cycle starts at the first family in
+    // catalog order and every kept row really is that family.
+    press(&mut app, KeyCode::Char('i'));
+    press(&mut app, KeyCode::Char('f'));
+    let family = crate::catalog::ENTRIES[0].info().family_label();
+    assert_eq!(app.model_filter.family, Some(family));
+    let rows = app.model_rows();
+    assert!(!rows.is_empty());
+    assert!(rows
+        .iter()
+        .all(|index| crate::catalog::ENTRIES[*index].info().family_label() == family));
+    assert!(screen(&app, 80, 24).contains(family));
+
+    // The quantization cycle starts at the first quant in catalog order.
+    press(&mut app, KeyCode::Char('t'));
+    let quant = crate::catalog::ENTRIES[0].quant;
+    assert_eq!(app.model_filter.quant, Some(quant));
+    let rows = app.model_rows();
+    assert!(!rows.is_empty());
+    assert!(rows
+        .iter()
+        .all(|index| crate::catalog::ENTRIES[*index].quant == quant));
+
+    // c restores the whole catalog but leaves the sort alone.
+    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('c'));
+    assert!(!app.model_filter.is_active());
+    assert_eq!(app.model_rows().len(), crate::catalog::ENTRIES.len());
+    assert_ne!(
+        app.model_sort,
+        ModelSort::Catalog,
+        "clear only clears filters"
+    );
+    let text = screen(&app, 80, 24);
+    assert!(text.contains(&format!("Speech models {}", crate::catalog::ENTRIES.len())));
+    assert!(text.contains("f family  t quant  i installed  s size \u{2191}"));
+}
+
+#[test]
+fn filter_keys_only_work_while_the_table_has_focus() {
+    let mut app = app();
+    app.tab = Tab::Audio;
+    for key in [
+        KeyCode::Char('i'),
+        KeyCode::Char('f'),
+        KeyCode::Char('t'),
+        KeyCode::Char('s'),
+        KeyCode::Char('c'),
+    ] {
+        press(&mut app, key);
+    }
+    assert!(!app.model_filter.is_active());
+    assert_eq!(app.model_sort, ModelSort::Catalog);
+}
+
+#[test]
+fn filtering_and_sorting_never_edit_the_configuration() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    for key in [
+        KeyCode::Char('i'),
+        KeyCode::Char('f'),
+        KeyCode::Char('t'),
+        KeyCode::Char('s'),
+    ] {
+        press(&mut app, key);
+    }
+    assert!(app.model_filter.is_active());
+    assert_eq!(app.model_sort, ModelSort::SizeAsc);
+    assert!(!app.dirty(), "the table view is session state, not an edit");
+    assert!(app.exit.is_none());
+}
+
+#[test]
+fn a_filter_that_hides_rows_clamps_the_cursor_to_a_visible_one() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    let kept = 60;
+    app.installed
+        .iter_mut()
+        .for_each(|installed| *installed = false);
+    app.installed[kept] = true;
+    app.model_cursor = 0;
+
+    press(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.model_rows(), vec![kept]);
+    assert_eq!(
+        app.model_cursor, kept,
+        "the cursor lands on the only row left"
+    );
+    assert_eq!(app.focused(), Control::ModelTable);
+
+    // The single remaining row is both the first and the last, so k stays on
+    // it rather than stepping into a hidden row.
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.model_cursor, kept);
+    assert_eq!(app.focused(), Control::ModelTable);
+
+    // Clearing brings back every row without moving the cursor off its model.
+    press(&mut app, KeyCode::Char('c'));
+    assert_eq!(app.model_cursor, kept);
+    assert_eq!(app.model_rows().len(), crate::catalog::ENTRIES.len());
+}
+
+#[test]
+fn paging_stays_inside_the_filtered_rows() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    let (first, last) = (3, 7);
+    app.installed
+        .iter_mut()
+        .for_each(|installed| *installed = false);
+    app.installed[first] = true;
+    app.installed[last] = true;
+    app.model_cursor = 0;
+    press(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.model_rows(), vec![first, last]);
+    assert_eq!(app.model_cursor, first);
+    press(&mut app, KeyCode::PageDown);
+    assert_eq!(app.model_cursor, last);
+    press(&mut app, KeyCode::PageDown);
+    assert_eq!(
+        app.model_cursor, last,
+        "paging stops at the last visible row"
+    );
+    press(&mut app, KeyCode::PageUp);
+    assert_eq!(app.model_cursor, first);
+}
+
+#[test]
+fn the_active_sort_is_named_in_the_header_and_the_status_line() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.model_sort, ModelSort::SizeAsc);
+    let text = screen(&app, 80, 24);
+    assert!(text.contains("Size\u{2191}"), "{text}");
+    assert!(text.contains("s size \u{2191}"), "{text}");
+
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.model_sort, ModelSort::SizeDesc);
+    let text = screen(&app, 80, 24);
+    assert!(text.contains("Size\u{2193}"), "{text}");
+
+    // A full cycle returns to catalog order and drops the marker.
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('s'));
+    }
+    assert_eq!(app.model_sort, ModelSort::Catalog);
+    let text = screen(&app, 80, 24);
+    assert!(!text.contains("Size\u{2191}") && !text.contains("Size\u{2193}"));
+}
+
+#[test]
+fn sorting_keeps_the_cursor_on_its_model_and_the_active_model_selectable() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    app.installed
+        .iter_mut()
+        .for_each(|installed| *installed = true);
+    let active = active_index();
+    app.model_cursor = active;
+
+    for _ in 0..6 {
+        // cycle every order once; the cursor must stay on the same model
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.model_cursor, active);
+        assert_eq!(
+            app.config.model.active_model,
+            crate::catalog::DEFAULT_MODEL_ID
+        );
+    }
+    assert_eq!(app.model_sort, ModelSort::Catalog);
+
+    press(&mut app, KeyCode::Char('s'));
+    let family = crate::catalog::ENTRIES[active].info().family_label();
+    while app.model_filter.family != Some(family) {
+        press(&mut app, KeyCode::Char('f'));
+    }
+    assert!(app.model_rows().contains(&active));
+    assert_eq!(
+        app.model_cursor, active,
+        "the filtered-out cursor is kept visible"
+    );
+
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(
+        app.config.model.active_model,
+        crate::catalog::DEFAULT_MODEL_ID,
+        "the active row can still be selected without re-downloading"
+    );
+    assert!(app.take_effects().is_empty());
+}
+
+#[test]
+fn selecting_a_filtered_and_sorted_row_selects_that_catalog_model() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    app.installed
+        .iter_mut()
+        .for_each(|installed| *installed = false);
+    while app.model_filter.quant != Some("F16") {
+        press(&mut app, KeyCode::Char('t'));
+    }
+    press(&mut app, KeyCode::Char('s'));
+    let target = app
+        .model_rows()
+        .into_iter()
+        .find(|index| {
+            let mut config = app.config.clone();
+            config.model.active_model = crate::catalog::ENTRIES[*index].id.to_string();
+            config.validate().is_ok()
+        })
+        .expect("an F16 entry the default recording limit accepts");
+    app.model_cursor = target;
+    let text = screen(&app, 80, 24);
+    assert!(
+        text.contains("F16"),
+        "the row being selected is on screen:\n{text}"
+    );
+    press(&mut app, KeyCode::Char(' '));
+    let id = crate::catalog::ENTRIES[target].id;
+    assert_eq!(app.config.model.active_model, id);
+    assert!(
+        matches!(&app.take_effects()[..], [Effect::Download(wanted)] if wanted == id),
+        "the selected row's own model downloads"
+    );
+}
+
+#[test]
+fn a_filter_that_hides_the_active_model_names_it() {
+    let mut app = app();
+    focus(&mut app, Control::ModelTable);
+    let active = &crate::catalog::ENTRIES[active_index()];
+    // The first family in catalog order is Whisper, which is the default
+    // active model's own family; the second is not.
+    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('f'));
+    assert_ne!(app.model_filter.family, Some(active.info().family_label()));
+    assert!(!app.model_rows().contains(&active_index()));
+    let text = screen(&app, 80, 24);
+    assert!(
+        text.contains(&format!(
+            "! Active {} hidden by filters",
+            crate::catalog::ENTRIES[active_index()]
+                .id
+                .replace(&format!("-{}", active.quant.to_ascii_lowercase()), "")
+        )),
+        "{text}"
+    );
+    assert!(text.contains(&format!(
+        "Speech models {}/{}",
+        app.model_rows().len(),
+        crate::catalog::ENTRIES.len()
+    )));
+}
+
 #[test]
 fn ctrl_r_opens_the_shortcut_dialog_and_esc_keeps_the_binding() {
     let mut app = app();

@@ -282,7 +282,7 @@ the terminal; `tonguetyped setup` opens the same console:
 | Tab | What it holds |
 | --- | --- |
 | **[1] Audio & Capture** | The microphone list with a live input-level meter, a Start/Stop Dictation card that drives the running daemon, the Hold or Toggle activation mode, the desktop shortcut, and the pause-media and feedback-sound switches |
-| **[2] Model & Engine** | The model catalog (ID, quantization, size, live-text support) with a detail card for the highlighted model, the inference backend (backends this build or machine cannot run are marked `×`), translation to English, and a drawer with the vocabulary prompt and the Whisper decoding knobs |
+| **[2] Model & Engine** | The model catalog (ID, quantization, size, live-text support), filterable by install state, family, and quantization and sortable by any column, with a detail card for the highlighted model, the inference backend (backends this build or machine cannot run are marked `×`), translation to English, and a drawer with the vocabulary prompt and the Whisper decoding knobs |
 | **[3] Output & Delivery** | The delivery method (Type, Paste, Clipboard, None) and the settings that method uses (typing helper, paste keys, pressing Enter after the text), spoken punctuation, filler removal, replacements, the cleanup command and its timeout, and transcript history with its retention limits and export folder |
 | **[4] Interface & System** | Overlay on or off, position, style, look, and waveform shape; a test that shows the real overlay on your desktop for four seconds; daemon Start, Stop, and Restart; and starting TongueTyped when you sign in |
 

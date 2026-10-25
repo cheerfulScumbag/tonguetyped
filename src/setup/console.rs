@@ -36,11 +36,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod model_view;
 mod render;
 #[cfg(test)]
 mod tests;
 mod theme;
 
+use model_view::{ModelFilter, ModelSort};
 use theme::Theme;
 
 /// How long the desktop overlay test keeps the real overlay on screen.
@@ -440,6 +442,10 @@ pub(super) struct App {
     focus: [Control; 4],
     pub(super) model_cursor: usize,
     pub(super) installed: Vec<bool>,
+    /// Which rows the Speech models table shows and in what order. Session
+    /// state only: it never changes the catalog or the saved configuration.
+    model_filter: ModelFilter,
+    model_sort: ModelSort,
     pub(super) editing: Option<(Field, TextField)>,
     pub(super) drawer: Option<usize>,
     pub(super) message: Option<Message>,
@@ -508,6 +514,8 @@ impl App {
             ],
             model_cursor,
             installed,
+            model_filter: ModelFilter::default(),
+            model_sort: ModelSort::default(),
             editing: None,
             drawer: None,
             message: None,
@@ -1324,6 +1332,11 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.move_horizontal(1),
             KeyCode::Char(' ') => self.activate(false),
             KeyCode::Enter => self.activate(true),
+            KeyCode::Char('i') => self.cycle_model_install_filter(),
+            KeyCode::Char('f') => self.cycle_model_family(),
+            KeyCode::Char('t') => self.cycle_model_quant(),
+            KeyCode::Char('s') => self.cycle_model_sort(),
+            KeyCode::Char('c') => self.clear_model_filters(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit_saving(),
             _ => {}
         }
@@ -1439,10 +1452,18 @@ impl App {
     fn move_vertical(&mut self, delta: isize) {
         let focused = self.focused();
         if focused == Control::ModelTable {
-            let last = crate::catalog::ENTRIES.len() - 1;
-            let next = self.model_cursor as isize + delta;
-            if (0..=last as isize).contains(&next) {
-                self.model_cursor = next as usize;
+            let rows = self.model_rows();
+            let Some(position) = rows.iter().position(|index| *index == self.model_cursor) else {
+                // The cursor's model is filtered out; land on the nearest row
+                // that is on screen instead of stepping from a hidden row.
+                if let Some(first) = rows.first() {
+                    self.model_cursor = *first;
+                }
+                return;
+            };
+            let next = position as isize + delta;
+            if (0..rows.len() as isize).contains(&next) {
+                self.model_cursor = rows[next as usize];
                 return;
             }
             if delta < 0 {
@@ -1459,8 +1480,15 @@ impl App {
 
     fn move_table(&mut self, delta: isize) {
         if self.focused() == Control::ModelTable {
-            let last = crate::catalog::ENTRIES.len() as isize - 1;
-            self.model_cursor = (self.model_cursor as isize + delta).clamp(0, last) as usize;
+            let rows = self.model_rows();
+            let Some(position) = rows.iter().position(|index| *index == self.model_cursor) else {
+                if let Some(first) = rows.first() {
+                    self.model_cursor = *first;
+                }
+                return;
+            };
+            let next = (position as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
+            self.model_cursor = rows[next];
         }
     }
 
@@ -1544,6 +1572,97 @@ impl App {
             });
             self.effects.push(Effect::Download(entry.id.to_string()));
         }
+    }
+
+    // ---- model table view ----------------------------------------------
+
+    /// Whether the table owns the keys right now.
+    fn table_focused(&self) -> bool {
+        self.focused() == Control::ModelTable && self.drawer.is_none()
+    }
+
+    /// The catalog indices the table shows, in order. Cursor movement,
+    /// scrolling, and rendering all read the same list.
+    pub(super) fn model_rows(&self) -> Vec<usize> {
+        model_view::visible(self.model_filter, self.model_sort, &self.installed)
+    }
+
+    /// Whether the active model is in the catalog but hidden by a filter, so
+    /// the table can say so instead of silently dropping its marker.
+    pub(super) fn active_model_hidden(&self, rows: &[usize]) -> bool {
+        self.model_filter.is_active()
+            && crate::catalog::ENTRIES
+                .iter()
+                .position(|entry| entry.id == self.config.model.active_model)
+                .is_some_and(|index| !rows.contains(&index))
+    }
+
+    /// After the visible rows change, keep the cursor on a row that is still
+    /// on screen and re-centre the table around it. An empty result keeps the
+    /// cursor where it was, so the detail pane still describes the last
+    /// inspected model while the table explains why nothing matches.
+    fn keep_model_cursor_visible(&mut self) {
+        let rows = self.model_rows();
+        if rows.is_empty() || rows.contains(&self.model_cursor) {
+            return;
+        }
+        let cursor = self.model_cursor;
+        self.model_cursor = rows
+            .iter()
+            .copied()
+            .min_by_key(|index| index.abs_diff(cursor))
+            .unwrap_or(cursor);
+    }
+
+    fn model_view_changed(&mut self) {
+        self.keep_model_cursor_visible();
+        self.table_scroll.set(None);
+    }
+
+    /// `i`: cycle any -> installed -> not installed -> any.
+    pub(super) fn cycle_model_install_filter(&mut self) {
+        if !self.table_focused() {
+            return;
+        }
+        self.model_filter.install = self.model_filter.install.next();
+        self.model_view_changed();
+    }
+
+    /// `f`: cycle every family in catalog order, then back to all.
+    pub(super) fn cycle_model_family(&mut self) {
+        if !self.table_focused() {
+            return;
+        }
+        self.model_filter.family =
+            model_view::cycle(&model_view::families(), self.model_filter.family);
+        self.model_view_changed();
+    }
+
+    /// `t`: cycle every quantization in catalog order, then back to all.
+    pub(super) fn cycle_model_quant(&mut self) {
+        if !self.table_focused() {
+            return;
+        }
+        self.model_filter.quant = model_view::cycle(&model_view::quants(), self.model_filter.quant);
+        self.model_view_changed();
+    }
+
+    /// `s`: cycle the sort order, keeping the cursor on the same model.
+    pub(super) fn cycle_model_sort(&mut self) {
+        if !self.table_focused() {
+            return;
+        }
+        self.model_sort = self.model_sort.next();
+        self.model_view_changed();
+    }
+
+    /// `c`: clear every filter, showing the whole catalog again.
+    pub(super) fn clear_model_filters(&mut self) {
+        if !self.table_focused() {
+            return;
+        }
+        self.model_filter.clear();
+        self.model_view_changed();
     }
 
     fn toggle_dictation(&mut self) {
@@ -1667,16 +1786,24 @@ impl App {
                 }
             }
             TaskResult::Download(outcome) => {
+                let installed_id = match (&self.download, outcome.is_ok()) {
+                    (Some(download), true) => Some(download.id.clone()),
+                    _ => None,
+                };
+                if let Some(index) = installed_id.as_deref().and_then(|id| {
+                    crate::catalog::ENTRIES
+                        .iter()
+                        .position(|entry| entry.id == id)
+                }) {
+                    self.installed[index] = true;
+                }
                 if let Some(download) = &mut self.download {
-                    if outcome.is_ok() {
-                        if let Some(index) = crate::catalog::ENTRIES
-                            .iter()
-                            .position(|entry| entry.id == download.id)
-                        {
-                            self.installed[index] = true;
-                        }
-                    }
                     download.result = Some(outcome);
+                }
+                if installed_id.is_some() {
+                    // An installed/not-installed filter can make this row
+                    // disappear now that the download finished.
+                    self.keep_model_cursor_visible();
                 }
             }
         }

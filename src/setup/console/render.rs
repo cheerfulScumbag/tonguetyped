@@ -5,6 +5,7 @@
 //! the window around the focused row is copied onto the screen, so a terminal
 //! too short for a tab scrolls instead of clipping it.
 
+use super::model_view::ModelSort;
 use super::{App, Control, DaemonState, Field, Kind, Pane, Row, Tab, Tone};
 use crate::config::DECODE_KNOBS;
 use ratatui::buffer::Buffer;
@@ -648,7 +649,14 @@ impl App {
 
     fn render_table(&self, area: Rect, buf: &mut Buffer) {
         let focused = self.focused() == Control::ModelTable && self.drawer.is_none();
-        let block = self.pane_block("Speech models", focused);
+        let entries = crate::catalog::ENTRIES;
+        let rows = self.model_rows();
+        let title = if self.model_filter.is_active() {
+            format!("Speech models {}/{}", rows.len(), entries.len())
+        } else {
+            format!("Speech models {}", entries.len())
+        };
+        let block = self.pane_block(&title, focused);
         let inner = block.inner(area);
         block.render(area, buf);
         if inner.height == 0 || inner.width < 12 {
@@ -659,9 +667,24 @@ impl App {
         let id_width = usize::from(inner.width)
             .saturating_sub(prefix + quant + size + live)
             .max(4);
+        let mark = |column: ModelSort| match (self.model_sort, column) {
+            (ModelSort::Id, ModelSort::Id) => "\u{2191}",
+            (ModelSort::Quant, ModelSort::Quant) => "\u{2191}",
+            (ModelSort::Live, ModelSort::Live) => "\u{2193}",
+            _ => "",
+        };
+        let size_mark = match self.model_sort {
+            ModelSort::SizeAsc => "\u{2191}",
+            ModelSort::SizeDesc => "\u{2193}",
+            _ => "",
+        };
         let header = format!(
             "{:prefix$}{:<id_width$}{:<quant$}{:>size$}{:>live$}",
-            "", "ID", "Quant", "Size", "Live"
+            "",
+            format!("ID{}", mark(ModelSort::Id)),
+            format!("Quant{}", mark(ModelSort::Quant)),
+            format!("Size{size_mark}"),
+            format!("Live{}", mark(ModelSort::Live)),
         );
         fit(
             vec![Span::styled(header, self.theme.heading())],
@@ -669,35 +692,94 @@ impl App {
         )
         .render(Rect::new(inner.x, inner.y, inner.width, 1), buf);
 
-        let visible = usize::from(inner.height - 1);
+        // The line under the header keeps the count, the active filters, and
+        // the keys that change them on screen together, so a filtered table
+        // never looks empty by accident.
+        let active_hidden = self.active_model_hidden(&rows);
+        let mut status = Vec::new();
+        if self.model_filter.is_active() {
+            for (index, chip) in self.model_filter.chips().into_iter().enumerate() {
+                if index > 0 {
+                    status.push(Span::styled("  ", self.theme.dim()));
+                }
+                status.push(Span::styled(chip.to_string(), self.theme.accent()));
+            }
+            status.push(Span::styled("  c clear", self.theme.dim()));
+        } else {
+            status.push(Span::styled(
+                "f family  t quant  i installed",
+                self.theme.dim(),
+            ));
+            status.push(Span::styled("  s ", self.theme.dim()));
+            if self.model_sort == ModelSort::Catalog {
+                status.push(Span::styled("sort", self.theme.dim()));
+            } else {
+                status.push(Span::styled(self.model_sort.label(), self.theme.accent()));
+            }
+        }
+        let show_status = inner.height > 1;
+        let show_warning = active_hidden && inner.height > 2;
+        let status_height = u16::from(show_status) + u16::from(show_warning);
+        if show_status {
+            fit(status, inner.width).render(Rect::new(inner.x, inner.y + 1, inner.width, 1), buf);
+        }
+        let body = inner.y + 1 + status_height;
+        if show_warning {
+            let active = &self.config.model.active_model;
+            let id = entries
+                .iter()
+                .find(|entry| entry.id == active.as_str())
+                .map(short_id)
+                .unwrap_or(active.as_str());
+            fit(
+                vec![Span::styled(
+                    format!("! Active {id} hidden by filters"),
+                    self.theme.warn(),
+                )],
+                inner.width,
+            )
+            .render(Rect::new(inner.x, inner.y + 2, inner.width, 1), buf);
+        }
+        let visible = usize::from(inner.height.saturating_sub(1 + status_height));
+        if rows.is_empty() {
+            if visible > 0 {
+                fit(
+                    vec![Span::styled(
+                        "No models match - press c to clear the filters",
+                        self.theme.warn(),
+                    )],
+                    inner.width,
+                )
+                .render(Rect::new(inner.x, body, inner.width, 1), buf);
+            }
+            return;
+        }
         if visible == 0 {
             return;
         }
-        let entries = crate::catalog::ENTRIES;
-        let max_offset = entries.len().saturating_sub(visible);
+        let cursor = rows
+            .iter()
+            .position(|index| *index == self.model_cursor)
+            .unwrap_or(0);
+        let max_offset = rows.len().saturating_sub(visible);
         // The first frame centres the active model; later frames scroll only
         // as far as the cursor needs.
         let mut offset = self
             .table_scroll
             .get()
-            .unwrap_or_else(|| self.model_cursor.saturating_sub(visible / 2))
+            .unwrap_or_else(|| cursor.saturating_sub(visible / 2))
             .min(max_offset);
-        if self.model_cursor < offset {
-            offset = self.model_cursor;
-        } else if self.model_cursor >= offset + visible {
-            offset = self.model_cursor + 1 - visible;
+        if cursor < offset {
+            offset = cursor;
+        } else if cursor >= offset + visible {
+            offset = cursor + 1 - visible;
         }
         self.table_scroll.set(Some(offset));
-        for (row, (index, entry)) in entries
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(visible)
-            .enumerate()
-        {
-            let rect = Rect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1);
+        for (row, index) in rows.iter().skip(offset).take(visible).enumerate() {
+            let entry = &entries[*index];
+            let rect = Rect::new(inner.x, body + row as u16, inner.width, 1);
             let active = entry.id == self.config.model.active_model;
-            let cursor = index == self.model_cursor;
+            let cursor = *index == self.model_cursor;
             if cursor && focused {
                 buf.set_style(rect, self.theme.focus());
             }
@@ -733,7 +815,7 @@ impl App {
         if offset > 0 {
             buf.set_string(marker_x, area.y, "\u{25b2}", self.theme.accent());
         }
-        if offset + visible < entries.len() {
+        if offset + visible < rows.len() {
             buf.set_string(
                 marker_x,
                 area.y + area.height - 1,
