@@ -48,7 +48,7 @@ in
         # with `tonguetyped autostart enable`, or a second daemon starts from
         # it and boxes this one out of the runtime socket. The leading `-`
         # tolerates a missing entry.
-        ExecStartPre = "-${helpers.removeStaleAutostart}";
+        ExecStartPre = "-${pkgs.runtimeShell} -c 'rm -f \"\${XDG_CONFIG_HOME:-%h/.config}/autostart/tonguetyped.desktop\"'";
       };
     };
 

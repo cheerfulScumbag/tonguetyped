@@ -73,13 +73,6 @@ rec {
     exec ${lib.getExe' cfg.package "tonguetyped"} daemon
   '';
 
-  # Deletes the XDG autostart entry the app writes with `tonguetyped
-  # autostart enable`. Resolves XDG_CONFIG_HOME the same way applySettings
-  # does, since the systemd user manager (not home-manager) sets it here.
-  removeStaleAutostart = pkgs.writeShellScript "tonguetyped-remove-stale-autostart" ''
-    rm -f "''${XDG_CONFIG_HOME:-$HOME/.config}/autostart/tonguetyped.desktop"
-  '';
-
   desktopEntry = exec: ''
     [Desktop Entry]
     Type=Application
