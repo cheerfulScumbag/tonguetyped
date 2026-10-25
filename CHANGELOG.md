@@ -2,6 +2,18 @@
 
 All notable changes to TongueTyped are recorded here.
 
+## 0.3.2
+
+### Fixed
+
+- The autostart warning test is hermetic under Nix. `buildRustPackage`
+  exports `RUST_LOG` as an empty string, and an empty `EnvFilter` silenced
+  every tracing event, so the setup child never printed the systemd autostart
+  warning the test asserts on. The test now drops any inherited `RUST_LOG`
+  for that child so the app's default filter applies, as it does in a normal
+  user session. The assertions are unchanged, and `nix build` of the package
+  check passes on x86_64 and aarch64 again.
+
 ## 0.3.1
 
 ### Added
