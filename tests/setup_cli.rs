@@ -29,6 +29,11 @@ fn run_setup(
     command
         .arg("setup")
         .env("XDG_CONFIG_HOME", config_home)
+        // Keep the host's own NixOS module unit out of the result.
+        .env(
+            "TONGUETYPED_SYSTEMD_USER_DIR",
+            config_home.join("systemd-user"),
+        )
         .env("NO_COLOR", "1")
         // Pin the session so `enigo` (X11-only) can never count as a typing
         // helper on a developer's desktop, and replace PATH entirely when a

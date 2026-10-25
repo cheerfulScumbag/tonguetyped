@@ -36,7 +36,7 @@ in
         Description = helpers.serviceDescription;
         PartOf = [ "graphical-session.target" ];
         After = [ "graphical-session.target" ];
-      };
+      } // helpers.unitStartLimits;
       Service = {
         ExecStart = "${tonguetyped} daemon";
         Restart = "on-failure";
@@ -45,6 +45,11 @@ in
         # started manually). Retrying cannot succeed while that one lives, so
         # fail honestly once instead of restarting forever.
         RestartPreventExitStatus = "3";
+        # This unit owns autostart. Remove the XDG entry that the app wrote
+        # with `tonguetyped autostart enable`, or a second daemon starts from
+        # it and boxes this one out of the runtime socket. The leading `-`
+        # tolerates a missing entry.
+        ExecStartPre = "-${pkgs.coreutils}/bin/rm -f ${lib.escapeShellArg "${config.xdg.configHome}/autostart/tonguetyped.desktop"}";
       };
       Install.WantedBy = [ "graphical-session.target" ];
     };

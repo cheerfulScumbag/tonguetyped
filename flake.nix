@@ -300,6 +300,7 @@
               ];
             };
             service = nixos.config.systemd.user.services.tonguetyped;
+            unit = nixos.config.systemd.user.units."tonguetyped.service";
           in
           pkgs.runCommand "tonguetyped-nixos-module-check"
             {
@@ -339,6 +340,20 @@
               test "$(stat -c %a $XDG_CONFIG_HOME/tonguetyped/config.toml)" = 600
               test ${pkgs.lib.escapeShellArg (builtins.toJSON service.wantedBy)} = '["graphical-session.target"]'
               test ${pkgs.lib.escapeShellArg service.serviceConfig.RestartPreventExitStatus} = "3"
+
+              # A duplicate daemon exits 3, and the unit must skip that status
+              # instead of restarting into a loop. The explicit start limits
+              # stop any other repeated failure too.
+              cat >unit <<'UNIT'
+              ${unit.text}
+              UNIT
+              grep -qx 'Restart=on-failure' unit
+              grep -qx 'RestartPreventExitStatus=3' unit
+              grep -qx 'StartLimitIntervalSec=300' unit
+              grep -qx 'StartLimitBurst=5' unit
+              # This unit owns autostart, so it drops the app's XDG entry.
+              grep -q 'autostart/tonguetyped.desktop' unit
+
               touch $out
             '';
       }

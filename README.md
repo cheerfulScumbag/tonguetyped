@@ -156,8 +156,9 @@ daemon in each user's graphical session.
   `graphical-session.target`, which KDE, GNOME, and compositors started through
   systemd or uwsm reach. `"xdg"` installs an XDG autostart entry instead;
   `"none"` leaves starting the daemon to you (for example `exec-once` in
-  Hyprland). Do not also run `tonguetyped autostart enable`, which adds a
-  second autostart entry.
+  Hyprland). With `"systemd"` the unit owns autostart: it removes the
+  `tonguetyped.desktop` XDG entry the app wrote, and `tonguetyped autostart
+  enable` refuses to create one while the unit exists.
 - `settings` takes any key from [Configuration](#configuration). Common keys
   are typed, so a misspelled value fails at evaluation time.
 

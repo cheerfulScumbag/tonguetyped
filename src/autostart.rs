@@ -12,6 +12,9 @@ const AUTOSTART_COMMAND: [&str; 2] = ["tonguetyped", "daemon"];
 
 pub fn update(enabled: bool) -> anyhow::Result<()> {
     let _lock = lock()?;
+    if enabled {
+        reject_systemd_owner()?;
+    }
     let mut config = match Config::reload() {
         Ok(config) => config,
         Err(_) if !enabled => return apply(enabled),
@@ -25,14 +28,80 @@ pub fn update(enabled: bool) -> anyhow::Result<()> {
 pub fn save_configuration(config: &Config) -> anyhow::Result<()> {
     let _lock = lock()?;
     let previous = Config::reload().ok().map(|config| config.startup.autostart);
+    if config.startup.autostart {
+        if let Some(unit) = systemd_unit() {
+            // The unit starts the daemon. Saving still succeeds so unrelated
+            // settings changes land, but the app must not add a second owner.
+            tracing::warn!(
+                "autostart is owned by {}; not writing the app's XDG autostart entry",
+                unit.display()
+            );
+            apply(false)?;
+            return save_config_after_apply(config, Some(false));
+        }
+    }
     save_configuration_locked(config, previous)
 }
+
+/// Refuses to add the app's XDG entry when a `tonguetyped.service` user unit
+/// exists. Both Nix modules provide that unit for `autostart = "systemd"`, and
+/// the app cannot tell it apart from a hand-written one. Two owners would race
+/// for the runtime socket at login, so the module or the user must pick one.
+fn reject_systemd_owner() -> anyhow::Result<()> {
+    match systemd_unit() {
+        Some(path) => Err(anyhow::Error::new(SystemdOwnsAutostart(path))),
+        None => Ok(()),
+    }
+}
+
+/// The `tonguetyped.service` user unit a module installs, if any. The user
+/// config directory covers home-manager; `/etc/systemd/user` covers the NixOS
+/// module. Resolution deliberately follows `$XDG_CONFIG_HOME`, so tests
+/// pointing it at a scratch directory never see the host's own unit. The
+/// system-wide directory has an override for the same reason.
+fn systemd_unit() -> Option<PathBuf> {
+    let system_dir = std::env::var_os("TONGUETYPED_SYSTEMD_USER_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/etc/systemd/user"));
+    let mut candidates = Vec::new();
+    if let Some(directories) = directories::BaseDirs::new() {
+        candidates.push(
+            directories
+                .config_dir()
+                .join("systemd/user/tonguetyped.service"),
+        );
+    }
+    candidates.push(system_dir.join("tonguetyped.service"));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+#[derive(Debug)]
+struct SystemdOwnsAutostart(PathBuf);
+
+impl std::fmt::Display for SystemdOwnsAutostart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "autostart is owned by the systemd unit {}; remove that unit or set \
+             programs.tonguetyped.autostart = \"none\" before enabling the XDG entry",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for SystemdOwnsAutostart {}
 
 fn save_configuration_locked(
     config: &Config,
     previous_enabled: Option<bool>,
 ) -> anyhow::Result<()> {
     apply(config.startup.autostart)?;
+    save_config_after_apply(config, previous_enabled)
+}
+
+/// Saves the config after the autostart entry is already in its final state,
+/// rolling that state back if the save fails.
+fn save_config_after_apply(config: &Config, previous_enabled: Option<bool>) -> anyhow::Result<()> {
     if let Err(error) = config.save() {
         let rollback = previous_enabled.map_or(Ok(()), apply);
         if let Err(rollback_error) = rollback {
@@ -156,6 +225,45 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn with_env<T>(name: &str, value: &Path, run: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        let result = run();
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+        result
+    }
+
+    #[test]
+    fn systemd_unit_detection_finds_user_and_system_units() {
+        let _guard = crate::config::XDG_CONFIG_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = test_root("systemd-unit");
+        let system_dir = root.join("system");
+        let unit = root.join("systemd/user/tonguetyped.service");
+
+        with_env("XDG_CONFIG_HOME", &root, || {
+            with_env("TONGUETYPED_SYSTEMD_USER_DIR", &system_dir, || {
+                assert_eq!(systemd_unit(), None);
+
+                fs::create_dir_all(unit.parent().unwrap()).unwrap();
+                fs::write(&unit, "[Service]\n").unwrap();
+                assert_eq!(systemd_unit(), Some(unit.clone()));
+
+                fs::remove_file(&unit).unwrap();
+                let system_unit = system_dir.join("tonguetyped.service");
+                fs::create_dir_all(&system_dir).unwrap();
+                fs::write(&system_unit, "[Service]\n").unwrap();
+                assert_eq!(systemd_unit(), Some(system_unit));
+            });
+        });
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

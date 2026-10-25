@@ -35,6 +35,7 @@ in
       partOf = [ "graphical-session.target" ];
       after = [ "graphical-session.target" ];
       wantedBy = [ "graphical-session.target" ];
+      unitConfig = helpers.unitStartLimits;
       serviceConfig = {
         ExecStart = helpers.session;
         Restart = "on-failure";
@@ -43,6 +44,11 @@ in
         # started manually). Retrying cannot succeed while that one lives, so
         # fail honestly once instead of restarting forever.
         RestartPreventExitStatus = "3";
+        # This unit owns autostart. Remove the XDG entry that the app wrote
+        # with `tonguetyped autostart enable`, or a second daemon starts from
+        # it and boxes this one out of the runtime socket. The leading `-`
+        # tolerates a missing entry.
+        ExecStartPre = "-${pkgs.coreutils}/bin/rm -f %h/.config/autostart/tonguetyped.desktop";
       };
     };
 
