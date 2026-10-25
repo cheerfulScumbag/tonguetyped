@@ -717,10 +717,14 @@ impl App {
                 status.push(Span::styled(self.model_sort.label(), self.theme.accent()));
             }
         }
-        let status_height = 1 + u16::from(active_hidden);
-        fit(status, inner.width).render(Rect::new(inner.x, inner.y + 1, inner.width, 1), buf);
+        let show_status = inner.height > 1;
+        let show_warning = active_hidden && inner.height > 2;
+        let status_height = u16::from(show_status) + u16::from(show_warning);
+        if show_status {
+            fit(status, inner.width).render(Rect::new(inner.x, inner.y + 1, inner.width, 1), buf);
+        }
         let body = inner.y + 1 + status_height;
-        if active_hidden {
+        if show_warning {
             let active = &self.config.model.active_model;
             let id = entries
                 .iter()
